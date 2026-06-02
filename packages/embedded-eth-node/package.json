@@ -13,6 +13,16 @@
 		"viem"
 	],
 	"license": "MIT",
+	"author": "wighawag",
+	"homepage": "https://github.com/wighawag/embedded-eth-node#readme",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/wighawag/embedded-eth-node.git",
+		"directory": "packages/embedded-eth-node"
+	},
+	"bugs": {
+		"url": "https://github.com/wighawag/embedded-eth-node/issues"
+	},
 	"publishConfig": {
 		"access": "public"
 	},
@@ -71,6 +81,7 @@
 		"format:check": "prettier --check .",
 		"build": "tsc -p tsconfig.build.json",
 		"dev": "as-soon -w src pnpm build",
-		"test": "playwright test"
+		"test": "playwright test",
+		"prepack": "cp ../../README.md ./README.md && cp ../../LICENSE ./LICENSE"
 	}
 }
