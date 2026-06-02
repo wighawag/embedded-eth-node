@@ -28,15 +28,13 @@ faking success.
 
 ```sh
 npm install embedded-eth-node
-# peer deps (provide the versions you want):
-npm install @ethereumjs/vm @ethereumjs/evm @ethereumjs/statemanager \
-  @ethereumjs/common @ethereumjs/tx @ethereumjs/util @ethereumjs/block @noble/hashes
 # optional, only if you use the Worker helpers:
 npm install comlink
 ```
 
-(`@ethereumjs/*` and `@noble/hashes` are declared as dependencies; `comlink` is an
-optional peer used only by the Worker entry/client.)
+(`@ethereumjs/*` and `@noble/hashes` are declared as direct dependencies and are
+installed automatically; `comlink` is an optional peer used only by the Worker
+entry/client.)
 
 ## Usage (main thread)
 
