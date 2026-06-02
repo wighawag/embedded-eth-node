@@ -1,0 +1,72 @@
+/**
+ * persistence-reload.spec.ts — prove the slim node's IndexedDB persistence (and
+ * eth_getLogs) survive a REAL page reload, in real Chromium.
+ *
+ * Flow (the harness's purpose-built write -> reload -> read):
+ *   1. phase 'write': a node wired to createIndexedDBPersistence() deploys a
+ *      Counter, sends 3 increments (each emits Incremented) + a value transfer;
+ *      persistence auto-saves to IndexedDB after each mined tx.
+ *   2. page.reload() WIPES all JS state (the node object is gone) — but IndexedDB,
+ *      being browser storage, survives.
+ *   3. phase 'read': a FRESH node with the same persistence adapter auto-loads
+ *      from IndexedDB; we re-query contract storage, a balance, AND eth_getLogs
+ *      (all/address-filtered/topic-filtered) to prove logs survived with correct
+ *      logIndex ordering + block numbers + decodable event args.
+ */
+import {test, expect} from '@playwright/test';
+import {fileURLToPath} from 'node:url';
+import {dirname, resolve} from 'node:path';
+import {mountHarness} from 'playwright-browser-harness';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const cut = resolve(here, './helpers/cut.ts');
+
+test('IndexedDB persistence + eth_getLogs survive a real page reload', async ({
+	page,
+}) => {
+	const h = await mountHarness(page, {
+		cut,
+		coi: false,
+		nodePolyfills: ['buffer', 'process', 'global'],
+	});
+
+	// 1) write + persist to IndexedDB
+	const w = await h.run({phase: 'write', params: {mode: 'persist-reload'}});
+	console.log('\n[persist-reload] write:', JSON.stringify(w.results.write));
+	expect(w.errors).toEqual([]);
+	const write = w.results.write as any;
+	expect(write.number).toBe('3');
+	expect(write.logCount).toBe(3); // 3 Incremented events
+	expect(write.feedBalance).toBe('7777');
+
+	// 2) REAL reload — wipes JS state; IndexedDB survives.
+	await h.reload();
+
+	// 3) read from a fresh node that auto-loaded from IndexedDB
+	const r = await h.run({
+		phase: 'read',
+		params: {mode: 'persist-reload', address: write.address},
+	});
+	console.log(
+		'[persist-reload] read:',
+		JSON.stringify(r.results.read, null, 2),
+	);
+	expect(r.errors).toEqual([]);
+	const read = r.results.read as any;
+
+	// state survived the reload (came ENTIRELY from IndexedDB — no initialBalances)
+	expect(read.loaded).toBe(true);
+	expect(read.blockNumber).toBe(write.blockNumber);
+	expect(read.number).toBe('3'); // contract STORAGE survived
+	expect(read.feedBalance).toBe('7777'); // account balance survived
+
+	// eth_getLogs works AFTER reload:
+	expect(read.logCount).toBe(3); // all logs restored
+	expect(read.addressFilteredCount).toBe(3); // address filter works
+	expect(read.topicFilteredCount).toBe(3); // topic0 filter works
+	expect(read.logIndexesOrdered).toBe(true); // logIndex ordering preserved
+	expect(read.logBlockNumbersPresent).toBe(true); // block numbers intact
+	expect(read.lastEventValue).toBe('3'); // event args still decode (newValue==number)
+
+	await h.dispose();
+});

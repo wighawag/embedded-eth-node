@@ -1,0 +1,289 @@
+/**
+ * genesis-cheats-perf.ts — three in-browser checks for the slim node:
+ *
+ *  1. CUSTOM GENESIS: boot the node with an arbitrary `initialState` (funded
+ *     EOAs with nonces + a PRE-DEPLOYED contract carrying code AND storage) and
+ *     prove a viem client sees exactly that state and can call the pre-deployed
+ *     contract straight away (no deploy tx).
+ *
+ *  2. RUNTIME CHEATS: the anvil/hardhat-style `evm_set*` methods mutate live
+ *     state without a tx — assert balance/nonce/code/storage round-trip via the
+ *     standard eth_get* reads, in BOTH state modes.
+ *
+ *  3. TRIE vs NONE PERF: run the SAME deploy + N increments in `stateMode:'none'`
+ *     and `stateMode:'trie'` and report the per-call / deploy timing delta (trie
+ *     pays for a real Merkle-Patricia root each block; none does not).
+ */
+import {
+	createWalletClient,
+	createPublicClient,
+	custom,
+	encodeFunctionData,
+} from 'viem';
+import {privateKeyToAccount} from 'viem/accounts';
+import {createNode, type SlimNode, type StateMode} from '../../src/index.js';
+import {counterAbi, counterBytecode} from './counter.js';
+
+const PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
+const CHAIN_ID = 31337;
+const account = privateKeyToAccount(PK);
+const chain = {
+	id: CHAIN_ID,
+	name: 'slim',
+	nativeCurrency: {name: 'E', symbol: 'E', decimals: 18},
+	rpcUrls: {default: {http: []}},
+} as const;
+
+// The deployed runtime bytecode of Counter (constructor stripped). We get this by
+// reading getCode after a normal deploy; hardcoding here would be brittle, so the
+// custom-genesis check deploys ONCE in a throwaway node to capture runtime code.
+async function counterRuntimeCode(): Promise<string> {
+	const n = await createNode({
+		chainId: CHAIN_ID,
+		miningConfig: {type: 'auto'},
+		initialBalances: {[account.address]: 10n ** 24n},
+	});
+	const transport = custom(
+		{request: ({method, params}: any) => n.request({method, params})},
+		{retryCount: 0},
+	);
+	const pub = createPublicClient({chain, transport});
+	const wallet = createWalletClient({account, chain, transport});
+	const h = await wallet.deployContract({
+		abi: counterAbi,
+		bytecode: counterBytecode,
+		args: [],
+	});
+	const addr = (await pub.getTransactionReceipt({hash: h})).contractAddress!;
+	const code = (await n.request({
+		method: 'eth_getCode',
+		params: [addr, 'latest'],
+	})) as string;
+	await n.dispose();
+	return code;
+}
+
+export interface GenesisCheatsPerfReport {
+	// (1) custom genesis
+	customGenesis: {
+		eoaBalance: string;
+		eoaNonce: string;
+		preDeployedCodePresent: boolean;
+		preDeployedNumber: string; // storage slot 0 we seeded == 41, then +1 = 42
+		numberAfterIncrement: string;
+	};
+	// (2) runtime cheats (per mode)
+	cheats: Record<
+		StateMode,
+		{balance: string; nonce: string; code: string; storageSlot7: string}
+	>;
+	// (3) perf
+	perf: {
+		none: {deployMs: number; avgCallMs: number; getRootThrows: boolean};
+		trie: {deployMs: number; avgCallMs: number; rootIsReal: boolean};
+		callSlowdownX: number; // trie avgCall / none avgCall
+		deploySlowdownX: number;
+	};
+}
+
+const PRE_ADDR = '0x00000000000000000000000000000000c0ffee01';
+const RICH_EOA = '0x00000000000000000000000000000000dec0de02';
+
+export async function runGenesisCheatsPerf(): Promise<GenesisCheatsPerfReport> {
+	const runtimeCode = await counterRuntimeCode();
+
+	// ---------- (1) CUSTOM GENESIS ----------
+	const genesisNode = await createNode({
+		chainId: CHAIN_ID,
+		miningConfig: {type: 'auto'},
+		initialState: {
+			// the signing account, funded, so it can send the increment tx
+			[account.address]: {balance: 10n ** 24n, nonce: 0n},
+			// a rich EOA with a specific nonce (no code)
+			[RICH_EOA]: {balance: 1234n * 10n ** 18n, nonce: 7n},
+			// a PRE-DEPLOYED Counter with storage slot 0 (its `number`) seeded to 41
+			[PRE_ADDR]: {
+				balance: 0n,
+				code: runtimeCode,
+				storage: {'0x00': '0x29'}, // 0x29 = 41
+			},
+		},
+	});
+	const gTransport = custom(
+		{request: ({method, params}: any) => genesisNode.request({method, params})},
+		{retryCount: 0},
+	);
+	const gPub = createPublicClient({chain, transport: gTransport});
+	const gWallet = createWalletClient({account, chain, transport: gTransport});
+
+	const eoaBalance = (await genesisNode.request({
+		method: 'eth_getBalance',
+		params: [RICH_EOA, 'latest'],
+	})) as string;
+	const eoaNonce = (await genesisNode.request({
+		method: 'eth_getTransactionCount',
+		params: [RICH_EOA, 'latest'],
+	})) as string;
+	const preCode = (await genesisNode.request({
+		method: 'eth_getCode',
+		params: [PRE_ADDR, 'latest'],
+	})) as string;
+	// read the pre-deployed contract's `number()` straight away (no deploy needed)
+	const preNumber = (
+		await gPub.readContract({
+			address: PRE_ADDR,
+			abi: counterAbi,
+			functionName: 'number',
+		})
+	).toString();
+	// call increment() on it -> 41 -> 42
+	const incH = await gWallet.writeContract({
+		address: PRE_ADDR,
+		abi: counterAbi,
+		functionName: 'increment',
+	});
+	await gPub.getTransactionReceipt({hash: incH});
+	const afterInc = (
+		await gPub.readContract({
+			address: PRE_ADDR,
+			abi: counterAbi,
+			functionName: 'number',
+		})
+	).toString();
+	await genesisNode.dispose();
+
+	const customGenesis = {
+		eoaBalance: BigInt(eoaBalance).toString(),
+		eoaNonce: BigInt(eoaNonce).toString(),
+		preDeployedCodePresent: preCode.length > 2,
+		preDeployedNumber: preNumber,
+		numberAfterIncrement: afterInc,
+	};
+
+	// ---------- (2) RUNTIME CHEATS (both modes) ----------
+	const cheats = {} as GenesisCheatsPerfReport['cheats'];
+	for (const mode of ['none', 'trie'] as StateMode[]) {
+		const n = await createNode({
+			chainId: CHAIN_ID,
+			stateMode: mode,
+			miningConfig: {type: 'auto'},
+		});
+		const target = '0x00000000000000000000000000000000ca11ab1e';
+		await n.request({
+			method: 'evm_setBalance',
+			params: [target, '0x' + (5n * 10n ** 18n).toString(16)],
+		});
+		await n.request({method: 'evm_setNonce', params: [target, '0x2a']}); // 42
+		await n.request({method: 'evm_setCode', params: [target, '0x60016002']});
+		await n.request({
+			method: 'evm_setStorageAt',
+			params: [target, '0x07', '0x' + 99n.toString(16)],
+		});
+		cheats[mode] = {
+			balance: BigInt(
+				(await n.request({
+					method: 'eth_getBalance',
+					params: [target, 'latest'],
+				})) as string,
+			).toString(),
+			nonce: BigInt(
+				(await n.request({
+					method: 'eth_getTransactionCount',
+					params: [target, 'latest'],
+				})) as string,
+			).toString(),
+			code: (await n.request({
+				method: 'eth_getCode',
+				params: [target, 'latest'],
+			})) as string,
+			storageSlot7: BigInt(
+				(await n.request({
+					method: 'eth_getStorageAt',
+					params: [target, '0x07', 'latest'],
+				})) as string,
+			).toString(),
+		};
+		await n.dispose();
+	}
+
+	// ---------- (3) TRIE vs NONE PERF ----------
+	async function measure(mode: StateMode) {
+		const n = await createNode({
+			chainId: CHAIN_ID,
+			stateMode: mode,
+			miningConfig: {type: 'auto'},
+			initialBalances: {[account.address]: 10n ** 24n},
+		});
+		const transport = custom(
+			{request: ({method, params}: any) => n.request({method, params})},
+			{retryCount: 0},
+		);
+		const pub = createPublicClient({chain, transport});
+		const wallet = createWalletClient({account, chain, transport});
+		const tDeploy = performance.now();
+		const h = await wallet.deployContract({
+			abi: counterAbi,
+			bytecode: counterBytecode,
+			args: [],
+		});
+		const addr = (await pub.getTransactionReceipt({hash: h})).contractAddress!;
+		const deployMs = performance.now() - tDeploy;
+		const N = 30;
+		const incData = encodeFunctionData({
+			abi: counterAbi,
+			functionName: 'increment',
+		});
+		const tCalls = performance.now();
+		for (let i = 0; i < N; i++) {
+			const raw = await account.signTransaction({
+				chainId: CHAIN_ID,
+				type: 'eip1559',
+				nonce: i + 1,
+				to: addr,
+				data: incData,
+				gas: 200_000n,
+				maxFeePerGas: 2_000_000_000n,
+				maxPriorityFeePerGas: 1_000_000_000n,
+			});
+			await n.request({method: 'eth_sendRawTransactionSync', params: [raw]});
+		}
+		const avgCallMs = (performance.now() - tCalls) / N;
+		let getRootThrows = false;
+		let rootIsReal = false;
+		try {
+			const root = await n.getStateRoot();
+			rootIsReal =
+				/^0x[0-9a-f]{64}$/.test(root) && root !== '0x' + '00'.repeat(32);
+		} catch {
+			getRootThrows = true;
+		}
+		await n.dispose();
+		return {deployMs, avgCallMs, getRootThrows, rootIsReal};
+	}
+	// warm up the JIT once, then measure each mode.
+	await measure('none');
+	const none = await measure('none');
+	await measure('trie');
+	const trie = await measure('trie');
+
+	const perf = {
+		none: {
+			deployMs: round(none.deployMs),
+			avgCallMs: round(none.avgCallMs),
+			getRootThrows: none.getRootThrows,
+		},
+		trie: {
+			deployMs: round(trie.deployMs),
+			avgCallMs: round(trie.avgCallMs),
+			rootIsReal: trie.rootIsReal,
+		},
+		callSlowdownX: round(trie.avgCallMs / none.avgCallMs),
+		deploySlowdownX: round(trie.deployMs / none.deployMs),
+	};
+
+	return {customGenesis, cheats, perf};
+}
+
+function round(n: number): number {
+	return Math.round(n * 100) / 100;
+}

@@ -1,0 +1,20 @@
+{
+	"compilerOptions": {
+		"target": "ESNext",
+		"module": "NodeNext",
+		"lib": ["ESNext", "dom"],
+		"moduleResolution": "NodeNext",
+		"types": ["node"],
+		"strict": true,
+		"strictNullChecks": true,
+		"esModuleInterop": true,
+		"skipLibCheck": true,
+		"resolveJsonModule": true,
+		"forceConsistentCasingInFileNames": true,
+		"allowImportingTsExtensions": true,
+		"noEmit": true,
+		"rootDir": "."
+	},
+	"include": ["test/**/*.ts"],
+	"exclude": ["node_modules", "test-results"]
+}
