@@ -18,7 +18,11 @@
  * We target the Cancun fork (the node's hardfork). Fixtures are vendored under
  * tests/fixtures (see tests/fixtures/README.md for the pinned source tag).
  */
-import {hexToBytes, bytesToHex} from '@ethereumjs/util';
+import {
+	hexToBytes,
+	bytesToHex,
+	type PrefixedHexString,
+} from '@ethereumjs/util';
 import {keccak_256} from '@noble/hashes/sha3.js';
 import {createNode} from '../../src/index.js';
 import type {GenesisAccount, BlockEnv} from '../../src/index.js';
@@ -32,7 +36,7 @@ function rlpLength(len: number, offset: number): Uint8Array {
 	if (len < 56) return Uint8Array.from([offset + len]);
 	const hexLen = len.toString(16);
 	const lenBytes = hexToBytes(
-		'0x' + (hexLen.length % 2 ? '0' + hexLen : hexLen),
+		`0x${hexLen.length % 2 ? '0' + hexLen : hexLen}` as PrefixedHexString,
 	);
 	return Uint8Array.from([offset + 55 + lenBytes.length, ...lenBytes]);
 }
@@ -78,9 +82,9 @@ function logsHash(
 	logs: {address: string; topics: string[]; data: string}[],
 ): string {
 	const items: RlpInput = logs.map((l) => [
-		hexToBytes(l.address),
-		l.topics.map((t) => hexToBytes(t)),
-		hexToBytes(l.data),
+		hexToBytes(l.address as PrefixedHexString),
+		l.topics.map((t) => hexToBytes(t as PrefixedHexString)),
+		hexToBytes(l.data as PrefixedHexString),
 	]);
 	return bytesToHex(keccak_256(rlpEncode(items))) as string;
 }

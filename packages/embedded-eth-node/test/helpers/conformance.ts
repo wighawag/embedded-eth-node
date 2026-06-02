@@ -33,6 +33,7 @@ import {
 	bytesToHex,
 	setLengthLeft,
 	bigIntToBytes,
+	type PrefixedHexString,
 } from '@ethereumjs/util';
 import {keccak_256} from '@noble/hashes/sha3.js';
 import {encodeFunctionData, encodeDeployData} from 'viem';
@@ -87,7 +88,7 @@ class Reference {
 			customCrypto: {keccak256: (m: Uint8Array) => keccak_256(m)},
 		});
 		this.sm = new MerkleStateManager();
-		this.parentHash = hexToBytes('0x' + '00'.repeat(32));
+		this.parentHash = hexToBytes(`0x${'00'.repeat(32)}`);
 	}
 
 	async setup() {
@@ -106,7 +107,6 @@ class Reference {
 			common: this.common,
 			stateManager: this.sm,
 			blockchain: mockBlockchain,
-			profilerOpts: {enabled: false},
 		});
 		await this.sm.putAccount(
 			createAddressFromString(account.address),
@@ -158,7 +158,9 @@ class Reference {
 		let txIndex = 0;
 		let logCounter = 0;
 		for (const raw of raws) {
-			const tx = createTxFromRLP(hexToBytes(raw), {common: this.common});
+			const tx = createTxFromRLP(hexToBytes(raw as PrefixedHexString), {
+				common: this.common,
+			});
 			const res = await runTx(this.vm, {
 				tx,
 				block,
@@ -214,7 +216,9 @@ class Reference {
 					params.from ?? '0x0000000000000000000000000000000000000000',
 				),
 				to: params.to ? createAddressFromString(params.to) : undefined,
-				data: params.data ? hexToBytes(params.data) : new Uint8Array(),
+				data: params.data
+					? hexToBytes(params.data as PrefixedHexString)
+					: new Uint8Array(),
 				value: params.value ?? 0n,
 				gasLimit: 30_000_000n,
 				block: this.blocks.get(this.latest) as any,
@@ -459,7 +463,6 @@ async function runBattery(stateMode: StateMode): Promise<{
 		const data = encodeDeployData({
 			abi: counterAbi,
 			bytecode: counterBytecode,
-			args: [],
 		});
 		const raw = await sign1559({nonce: ctx.nonce, data, gas: 1_000_000n});
 		// oneTxBlock mines the SAME raw tx in BOTH the reference and the slim node and
@@ -575,7 +578,6 @@ async function runBattery(stateMode: StateMode): Promise<{
 		const data = encodeDeployData({
 			abi: probeAbi,
 			bytecode: probeBytecode,
-			args: [],
 		});
 		const raw = await sign1559({nonce: ctx.nonce, data, gas: 1_000_000n});
 		const nr = await oneTxBlock('1559-deploy(Probe)', raw, {
@@ -663,7 +665,6 @@ async function runBattery(stateMode: StateMode): Promise<{
 		const data = encodeDeployData({
 			abi: probeAbi,
 			bytecode: probeBytecode,
-			args: [],
 		});
 		const raw = await sign1559({nonce: ctx.nonce, data, gas: 1_000_000n});
 		const est = (await node.request({
@@ -708,7 +709,6 @@ async function runBattery(stateMode: StateMode): Promise<{
 		const depData = encodeDeployData({
 			abi: counterAbi,
 			bytecode: counterBytecode,
-			args: [],
 		});
 		const depRaw = await sign1559({nonce: 0, data: depData, gas: 1_000_000n});
 		await node2.request({method: 'eth_sendRawTransaction', params: [depRaw]});

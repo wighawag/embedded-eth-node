@@ -55,9 +55,10 @@ export function makeSlimNodeBackend(): EvmBackend {
 
 		async deploy(bytecode) {
 			const hash = await wallet.deployContract({
+				account,
+				chain,
 				abi: counterAbi,
 				bytecode,
-				args: [],
 			});
 			const receipt = await pub.getTransactionReceipt({hash});
 			return receipt.contractAddress as `0x${string}`;

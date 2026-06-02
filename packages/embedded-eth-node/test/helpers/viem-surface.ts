@@ -179,8 +179,10 @@ export async function viemSurfaceProbe(): Promise<SurfaceReport> {
 		},
 		emitMissed: false,
 		emitOnBegin: false,
+		// poll:false relies on the node's own head subscription; the custom
+		// transport's type insists on poll:true, so cast to allow it.
 		poll: false,
-	});
+	} as unknown as Parameters<typeof pub.watchBlocks>[0]);
 	// also register a direct head listener (the API the Worker path uses)
 	const off = node.onNewHead(() => {
 		watchBlocksFired = true;

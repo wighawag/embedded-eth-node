@@ -67,7 +67,7 @@ function makeBackend(mode: Mode): EvmBackend {
 		},
 
 		async deploy(bytecode) {
-			const data = encodeDeployData({abi: counterAbi, bytecode, args: []});
+			const data = encodeDeployData({abi: counterAbi, bytecode});
 			const res = await evm.runCall({
 				caller,
 				to: undefined,
