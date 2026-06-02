@@ -18,11 +18,7 @@
  * We target the Cancun fork (the node's hardfork). Fixtures are vendored under
  * tests/fixtures (see tests/fixtures/README.md for the pinned source tag).
  */
-import {
-	hexToBytes,
-	bytesToHex,
-	type PrefixedHexString,
-} from '@ethereumjs/util';
+import {hexToBytes, bytesToHex, type PrefixedHexString} from '@ethereumjs/util';
 import {keccak_256} from '@noble/hashes/sha3.js';
 import {createNode} from '../../src/index.js';
 import type {GenesisAccount, BlockEnv} from '../../src/index.js';
