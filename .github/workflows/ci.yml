@@ -26,10 +26,12 @@ jobs:
 
   test:
     # Two engines on purpose. A JS EVM and a wasm EVM do not degrade the same way
-    # across engines: @ethereumjs/evm is 2.3-3.6x slower on WebKit (JavaScriptCore)
-    # than on V8, while revm-wasm shows no penalty at all. Measuring only Chromium
-    # hides that completely, and it is the most decision-relevant difference in the
-    # suite for anything targeting Safari/iOS.
+    # across engines: on a quiet machine @ethereumjs/evm is ~1.3-1.9x slower on
+    # WebKit (JavaScriptCore) than on V8, while revm-wasm shows no penalty. That
+    # widens revm's lead from ~11x to ~18x and, more usefully, leaves the JS node
+    # at ~90% of a 60fps frame budget on WebKit against revm's ~30%. Measuring
+    # only Chromium hides it. (CI numbers themselves are too noisy to assert on --
+    # only gas and result equality are asserted here.)
     name: test (${{ matrix.browser }})
     runs-on: ubuntu-latest
     strategy:

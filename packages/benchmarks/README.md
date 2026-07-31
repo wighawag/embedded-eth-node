@@ -37,19 +37,17 @@ bearing: the spike measured that omitting precompiles **changes gas** (an omitte
 address stops being pre-warmed, costing +2500 per cold access), and that
 `opt-level="z"` costs **~5x on keccak**.
 
-The row is a **hybrid** and only half of it is meaningful — see the header comment
-in `test/helpers/backend-revm.ts`:
+revm drives **everything** — the deployment, the state-changing transactions and
+the reads — with no `@ethereumjs/*` involved, so every row is comparable and the
+write path is under the gas gate too. The three paths differ only by a flag word:
+`CREATE|COMMIT` to deploy, `COMMIT` to send, `0` to read. Commit is never implicit,
+so `eth_call` is structurally incapable of mutating state.
 
-| rows | engine | meaningful? |
-|---|---|---|
-| `read`, `compute`, `keccak`, `frame`, `floor`, gas | revm-wasm | **yes** |
-| `coldStart`, `deploy`, `callAvg` | `@ethereumjs/vm` + a full host-state resync | **no** |
-
-The revm spike is read-only (it returns state changes but never commits them, and
-reports a code *hash* rather than code), so writes stay on `@ethereumjs/vm`. That
-is also the integration actually proposed: keep `runTx` on ethereumjs, where
-ecrecover dominates and the interpreter is ~6% of a transaction, and put revm
-behind `eth_call`, where the interpreter is ~100% of the time.
+One caveat when reading the write rows: revm's `transact()` takes `caller`
+directly and **never recovers a sender**, so `deploy` and `callAvg` involve no
+secp256k1 at all. The honest comparison for them is the
+`embedded-eth-node-fabricated` row, which also skips both signing and recovery —
+not the default row, which pays ~1.3ms to sign plus ~2ms to recover.
 
 ## What it measures
 
