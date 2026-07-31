@@ -14,6 +14,11 @@
  * Usage:
  *   node scripts/vendor-revm.mjs [srcDir]
  *   REVM_SPIKE_DIST=/path/to/dist-speed/c-all-precompiles node scripts/vendor-revm.mjs
+ *   node scripts/vendor-revm.mjs --if-missing   # no-op when already vendored
+ *
+ * `--if-missing` is what `pretest` uses: it guarantees the import target exists
+ * (so a fresh clone and CI can always build the bundle) without clobbering
+ * artifacts someone vendored from a non-default path.
  *
  * Default source is the sibling revm clone's speed-optimised, all-precompiles
  * build. That configuration is deliberate: the spike measured that omitting
@@ -36,13 +41,17 @@ const here = dirname(fileURLToPath(import.meta.url));
 const pkgRoot = resolve(here, '..');
 const outDir = join(pkgRoot, 'vendor', 'revm');
 
+const args = process.argv.slice(2).filter((a) => a !== '--if-missing');
+const ifMissing = process.argv.includes('--if-missing');
+if (ifMissing && existsSync(join(outDir, 'present.json'))) {
+	process.exit(0);
+}
+
 const DEFAULT_DIST = resolve(
 	pkgRoot,
 	'../../../revm/spike/dist-speed/c-all-precompiles',
 );
-const dist = resolve(
-	process.argv[2] ?? process.env.REVM_SPIKE_DIST ?? DEFAULT_DIST,
-);
+const dist = resolve(args[0] ?? process.env.REVM_SPIKE_DIST ?? DEFAULT_DIST);
 // `eeth_host.js` in the dist tree is only a re-export shim pointing back into the
 // spike's harness; copy the real implementation over it so `vendor/revm` is
 // self-contained and bundleable.

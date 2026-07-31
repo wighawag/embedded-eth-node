@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: format + build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: {version: 10}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24, cache: pnpm}
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm format:check
+      - run: pnpm build
+
+  test:
+    # Two engines on purpose. A JS EVM and a wasm EVM do not degrade the same way
+    # across engines: @ethereumjs/evm is 2.3-3.6x slower on WebKit (JavaScriptCore)
+    # than on V8, while revm-wasm shows no penalty at all. Measuring only Chromium
+    # hides that completely, and it is the most decision-relevant difference in the
+    # suite for anything targeting Safari/iOS.
+    name: test (${{ matrix.browser }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, webkit]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: {version: 10}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24, cache: pnpm}
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      - name: install browser
+        run: pnpm --filter embedded-eth-node exec playwright install --with-deps ${{ matrix.browser }}
+
+      # Correctness + honesty suite: differential conformance vs a trie-backed
+      # @ethereumjs/vm reference, GeneralStateTests, the viem surface, persistence
+      # across a real reload, the Worker wrapper, and senderMode:'trusted'
+      # equivalence.
+      - name: library tests
+        run: pnpm --filter embedded-eth-node exec playwright test --project=${{ matrix.browser }}
+
+      # The cross-backend GATE. What is asserted here is load-INVARIANT --
+      # execution-gas equality and keccak-chain equality across every backend --
+      # which is precisely what survives a noisy shared CI runner. The MGas/s and
+      # frame timings are printed for information and are NOT asserted on; treat
+      # CI numbers as indicative only and measure perf locally.
+      #
+      # The revm-wasm row SKIPS here: its artifacts are ~1.1 MB, produced by a
+      # separate feasibility spike, and deliberately not committed (see
+      # packages/benchmarks/scripts/vendor-revm.mjs). If revm ever becomes a real
+      # dependency, build it from a pinned source in a release workflow rather
+      # than fetching a prebuilt blob, and let this gate be the acceptance check.
+      # `pretest` runs scripts/vendor-revm.mjs --if-missing, which installs the
+      # stub so the static import resolves and the bundle builds on a fresh clone.
+      - name: cross-backend gate
+        run: pnpm --filter embedded-eth-node-benchmarks test --project=${{ matrix.browser }}

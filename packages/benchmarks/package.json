@@ -32,6 +32,7 @@
 		"format": "prettier --write .",
 		"format:check": "prettier --check .",
 		"vendor:revm": "node scripts/vendor-revm.mjs",
+		"pretest": "node scripts/vendor-revm.mjs --if-missing",
 		"test": "playwright test"
 	}
 }
