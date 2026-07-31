@@ -1,3 +1,7 @@
 node_modules/
 test-results/
 playwright-report/
+
+# revm-wasm spike artifacts, copied in by scripts/vendor-revm.mjs.
+# External exploration, ~1.1 MB binary - not a dependency of this repo.
+vendor/

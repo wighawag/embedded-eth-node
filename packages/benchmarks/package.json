@@ -31,6 +31,7 @@
 		"build": "echo 'benchmarks: nothing to build (test-only package)'",
 		"format": "prettier --write .",
 		"format:check": "prettier --check .",
+		"vendor:revm": "node scripts/vendor-revm.mjs",
 		"test": "playwright test"
 	}
 }

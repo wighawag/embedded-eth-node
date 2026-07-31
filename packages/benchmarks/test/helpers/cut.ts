@@ -25,6 +25,7 @@ import {
 	makeSlimNodeTrustedBackend,
 	makeSlimNodeFabricatedBackend,
 } from './backend-slim-node.js';
+import {makeRevmBackend} from './backend-revm.js';
 
 const BACKENDS: Record<string, () => EvmBackend> = {
 	tevm: makeTevmBackend,
@@ -37,6 +38,9 @@ const BACKENDS: Record<string, () => EvmBackend> = {
 	// same again but the client doesn't sign either (dummy signature) — shows the
 	// ceiling of the trusted primitive: NO secp256k1 anywhere in the round trip.
 	'embedded-eth-node-fabricated': makeSlimNodeFabricatedBackend,
+	// revm (Rust) compiled to wasm, driving the READ path only. Hybrid — only its
+	// read rows and its gas are meaningful; see backend-revm.ts.
+	revm: makeRevmBackend,
 };
 
 const cut: CodeUnderTest = {
