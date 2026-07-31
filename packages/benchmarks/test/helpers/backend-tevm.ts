@@ -26,7 +26,7 @@ import {
 } from 'viem';
 import {mnemonicToAccount} from 'viem/accounts';
 import type {EvmBackend} from './scenario.js';
-import {DEPLOYER} from './scenario.js';
+import {DEPLOYER, intrinsicGasForCall} from './scenario.js';
 import {counterAbi} from './counter.js';
 
 // The standard hardhat/anvil test mnemonic — acct 0 == DEPLOYER.
@@ -88,6 +88,15 @@ export function makeTevmBackend(): EvmBackend {
 				method: 'eth_call',
 				params: [{to, data} as any, 'latest'],
 			})) as `0x${string}`;
+		},
+
+		// Same RPC-surface derivation as the slim node: estimate minus intrinsic.
+		async staticCallGas(to, data) {
+			const est = (await client.request({
+				method: 'eth_estimateGas',
+				params: [{to, data} as any, 'latest'],
+			})) as string;
+			return BigInt(est) - intrinsicGasForCall(data);
 		},
 
 		async dumpState() {

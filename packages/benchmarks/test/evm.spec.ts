@@ -32,16 +32,27 @@ const BACKENDS = [
 	'ethereumjs-default',
 	'tevm',
 	'embedded-eth-node',
+	'embedded-eth-node-trusted',
+	'embedded-eth-node-fabricated',
 ] as const;
 
 const TX_COUNT = 20;
 const SUM_TO = 2000;
 const EXPECTED_SUM = ((SUM_TO - 1) * SUM_TO) / 2; // 1999000
 const KECCAK_ITERS = 2000;
+// One simulated on-chain-game frame = this many small view reads back to back.
+const FRAME_CALLS = 100;
+const FRAME_BUDGET_MS = 16.6; // 60fps
 // Cross-backend keccak correctness: every backend must produce the SAME chained
 // keccak256 result. We don't hardcode the value — we assert all backends agree
 // (and the first run pins it), which catches any keccak/abi.encodePacked drift.
 let keccakReference: string | undefined;
+// Cross-backend GAS equality. Every backend implements the same spec, so the same
+// call MUST cost the same execution gas. This is the gate for ever replacing the
+// interpreter (e.g. with a Rust/Zig wasm EVM): engines that disagree on gas
+// disagree on where execution runs OUT of gas, so a client that replays the chain
+// would fork. Matching return values is NOT sufficient — gas must match too.
+const gasReference: Record<string, string> = {};
 
 const collected: Record<string, unknown>[] = [];
 
@@ -77,6 +88,7 @@ for (const backend of BACKENDS) {
 				txCount: TX_COUNT,
 				sumTo: SUM_TO,
 				keccakIters: KECCAK_ITERS,
+				frameCalls: FRAME_CALLS,
 				repeat: 7,
 			},
 		});
@@ -96,6 +108,22 @@ for (const backend of BACKENDS) {
 		if (keccakReference === undefined) keccakReference = keccak;
 		else expect(keccak).toBe(keccakReference);
 
+		// GAS EQUALITY across backends — the interpreter-swap gate (see gasReference).
+		// Backends that don't expose execution gas simply skip; those that do must all
+		// agree, exactly, for every probed call.
+		for (const key of ['computeGas', 'keccakGas', 'readGas'] as const) {
+			const got = r.results[key] as string | undefined;
+			if (got === undefined) continue;
+			expect(BigInt(got) > 0n).toBe(true);
+			if (gasReference[key] === undefined) gasReference[key] = got;
+			else
+				expect(
+					`${key}=${got}`,
+					`backend ${backend} charged different gas for ${key} than the first backend — ` +
+						`the engines disagree on the spec, which is a state-fork risk`,
+				).toBe(`${key}=${gasReference[key]}`);
+		}
+
 		// NOTE: embedded-eth-node's own honesty/correctness/conformance assertions
 		// live in the library package's test suite (slim-node-checks, conformance,
 		// statetest, viem-surface, persistence-reload). This benchmark only measures
@@ -105,6 +133,13 @@ for (const backend of BACKENDS) {
 		collected.push({
 			backend,
 			...t,
+			framePerCallMs: t.frame != null ? t.frame / FRAME_CALLS : undefined,
+			frameFitsIn60fps:
+				t.frame != null ? t.frame <= FRAME_BUDGET_MS : undefined,
+			computeMGasPerSec: r.results.computeMGasPerSec,
+			keccakMGasPerSec: r.results.keccakMGasPerSec,
+			computeGas: r.results.computeGas,
+			keccakGas: r.results.keccakGas,
 			keccakResult: r.results.keccakResult,
 			legacyTxReceiptBite: r.results.legacyTxReceiptBite,
 		});
@@ -117,6 +152,10 @@ test('bundle size per backend (raw + gzip)', async () => {
 	const bufferEntry = require.resolve('buffer/');
 	const sizes: Record<string, {rawKB: number; gzipKB: number}> = {};
 	for (const backend of BACKENDS) {
+		// the trusted/fabricated rows are the SAME package as 'embedded-eth-node'
+		// (only a node option and the send path differ), so they add no bytes and
+		// need no separate size entry.
+		if (backend.startsWith('embedded-eth-node-')) continue;
 		const entry =
 			backend === 'tevm'
 				? `import {makeTevmBackend} from '${resolve(here, './helpers/backend-tevm.ts')}'; console.log(makeTevmBackend);`
@@ -164,5 +203,33 @@ test('bundle size per backend (raw + gzip)', async () => {
 	console.log(
 		'\n=== collected timings ===\n',
 		JSON.stringify(collected, null, 2),
+	);
+
+	// Throughput table. MGas/s is the backend-independent unit: comparable across
+	// engines AND to published evmone/revm/geth figures, unlike wall-clock ms which
+	// only means something for this exact contract.
+	console.log('\n=== interpreter throughput + frame budget ===');
+	console.log(
+		'backend'.padEnd(20) +
+			'compute'.padStart(14) +
+			'keccak'.padStart(14) +
+			'frame/call'.padStart(13) +
+			'floor/call'.padStart(13) +
+			'  60fps?',
+	);
+	for (const c of collected) {
+		const n = (v: unknown, d = 2) =>
+			typeof v === 'number' ? v.toFixed(d) : String(v ?? '-');
+		console.log(
+			String(c.backend).padEnd(20) +
+				`${n(c.computeMGasPerSec)} MGas/s`.padStart(14) +
+				`${n(c.keccakMGasPerSec)} MGas/s`.padStart(14) +
+				`${n(c.framePerCallMs, 3)} ms`.padStart(13) +
+				`${n(c.floor, 3)} ms`.padStart(13) +
+				`  ${c.frameFitsIn60fps ? 'yes' : 'NO'}`,
+		);
+	}
+	console.log(
+		`\nframe = ${FRAME_CALLS} small view reads back to back; 60fps budget = ${FRAME_BUDGET_MS} ms/frame`,
 	);
 });

@@ -20,13 +20,23 @@ import {
 	makeEthereumjsDefaultBackend,
 	makeEthereumjsTunedBackend,
 } from './backend-ethereumjs.js';
-import {makeSlimNodeBackend} from './backend-slim-node.js';
+import {
+	makeSlimNodeBackend,
+	makeSlimNodeTrustedBackend,
+	makeSlimNodeFabricatedBackend,
+} from './backend-slim-node.js';
 
 const BACKENDS: Record<string, () => EvmBackend> = {
 	tevm: makeTevmBackend,
 	'ethereumjs-default': makeEthereumjsDefaultBackend,
 	'ethereumjs-tuned': makeEthereumjsTunedBackend,
 	'embedded-eth-node': makeSlimNodeBackend,
+	// same node, ecrecover skipped — isolates the fixed ~2ms/tx signature-recovery
+	// cost from everything else.
+	'embedded-eth-node-trusted': makeSlimNodeTrustedBackend,
+	// same again but the client doesn't sign either (dummy signature) — shows the
+	// ceiling of the trusted primitive: NO secp256k1 anywhere in the round trip.
+	'embedded-eth-node-fabricated': makeSlimNodeFabricatedBackend,
 };
 
 const cut: CodeUnderTest = {
@@ -62,6 +72,8 @@ const cut: CodeUnderTest = {
 						txCount: Number(ctx.params.txCount ?? 20),
 						sumTo: Number(ctx.params.sumTo ?? 2000),
 						keccakIters: Number(ctx.params.keccakIters ?? 2000),
+						frameCalls: Number(ctx.params.frameCalls ?? 100),
+						floorCalls: Number(ctx.params.floorCalls ?? 200),
 					}),
 				);
 			}
@@ -97,6 +109,34 @@ const cut: CodeUnderTest = {
 				label: 'keccak',
 				ms: median(runs.map((r) => r.timings.keccakMs)),
 			});
+			// frame: N small view reads back to back — the on-chain-game shape.
+			timings.push({
+				label: 'frame',
+				ms: median(runs.map((r) => r.timings.frameMs)),
+			});
+			// floor: fixed per-call overhead (codeless target, zero interpretation).
+			timings.push({
+				label: 'floor',
+				ms: median(runs.map((r) => r.timings.floorMs)),
+			});
+
+			// EXECUTION GAS + throughput. Gas is a spec quantity: identical across every
+			// backend for the same call (asserted in the spec). MGas/s is the only
+			// backend-independent speed unit, and it is directly comparable to published
+			// evmone/revm/geth figures — unlike ms, which is contract-specific.
+			const g = outcome.gas;
+			if (g.computeGas !== undefined) {
+				const computeMs = median(runs.map((r) => r.timings.computeMs));
+				const keccakMs = median(runs.map((r) => r.timings.keccakMs));
+				results.computeGas = String(g.computeGas);
+				results.keccakGas = String(g.keccakGas);
+				results.readGas = String(g.readGas);
+				results.computeMGasPerSec =
+					Math.round((Number(g.computeGas) / computeMs) * 1000) / 1e6;
+				results.keccakMGasPerSec =
+					Math.round((Number(g.keccakGas) / keccakMs) * 1000) / 1e6;
+			}
+			results.frameCalls = Number(ctx.params.frameCalls ?? 100);
 
 			// tevm-only: probe the legacy-tx receipt behaviour on this tevm version.
 			if (backendKey === 'tevm') {
