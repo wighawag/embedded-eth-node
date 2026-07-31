@@ -1,27 +1,10 @@
 ---
 title: revm-wasm behind transaction execution
 slug: revm-engine-behind-runtx
-needsAnswers: true
 taskedAfter: [revm-engine-behind-eth-call]
 ---
 
 > Launch snapshot — records intent at creation, NOT maintained. Current truth: `docs/adr/` (decisions) + the code; remaining work: `work/tasks/ready/` tasks.
-
-<!-- open-questions -->
-
-## Open questions
-
-These block auto-tasking. Each one changes what the tasks should be, not merely how they are written.
-
-1. **What happens to `stateMode: 'trie'` when revm owns state?** revm has no Merkle-Patricia trie, so a revm-backed node cannot produce a real state root. Options: (a) the revm engine rejects `stateMode: 'trie'` with a loud error at `createNode()`; (b) the node keeps a parallel `MerkleStateManager` purely to compute roots, paying for it twice; (c) trie mode silently forces the `@ethereumjs/vm` engine. Option (a) is the honest-edge default, but it means a revm node can never be run against GeneralStateTests, which is currently our strongest external conformance signal.
-2. **Where does state live?** revm's spike keeps state in JS Maps that IT owns via a commit path, while the node today owns `SimpleStateManager`. Do we (a) let revm's host maps become the single source of truth and reimplement `dumpState`/`loadState`/`evm_set*` against them, or (b) keep `SimpleStateManager` authoritative and sync into revm per transaction? (b) is what the benchmark backend does for reads and it is cheap there, but per-transaction syncing on the write path may cost more than the win.
-3. **What happens to IndexedDB persistence and `dumpState`/`loadState`?** These are `'none'`-mode features built on `SimpleStateManager`'s internal Maps. If answer 2 is (a), they need reimplementing against revm's state shape.
-4. **What happens to the `evm_set*` cheats** (`evm_setBalance`, `evm_setNonce`, `evm_setCode`, `evm_setStorageAt`, `evm_setAccount`)? They currently mutate the state manager directly. Under revm they must mutate whatever answer 2 makes authoritative.
-5. **Do we compute the logs bloom in wasm or in JS?** revm's spike can emit a 256-byte bloom at roughly 0.4 microseconds per keccak against 6.4 in JS, but only for calls that produce logs. The node currently takes the bloom from `runTx`'s receipt.
-6. **Is `senderMode: 'trusted'` still meaningful under revm?** revm's `transact()` takes `caller` directly and never recovers, so the recovery step becomes explicitly ours in both modes. Does `'trusted'` then just mean "skip our own recovery call", and should revm's ~4.2x `ecrecover` become the default recovery for `'recover'` mode?
-7. **What is the acceptance bar for type-3 receipts?** The spike does not emit `blobGasUsed` or `blobGasPrice`, so a type-3 receipt is not fully reconstructable. Is that acceptable, or a blocker?
-
-<!-- /open-questions -->
 
 ## Problem Statement
 
@@ -48,8 +31,56 @@ The bar is the existing conformance differential: **a revm-executed transaction 
 9. As a maintainer, I want the conformance differential to run against the revm engine, so that any divergence from `@ethereumjs/vm` fails the build.
 10. As a maintainer, I want nonce checking to be chosen BY CONSTRUCTION from the call path (transaction vs `eth_call`), never by a caller-supplied parameter, so that it cannot be forgotten.
 11. As a maintainer, I want a clear, loud failure for any node configuration the revm engine cannot serve, rather than a silent fallback to a different engine.
+12. As a consumer, I want `stateMode: 'trie'` with a revm engine to be REJECTED at `createNode()` with a real error naming the reason, so that I never receive a zero state root that looks real.
+13. As a consumer, I want `dumpState`, `loadState`, IndexedDB persistence and the `evm_set*` cheats to keep working EXACTLY as they do today when a revm engine is installed, so that adopting revm costs me none of the node's existing features.
+14. As a consumer in `senderMode: 'recover'`, I want sender recovery to use the engine's `ecrecover` when a revm engine is installed, so that the recovery half of a transaction gets ~4x cheaper for no additional bytes.
+15. As a consumer, I want the type-3 receipt limitation (`blobGasUsed` and `blobGasPrice` unavailable) DOCUMENTED on the path that would produce one, so that I find a stated limitation rather than a silently incomplete receipt.
+16. As a maintainer, I want state to be read and written through the engine's host callbacks against the authoritative state manager, rather than bulk-synced per transaction, so that the cost is proportional to what a transaction touched.
 
 ## Implementation Decisions
+
+### State ownership: `SimpleStateManager` stays authoritative
+
+The node keeps owning state. The engine binding's ten imported host functions (five read, five write) become an **adapter over `SimpleStateManager`**: revm reads accounts, code, storage and block hashes on demand through the read callbacks, and its commit path writes changes back through the write callbacks.
+
+This is deliberately NOT a bulk sync. Reads are on demand and writes are only the touched accounts and changed slots, so the cost is proportional to what a transaction touched rather than to the size of state. (The benchmark backend rebuilds host state wholesale after every write; that is an artefact of it having been a read-only hybrid and must NOT be copied here.)
+
+Three consequences follow, and they are the reason this design was chosen:
+
+- **`dumpState` / `loadState` are unchanged.** They read `SimpleStateManager`'s Maps, which are still the truth.
+- **IndexedDB persistence is unchanged**, for the same reason.
+- **The `evm_set*` cheats are unchanged.** They mutate the state manager directly, and revm sees the result through the read callbacks on the next call.
+
+**Watch the storage key shape.** `SimpleStateManager` keys storage as a flat `addr_slot` map, so clearing one account's storage (needed on selfdestruct and on create) is a scan proportional to TOTAL slots, not to that account's. The engine binding has the same flaw today. Index storage per account on whichever side ends up owning it.
+
+### `stateMode: 'trie'` is rejected under revm, loudly
+
+A revm engine must reject `stateMode: 'trie'` at `createNode()` with a real error rather than silently degrading or silently switching engines. revm computes no state root, and returning a zero root would be exactly the plausible-looking lie the honest-edge convention exists to prevent.
+
+The cost is explicit: a revm-backed node cannot be run against GeneralStateTests, which verify the post-state root and are currently the strongest external conformance signal. The `@ethereumjs/vm` engine keeps that ability, so the capability is not lost from the repo, only from the revm configuration.
+
+**The door stays open, but not through revm.** revm is an execution engine and will not grow a trie; that is a state-storage concern. If a root is wanted later, compute it OUTSIDE revm from the authoritative state using `@ethereumjs/mpt`. Since `SimpleStateManager` remains the source of truth, that path stays available without redesign.
+
+### Sender recovery
+
+`senderMode` keeps both meanings, and the recovery implementation changes:
+
+- **`'recover'`** uses revm's `ecrecover` when a revm engine is installed (~4.2x `@noble/curves`, at zero additional bytes since the precompile is already in the module), falling back to noble when it is not.
+- **`'trusted'`** still skips recovery entirely.
+
+Note this NARROWS the gap between the two modes, from roughly 13x to roughly 3x on the isolated `runTx` path, because the expensive half of `'recover'` gets much cheaper. `'trusted'` remains worth having, but it stops being the dominant lever.
+
+### The logs bloom comes from wasm
+
+Take the 256-byte bloom from the engine rather than computing it in JS. The reason is SINGLE IMPLEMENTATION, not speed: `logsBloom` is a field the conformance differential diffs, and a second implementation in JS is exactly the drift to avoid — the same argument that applies to `effectiveGasPrice`. The speed difference (~0.4 microseconds per keccak against ~6.4, so ~24 microseconds on a typical ERC-20 receipt) is real but is the tiebreaker, not the case.
+
+### Type-3 receipts: a documented, accepted gap
+
+revm fully supports blob transactions — `BLOBHASH`, `BLOBBASEFEE`, the blob gas price and versioned-hash checks all work, and the engine's differential covers 2,868 blob transactions. What is missing is that the binding's result does not SURFACE `blobGasUsed` or `blobGasPrice`, so a type-3 receipt cannot be fully reconstructed from it. That is an interface omission, not an engine limitation, and closing it is a small addition to the binding.
+
+Not a blocker: type-3 transactions are not an intended use. **Document the gap** on the type-3 path so a consumer who does reach for it finds a stated limitation rather than a silently incomplete receipt.
+
+### Other decisions
 
 - Reuse the engine seam introduced by `revm-engine-behind-eth-call`; this spec must not introduce a second, parallel mechanism.
 - Nonce checking is set by the CALL PATH, not by a parameter. The underlying binding defaults it OFF, which is an `eth_call` semantic; a transaction that forgets it silently accepts a replay. This was verified: against an on-chain nonce of 5, a transaction claiming nonce 99 succeeds without the flag and is rejected with `NonceTooHigh` with it.
@@ -64,13 +95,16 @@ The bar is the existing conformance differential: **a revm-executed transaction 
 - Add negative cases the suite currently lacks and which this spec makes reachable: a replayed nonce, insufficient funds, and a storage-clearing refund (refunds are priced at the effective gas price, which a hand-rolled version gets wrong).
 - The cross-backend gas gate continues to guard execution gas; it is necessary but NOT sufficient here, because it does not diff balances.
 - Where the first disagreement is most likely, per the engine's own authors: `effectiveGasPrice` on a legacy transaction with a non-zero base fee, and the disappearing zero-tip coinbase.
+- Story 13 is a REGRESSION bar, so test it as one: run the existing persistence-reload, genesis-cheats and dump/load tests unchanged with a revm engine installed. If they need editing to pass, the state-ownership decision was implemented wrongly.
+- Story 12 is cheap to assert and easy to forget: a `createNode({stateMode: 'trie', engine: revm})` must throw, and the message must say why.
 
 ## Out of Scope
 
 - Publishing the wasm artifact — `revm-wasm-package`.
 - Making revm the default engine.
-- Type-3 (blob) receipt completeness, pending open question 7.
-- The MPT trie: revm has no trie and this spec does not add one.
+- Type-3 (blob) receipt completeness. The gap is documented rather than closed; surfacing `blobGasUsed`/`blobGasPrice` is a small addition to the binding whenever a consumer needs it.
+- Computing a state root for a revm-backed node. Rejected loudly for now; the `@ethereumjs/mpt`-over-authoritative-state path is available later without redesign.
+- Reimplementing `dumpState`, `loadState`, persistence or the `evm_set*` cheats — the state-ownership decision above means none of them change.
 
 ## Further Notes
 
