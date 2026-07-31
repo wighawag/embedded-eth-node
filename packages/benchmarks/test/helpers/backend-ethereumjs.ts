@@ -41,6 +41,31 @@ function makeBackend(mode: Mode): EvmBackend {
 	let caller: Address;
 	const trackStateRoot = mode === 'default';
 
+	/**
+	 * Reset the per-transaction EVM bookkeeping before an isolated read.
+	 *
+	 * `runCall` (unlike `runTx`) does NOT clear the journal's EIP-2929 warm/access
+	 * set or the EIP-2200 original-storage cache between calls — only `runTx` calls
+	 * `journal.cleanup()`. Without this reset, slot warmth LEAKS from one call into
+	 * the next, so the 2nd+ `number()` read is charged a WARM SLOAD (100) instead of
+	 * a COLD one (2100) and reports 2000 gas too little.
+	 *
+	 * Measured, on this exact backend: 2446 gas on the first call, then 446 forever.
+	 * The node backends (which each run an isolated `eth_call`) correctly report
+	 * 2446 every time. The cross-backend gas-equality assertion in evm.spec.ts is
+	 * what surfaced this.
+	 *
+	 * So this is not a tuning knob: without it the raw backends are executing a
+	 * DIFFERENT, non-spec gas schedule from every other backend, which makes both
+	 * the gas numbers and the read-heavy timings meaningless as a comparison.
+	 * (`cleanJournal` + `originalStorageCache.clear()` touch only warm/access
+	 * bookkeeping; they do NOT mutate account state.)
+	 */
+	function resetPerTxState() {
+		(evm as any).journal?.cleanJournal?.();
+		(sm as any).originalStorageCache?.clear?.();
+	}
+
 	return {
 		name:
 			mode === 'default'
@@ -100,6 +125,7 @@ function makeBackend(mode: Mode): EvmBackend {
 		},
 
 		async staticCall(to, data) {
+			resetPerTxState();
 			const res = await evm.runCall({
 				caller,
 				to: createAddressFromString(to),
@@ -107,6 +133,19 @@ function makeBackend(mode: Mode): EvmBackend {
 				gasLimit: 30_000_000n,
 			});
 			return bytesToHex(res.execResult.returnValue) as `0x${string}`;
+		},
+
+		// Raw EVM: `executionGasUsed` IS the execution gas, no intrinsic to subtract
+		// (runCall is below the transaction layer, so it never charges intrinsic).
+		async staticCallGas(to, data) {
+			resetPerTxState();
+			const res = await evm.runCall({
+				caller,
+				to: createAddressFromString(to),
+				data: hexToBytes(data),
+				gasLimit: 30_000_000n,
+			});
+			return res.execResult.executionGasUsed;
 		},
 	};
 }
