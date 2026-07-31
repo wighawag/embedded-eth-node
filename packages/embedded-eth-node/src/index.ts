@@ -15,6 +15,7 @@ export type {
 	NodeOptions,
 	MiningConfig,
 	StateMode,
+	SenderMode,
 	GenesisAccount,
 	BlockEnv,
 	PersistenceAdapter,

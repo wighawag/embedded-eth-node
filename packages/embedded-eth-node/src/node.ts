@@ -47,6 +47,7 @@ import {keccak_256} from '@noble/hashes/sha3.js';
 import {
 	RpcError,
 	type NodeOptions,
+	type SenderMode,
 	type SlimNode,
 	type RequestArguments,
 	type SerializedState,
@@ -98,6 +99,7 @@ interface StoredBlock {
 export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 	const chainId = options.chainId ?? 31337;
 	const stateMode = options.stateMode ?? 'none';
+	const senderMode: SenderMode = options.senderMode ?? 'recover';
 	const miningConfig = options.miningConfig ?? {type: 'auto'};
 	const baseFeePerGas = options.baseFeePerGas ?? 1_000_000_000n;
 	const gasPrice = options.gasPrice ?? 1_000_000_000n;
@@ -422,6 +424,105 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 	async function mineBlock() {
 		const batch = pending.splice(0, pending.length);
 		return executeAndMine(batch);
+	}
+
+	/**
+	 * Decode a raw tx. When `claimedFrom` is supplied (the `evm_*As` methods,
+	 * `senderMode:'trusted'` only) we SKIP ecrecover and pin the sender to the
+	 * caller-supplied address.
+	 *
+	 * WHAT THIS PRIMITIVE IS: "execute this tx as this sender, do not recover".
+	 * That is all. It is deliberately NOT an impersonation feature — impersonation
+	 * (an address registry + unsigned `eth_sendTransaction`, anvil/hardhat style) is
+	 * account POLICY, and this package has no accounts by design. Two DIFFERENT
+	 * callers want this one primitive:
+	 *
+	 *   (a) A NORMAL, genuinely-signed tx that just wants to bypass a redundant
+	 *       ecrecover. The client signed it, so it already knows the sender;
+	 *       re-deriving it on a local chain is pure waste. The signature is REAL,
+	 *       merely unverified.
+	 *   (b) A HIGHER LAYER implementing impersonation on top: it has no key, so it
+	 *       FABRICATES a signature, serialises the tx, and passes the claimed
+	 *       sender. Nothing here needs to know that happened.
+	 *
+	 * WHY it is worth a cheat method: ecrecover is a FIXED ~2ms per tx and it is the
+	 * single dominant cost of a small tx (~80% of a 21k-gas transfer; the crossover
+	 * where EVM execution overtakes it is ~33k gas). Measured ~13x on `runTx` in
+	 * isolation (2.52ms -> 0.19ms) and ~2.3x end-to-end through a viem-style client
+	 * (2.23ms -> 0.97ms/tx; the residual is the CLIENT's own signing, which only
+	 * case (b) avoids). Gas and status are byte-identical either way.
+	 *
+	 * HOW: `runTx` reads the sender through exactly one call, `tx.getSenderAddress()`.
+	 * We parse with `freeze:false` and shadow that one method. Everything else about
+	 * the tx stays REAL — same wire bytes, same `tx.hash()` — so receipts, block
+	 * contents and `eth_getTransactionByHash` are unchanged. The ONLY thing dropped
+	 * is the proof that the signer authorised this sender.
+	 *
+	 * ---- CALLER CONTRACT, case (b) / fabricated signatures ONLY ----
+	 *
+	 * 1. TX BYTES MUST BE UNIQUE PER SENDER. `from` is NOT part of a transaction —
+	 *    it is the OUTPUT of recovery — so the hash is computed from the bytes
+	 *    alone. Two fabricated txs with the same dummy signature, nonce, `to` and
+	 *    data produce the SAME hash even for different claimed senders, and would
+	 *    silently overwrite each other in the receipt/tx maps. Derive the dummy `r`
+	 *    from the sender address (or otherwise vary the bytes per sender). anvil hit
+	 *    exactly this and fixed it by folding the sender into hash computation
+	 *    (foundry #4210). Genuinely-signed txs — case (a) — are unaffected: real
+	 *    signatures already differ per signer.
+	 *
+	 * 2. FABRICATED TXS ARE NOT PORTABLE TO A `'recover'` NODE. `dumpState` stores
+	 *    each tx's raw bytes, so a dump containing fabricated signatures carries txs
+	 *    no authenticated node could ever validate. Fine for a local chain; do not
+	 *    treat such a dump as a replayable chain history. Again, case (a) dumps are
+	 *    unaffected — those signatures are real.
+	 *
+	 * SAFETY: gated on `senderMode:'trusted'`. In the default `'recover'` mode these
+	 * methods do not exist and we throw -32601 rather than silently trusting input.
+	 */
+	function parseTx(
+		rawHex: unknown,
+		claimedFrom?: unknown,
+	): {tx: TypedTransaction; raw: Uint8Array} {
+		const raw = hexToBytes(String(rawHex));
+		if (claimedFrom === undefined) {
+			return {tx: createTxFromRLP(raw, {common}), raw};
+		}
+		if (senderMode !== 'trusted') {
+			throw new RpcError(
+				-32601,
+				"method not available: trusted-sender sends require senderMode:'trusted' " +
+					'(create the node with {senderMode:"trusted"} to skip ecrecover). That mode ' +
+					'TRUSTS the caller-supplied sender, so ANY caller can impersonate ANY ' +
+					'address — never enable it where untrusted callers can reach the node.',
+			);
+		}
+		// Throws on a malformed address rather than executing as someone unexpected.
+		const from = createAddressFromString(String(claimedFrom));
+		// `freeze:false` so we can shadow getSenderAddress on the instance.
+		const tx = createTxFromRLP(raw, {
+			common,
+			freeze: false,
+		}) as TypedTransaction;
+		(tx as any).getSenderAddress = () => from;
+		return {tx, raw};
+	}
+
+	/** Queue-or-execute a decoded tx; returns the hash, or the receipt if `sync`. */
+	async function submit(
+		tx: TypedTransaction,
+		raw: Uint8Array,
+		sync: boolean,
+	): Promise<unknown> {
+		const h = txHashOf(tx);
+		if (miningConfig.type === 'auto') {
+			await executeAndMine([{tx, raw}]);
+		} else {
+			pending.push({tx, raw});
+			if (sync) await mineBlock();
+		}
+		if (!sync) return h;
+		const r = receipts.get(h);
+		return r ? receiptToRpc(r) : null;
 	}
 
 	// ---------- block lookup helpers ----------
@@ -799,30 +900,27 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 			}
 
 			case 'eth_sendRawTransaction': {
-				const raw = hexToBytes(params[0]);
-				const tx = createTxFromRLP(raw, {common});
-				const h = txHashOf(tx);
-				if (miningConfig.type === 'auto') {
-					await executeAndMine([{tx, raw}]);
-				} else {
-					pending.push({tx, raw});
-				}
-				return h;
+				const {tx, raw} = parseTx(params[0]);
+				return submit(tx, raw, false);
 			}
 			case 'eth_sendRawTransactionSync': {
 				// The fast path: send + mine + return receipt in ONE call. Default
 				// behaviour pairs with auto mining (no receipt polling = the latency win).
-				const raw = hexToBytes(params[0]);
-				const tx = createTxFromRLP(raw, {common});
-				const h = txHashOf(tx);
-				if (miningConfig.type === 'auto') {
-					await executeAndMine([{tx, raw}]);
-				} else {
-					pending.push({tx, raw});
-					await mineBlock();
-				}
-				const r = receipts.get(h);
-				return r ? receiptToRpc(r) : null;
+				const {tx, raw} = parseTx(params[0]);
+				return submit(tx, raw, true);
+			}
+
+			// ---- Trusted-sender variants (senderMode:'trusted' ONLY) ----
+			// Same as the eth_* pair above but take an explicit `from` and SKIP
+			// ecrecover. `evm_`-namespaced because they are a cheat, not a standard
+			// method: the signature on the wire is never verified.
+			case 'evm_sendRawTransactionAs': {
+				const {tx, raw} = parseTx(params[0], params[1]);
+				return submit(tx, raw, false);
+			}
+			case 'evm_sendRawTransactionSyncAs': {
+				const {tx, raw} = parseTx(params[0], params[1]);
+				return submit(tx, raw, true);
 			}
 
 			case 'eth_getTransactionReceipt': {
@@ -1049,7 +1147,9 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 		const out = await baseRequest(args);
 		if (
 			(args.method === 'eth_sendRawTransaction' ||
-				args.method === 'eth_sendRawTransactionSync') &&
+				args.method === 'eth_sendRawTransactionSync' ||
+				args.method === 'evm_sendRawTransactionAs' ||
+				args.method === 'evm_sendRawTransactionSyncAs') &&
 			miningConfig.type === 'auto'
 		) {
 			await persistIfNeeded();
@@ -1063,6 +1163,7 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 		dumpState,
 		loadState,
 		stateMode,
+		senderMode,
 		async getStateRoot() {
 			if (stateMode !== 'trie') {
 				throw new RpcError(

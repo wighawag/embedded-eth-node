@@ -51,12 +51,52 @@ export interface PersistenceAdapter {
  */
 export type StateMode = 'none' | 'trie';
 
+/**
+ * Sender-derivation mode.
+ * - `'recover'` (DEFAULT): derive the sender from the signature with ecrecover,
+ *   exactly as a real node does. The tx is self-authenticating: a caller cannot
+ *   claim to be an address it does not hold the key for. This is the only mode
+ *   that is safe when the node is reachable by a caller you do not control.
+ * - `'trusted'`: TRUST a caller-supplied sender and SKIP ecrecover entirely.
+ *   Enables `evm_sendRawTransactionAs` / `evm_sendRawTransactionSyncAs`, which
+ *   take an explicit `from`. The signature is still carried on the wire and the
+ *   tx hash is still the real one, but it is NEVER verified, so ANY caller can
+ *   claim to be ANY address.
+ *
+ * Why it exists: ecrecover is a FIXED ~2ms per tx and it dominates small txs
+ * (~80% of a 21k-gas transfer). A client that signed the tx already knows the
+ * sender, so re-deriving it is pure waste in a local chain. Measured ~13x on
+ * `runTx` in isolation and ~2.3x end-to-end through a viem-style client, with
+ * byte-identical gas and status.
+ *
+ * The primitive is just "execute as this sender, do not recover". It serves BOTH
+ * an ordinary signed tx that wants to skip a redundant recovery AND a higher
+ * layer building anvil-style impersonation on top with a fabricated signature.
+ * Impersonation itself is account POLICY and is deliberately NOT this package's
+ * job — see the `parseTx` docblock in node.ts for the full caller contract
+ * (notably: fabricated txs must be made unique per sender, or their hashes
+ * collide).
+ *
+ * The trade is real and one-directional: `'trusted'` removes the ONLY thing that
+ * binds a tx to its sender. Use it for a local, same-origin dev chain or an
+ * in-browser game. Never expose a `'trusted'` node over a transport that an
+ * untrusted caller can reach.
+ */
+export type SenderMode = 'recover' | 'trusted';
+
 export interface NodeOptions {
 	/** EIP-155 chain id. Default 31337 (anvil/hardhat-style local). */
 	chainId?: number;
 	/** State backing: `'none'` (fast, no trie/root — default) or `'trie'` (real
 	 *  state root, slower; unlocks GeneralStateTests conformance). */
 	stateMode?: StateMode;
+	/**
+	 * Sender derivation: `'recover'` (ecrecover, authenticated — DEFAULT) or
+	 * `'trusted'` (skip ecrecover, trust a caller-supplied `from`). See
+	 * {@link SenderMode}. `'trusted'` is ~13x faster per small tx and lets ANY
+	 * caller impersonate ANY address — opt in only for a local chain you control.
+	 */
+	senderMode?: SenderMode;
 	/** Mining strategy. Default {type:'auto'}. */
 	miningConfig?: MiningConfig;
 	/** Optional persistence adapter (e.g. IndexedDB). */
@@ -125,6 +165,8 @@ export interface SlimNode {
 	getStateRoot(): Promise<string>;
 	/** The state mode this node was created with. */
 	readonly stateMode: 'none' | 'trie';
+	/** The sender mode this node was created with. */
+	readonly senderMode: SenderMode;
 	/** Stop timers / release resources. */
 	dispose(): Promise<void>;
 }

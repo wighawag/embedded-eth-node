@@ -9,6 +9,7 @@ import {wrap, proxy} from 'comlink';
 import type {WorkerApi} from './worker-entry.js';
 import type {
 	NodeOptions,
+	SenderMode,
 	SlimNode,
 	RequestArguments,
 	SerializedState,
@@ -30,8 +31,10 @@ export async function createWorkerNode(
 	const {worker, ...nodeOptions} = opts;
 	const api = wrap<WorkerApi>(worker);
 	const remote = await api.createNode(nodeOptions);
-	// stateMode is a plain value on the node; over comlink it reads as a promise.
+	// stateMode/senderMode are plain values on the node; over comlink they read as
+	// promises.
 	const stateMode = (await (remote as any).stateMode) as 'none' | 'trie';
+	const senderMode = (await (remote as any).senderMode) as SenderMode;
 
 	return {
 		request: (args: RequestArguments) =>
@@ -40,6 +43,7 @@ export async function createWorkerNode(
 		dumpState: () => remote.dumpState() as Promise<SerializedState>,
 		loadState: (s: SerializedState) => remote.loadState(s as any),
 		stateMode,
+		senderMode,
 		getStateRoot: () => (remote as any).getStateRoot() as Promise<string>,
 		onNewHead(cb) {
 			// The callback must cross the thread boundary as a comlink proxy.

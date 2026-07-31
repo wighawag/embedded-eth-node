@@ -104,6 +104,7 @@ method-not-found (`-32601`) — it never fakes a result.
 | `eth_getLogs` | address + topic filtering over mined logs. **Perf note:** a full linear scan over all logs per call (O(total_logs), no index/cache) — fine for a local chain |
 | `eth_subscribe`/`eth_unsubscribe` | **`newHeads` only**; prefer `onNewHead()` over comlink |
 | `evm_setBalance` / `evm_setNonce` / `evm_setCode` / `evm_setStorageAt` / `evm_setAccount` | anvil/hardhat-style runtime state cheats (mutate live state with no tx); commit into the trie in `'trie'` mode |
+| `evm_sendRawTransactionAs` / `evm_sendRawTransactionSyncAs` | `[raw, from]` — execute as `from`, **skipping ecrecover**. Only exist when `senderMode: 'trusted'`; otherwise a loud `-32601`. See [Sender mode](#sender-mode-recover-authenticated-default-vs-trusted-no-ecrecover) |
 
 ### Intentionally NOT supported (loud `-32601`)
 
@@ -151,6 +152,61 @@ const conformant = await createNode({stateMode: 'trie'});  // MerkleStateManager
   Caveat: trie-mode `dumpState` carries accounts + code but **not** contract
   storage — use `'none'` for IndexedDB persistence, `'trie'` for the state root /
   conformance.
+
+## Sender mode: `'recover'` (authenticated, default) vs `'trusted'` (no ecrecover)
+
+```ts
+const authentic = await createNode({senderMode: 'recover'}); // default
+const fast = await createNode({senderMode: 'trusted'}); // skips ecrecover
+```
+
+`ecrecover` is a **fixed ~2ms per transaction** and it dominates small ones: ~80%
+of a 21k-gas transfer, with the crossover where EVM execution overtakes it at
+only ~33k gas of execution. A client that signed a tx **already knows** the
+sender, so re-deriving it on a local chain is pure waste.
+
+- **`'recover'`** (default): derive the sender from the signature, exactly as a
+  real node does. The tx is self-authenticating. This is the only mode that is
+  safe when the node is reachable by a caller you do not control.
+- **`'trusted'`**: enables `evm_sendRawTransactionAs` / `evm_sendRawTransactionSyncAs`,
+  which take `[raw, from]` and **skip ecrecover**. Measured **~13× on `runTx` in
+  isolation** (2.52ms → 0.19ms) and **~2.3× end-to-end** through a viem-style
+  client (2.23ms → 0.97ms per tx — the residual is the *client's own* signing).
+  Gas, status, logs, receipts and post-state are **byte-identical** to `'recover'`
+  (asserted field-by-field in `test/trusted-sender.spec.ts`).
+
+The primitive says exactly one thing: **execute this tx as this sender, do not
+recover**. It is *not* an impersonation feature. Two different callers want it:
+
+1. **An ordinary, genuinely-signed tx** that just wants to bypass a redundant
+   recovery. The signature is real, merely unverified.
+2. **A higher layer implementing impersonation** (anvil/hardhat style) on top: it
+   holds no key, so it *fabricates* a signature, serialises the tx, and passes the
+   claimed sender. This node never needs to know that happened.
+
+Impersonation itself — an address registry plus unsigned `eth_sendTransaction` —
+is account **policy**, and this package has no accounts by design. It belongs in a
+layer above.
+
+> **⚠️ `'trusted'` removes the only thing binding a tx to its sender.** Any caller
+> can claim any address. Use it for a local, same-origin dev chain or an in-browser
+> game. **Never** expose a `'trusted'` node over a transport an untrusted caller
+> can reach.
+
+### Caller contract (fabricated signatures only — case 2 above)
+
+- **Make the tx bytes unique per sender.** `from` is *not* part of a transaction —
+  it is the *output* of recovery — so the hash comes from the bytes alone. Two
+  fabricated txs sharing a dummy signature, nonce, `to` and data hash **the same**
+  even for different claimed senders, and would silently overwrite each other in
+  the receipt/tx maps. Derive the dummy `r` from the sender address. (anvil hit
+  exactly this: foundry #4210.)
+- **Fabricated txs are not portable to a `'recover'` node.** `dumpState` stores raw
+  tx bytes, so such a dump carries txs no authenticated node could validate. Fine
+  for a local chain; do not treat it as replayable chain history.
+
+Both caveats apply *only* to fabricated signatures. Genuinely-signed txs (case 1)
+are unaffected: real signatures already differ per signer and validate anywhere.
 
 ## Genesis pre-state + block env
 

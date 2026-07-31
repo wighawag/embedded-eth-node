@@ -6,6 +6,9 @@
  * Modes (one per library test):
  *   - 'slim-node-checks'   : legacy/1559 receipts, honest -32601 gaps, dump/load,
  *                            state-root mode (none throws / trie real root)
+ *   - 'trusted-sender'     : senderMode:'trusted' (skip ecrecover) is byte-identical
+ *                            to 'recover', the cheat is absent by default, and it
+ *                            really does impersonate
  *   - 'conformance'        : differential vs a trie-backed @ethereumjs/vm runTx
  *   - 'statetest'          : real ethereum/tests GeneralStateTests vs trie mode
  *   - 'viem-surface'       : a typical viem/wagmi lifecycle + method-gap report
@@ -24,6 +27,7 @@ import type {
 } from 'playwright-browser-harness/contract';
 import {captureEnv} from 'playwright-browser-harness/contract';
 import {slimNodeHonestyChecks} from './slim-node-checks.js';
+import {runTrustedSenderChecks} from './trusted-sender.js';
 import {workerRoundtrip} from './worker-roundtrip.js';
 import {runConformance} from './conformance.js';
 import {viemSurfaceProbe} from './viem-surface.js';
@@ -44,6 +48,19 @@ const cut: CodeUnderTest = {
 		if (ctx.params.mode === 'slim-node-checks') {
 			try {
 				results.slimNodeChecks = await slimNodeHonestyChecks();
+			} catch (e) {
+				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
+			}
+			return {results, timings, errors, env: captureEnv()};
+		}
+
+		// trusted-sender: prove senderMode:'trusted' (ecrecover skipped) produces
+		// receipts + post-state IDENTICAL to the authenticated 'recover' path, that
+		// the cheat methods do not exist in the default mode, and that trusted mode
+		// really does let a caller impersonate.
+		if (ctx.params.mode === 'trusted-sender') {
+			try {
+				results.trustedSender = await runTrustedSenderChecks();
 			} catch (e) {
 				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
 			}
