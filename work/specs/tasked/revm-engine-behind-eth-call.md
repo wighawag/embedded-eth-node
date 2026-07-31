@@ -39,32 +39,12 @@ Both delivery shapes are supported by the same seam: a bundler-resolved asset fo
 11. As a consumer, I want the engine's state to stay consistent with the node's state manager, so that a read after a transaction observes that transaction.
 12. As a maintainer, I want the engine seam documented in the README alongside the existing mode options, so that it is discoverable without reading source.
 
-## Implementation Decisions
-
-> **PROMOTE TO ADR at tasking time.** The engine-injection shape below clears the ADR bar and should outlive this launch snapshot — proposed title: "the EVM engine is an injected object, not a named string". The why: naming an engine by string (`engine: 'revm'`) would force the core to reference every engine it can name, which defeats tree-shaking and makes the JS-only consumer pay for revm. Injecting an object keeps the core's dependency graph free of revm entirely. It is hard to reverse because it is the public API shape, and it is surprising because the string form is the more obvious design.
->
-> Everything else here is ordinary implementation detail and can be trimmed into tasks as usual.
-
-- The engine is an OBJECT satisfying a small interface, passed as `NodeOptions.engine`. The core must not `import` any revm module; only the optional subpath export does.
-- Ship the revm binding as a separate subpath (`embedded-eth-node/revm`) so the default entry point's dependency graph is unchanged.
-- Route only `eth_call` and `eth_estimateGas`. `eth_estimateGas` must keep its current semantics (execution gas plus intrinsic, verified equal to `runTx`'s `totalGasSpent`), which means the engine reports execution gas and the node adds intrinsic exactly as it does now.
-- The revm engine reads state from the node's existing state, which stays authoritative on the JS side. Do not fork state ownership in this spec.
-- Reads pass revm's flag word as 0 (no commit, no create), so `eth_call` cannot write.
-- The `evm_*` cheat methods, `dumpState`/`loadState`, persistence and `stateMode` are unchanged by this spec because state ownership does not move.
-- The outcome decoder must be resilient to blob-format changes: the format has already moved v1 to v2 to v3, and the only stable region is the head. Prefer a decoder that walks the structure over one that indexes at fixed offsets.
-
-## Testing Decisions
-
-- The highest existing seam is the cross-backend gate in `packages/benchmarks` (`evm.spec.ts`): it already asserts execution-gas equality and keccak-chain equality across every backend, and a `backend-revm.ts` already exists there. Extend rather than duplicate.
-- The library's own conformance differential (`packages/embedded-eth-node/test/helpers/conformance.ts`) is the stronger bar for anything touching results: it diffs receipts field by field plus post-state against a trie-backed `@ethereumjs/vm` `runTx` reference. `eth_call` return data and `eth_estimateGas` values must match it with the engine installed.
-- Test the DEFAULT path is unchanged: the whole existing suite must pass with no engine supplied.
-- Test both delivery shapes (fetched URL and bundler asset) actually load in a real browser, since that is where the failure mode lives.
-- Assert the bundle size of the JS-only entry point has not grown, so the tree-shaking claim in story 3 is enforced rather than asserted.
+> **Tasked.** The technical detail that was here (implementation and testing decisions) moved into `work/tasks/` at tasking time; the durable rationale moved to `docs/adr/`. This spec is now its framing only.
 
 ## Out of Scope
 
 - Transaction execution, mining, receipts, logs and state commit on revm — `revm-engine-behind-runtx`.
-- Publishing the wasm artifact — `revm-wasm-package`. Until that lands, this spec consumes the vendored artifacts via the existing `scripts/vendor-revm.mjs` path.
+- Publishing the wasm artifact. This landed while the spec was in `ready/`: **`revm-wasm@0.1.0`** is on npm, zero runtime dependencies, MIT, with the prebuilt `.wasm` in the tarball and no Rust toolchain needed. This spec consumes it as an ordinary dependency; the `scripts/vendor-revm.mjs` + gitignored `vendor/` path in `packages/benchmarks` is now legacy and is retired as part of this work.
 - Hot-swapping the engine mid-session. Choosing at `createNode()` time still permits progressive loading (paint, fetch, then create).
 - Making revm the default engine.
 - `stateMode: 'trie'` on revm: revm has no trie, and this spec does not move state ownership, so the question does not arise yet.
