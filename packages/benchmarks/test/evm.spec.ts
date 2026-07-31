@@ -37,11 +37,10 @@ const BACKENDS = [
 	'revm',
 ] as const;
 
-// revm-wasm artifacts are vendored by `scripts/vendor-revm.mjs` and gitignored
-// (~1.1 MB binary from an external spike). When absent the imports resolve to a
-// stub and the row is skipped rather than failing.
-const revmDir = resolve(here, '../vendor/revm');
-let revmPresent = false;
+// The revm-wasm module ships prebuilt inside the `revm-wasm` package, so there is
+// nothing to build and nothing to vendor: this is where the served copy comes
+// from, and where the bundle-size row weighs it.
+const revmWasmPath = require.resolve('revm-wasm/revm.wasm');
 
 const TX_COUNT = 20;
 const SUM_TO = 2000;
@@ -74,25 +73,9 @@ test.beforeAll(async () => {
 		outdir,
 		nodePolyfills: ['buffer', 'process', 'global'],
 	});
-	// wasm-bindgen's `--target web` glue fetches the module at runtime, so the
-	// .wasm has to sit next to the bundle in the served directory.
-	try {
-		const marker = JSON.parse(
-			await readFile(join(revmDir, 'present.json'), 'utf8'),
-		);
-		if (marker.present) {
-			await copyFile(join(revmDir, 'evm_bg.wasm'), join(outdir, 'evm_bg.wasm'));
-			revmPresent = true;
-		}
-	} catch {
-		revmPresent = false;
-	}
-	if (!revmPresent) {
-		console.log(
-			'\n[revm] artifacts not vendored - skipping the revm row.' +
-				'\n[revm] run: node scripts/vendor-revm.mjs [pathTo/dist-speed/c-all-precompiles]\n',
-		);
-	}
+	// The backend fetches the module at runtime, so the .wasm has to sit next to
+	// the bundle in the served directory.
+	await copyFile(revmWasmPath, join(outdir, 'revm.wasm'));
 	const srv = await startServer({root: outdir, coi: false});
 	prebuilt = {outdir, serverUrl: srv.url};
 	closeServer = srv.close;
@@ -106,10 +89,6 @@ for (const backend of BACKENDS) {
 	test(`backend ${backend}: deploy + ${TX_COUNT} state transitions + read + compute`, async ({
 		page,
 	}) => {
-		test.skip(
-			backend === 'revm' && !revmPresent,
-			'revm wasm artifacts not vendored (see scripts/vendor-revm.mjs)',
-		);
 		const h = await mountHarness(page, {cut, coi: false, prebuilt});
 		const r = await h.run({
 			phase: 'once',
@@ -178,6 +157,19 @@ for (const backend of BACKENDS) {
 	});
 }
 
+// EVERY backend must actually RUN. A backend that silently drops out takes its
+// gas row out of the gate above without failing anything, which is how a gate
+// quietly stops being one. The revm row used to skip whenever its wasm was not
+// vendored on the machine; it is an ordinary npm dependency now, so nothing here
+// is conditional and this test says so out loud.
+test('every backend contributed to the gate', () => {
+	expect(collected.map((c) => c.backend)).toEqual([...BACKENDS]);
+	const revm = collected.find((c) => c.backend === 'revm');
+	expect(revm?.computeGas).toBe(gasReference.computeGas);
+	expect(revm?.keccakGas).toBe(gasReference.keccakGas);
+	expect(revm?.keccakResult).toBe(keccakReference);
+});
+
 test('bundle size per backend (raw + gzip)', async () => {
 	const bufferEntry = require.resolve('buffer/');
 	const sizes: Record<string, {rawKB: number; gzipKB: number}> = {};
@@ -232,13 +224,12 @@ test('bundle size per backend (raw + gzip)', async () => {
 			gzipKB: +(gz.byteLength / 1024).toFixed(1),
 		};
 	}
-	if (revmPresent) {
-		const wasm = await readFile(join(revmDir, 'evm_bg.wasm'));
-		sizes['revm (wasm module only)'] = {
-			rawKB: +(wasm.byteLength / 1024).toFixed(1),
-			gzipKB: +(gzipSync(wasm).byteLength / 1024).toFixed(1),
-		};
-	}
+	const wasm = await readFile(revmWasmPath);
+	sizes['revm (wasm module only)'] = {
+		rawKB: +(wasm.byteLength / 1024).toFixed(1),
+		gzipKB: +(gzipSync(wasm).byteLength / 1024).toFixed(1),
+	};
+	expect(sizes['revm (wasm module only)'].rawKB).toBeGreaterThan(0);
 
 	console.log('\n=== bundle sizes ===\n', JSON.stringify(sizes, null, 2));
 	console.log(

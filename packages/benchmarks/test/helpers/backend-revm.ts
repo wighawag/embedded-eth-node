@@ -6,19 +6,21 @@
  * commit path. That makes every row comparable, and puts the WRITE path under the
  * cross-backend gas gate rather than only the read path.
  *
- * (It was a read-only hybrid until the spike gained logs, code bytes for created
- * accounts, and an explicit commit path. Those were exactly the three things
- * missing for transaction execution.)
+ * HOW THE THREE PATHS DIFFER — one entry point each:
+ *   deploy      `create()`     `to` ignored, `data` is init code, commits
+ *   sendCall    `transact()`   state written back through the store
+ *   staticCall  `call()`       read-only; structurally cannot commit
  *
- * HOW THE THREE PATHS DIFFER — only by a flag word:
- *   deploy      CREATE | COMMIT   `to` ignored, `data` is init code
- *   sendCall    COMMIT            state written back to the host maps
- *   staticCall  0                 read-only; cannot mutate anything
+ * `call()` never commits whatever the options say, which is the property worth
+ * having: `eth_call` is incapable of writing.
  *
- * Commit is never implicit. `eth_call` passes 0 and is structurally incapable of
- * writing, which is the property worth having.
+ * THE WASM IS AN ORDINARY DEPENDENCY. It comes from `revm-wasm` on npm (MIT, zero
+ * runtime dependencies, prebuilt `.wasm` in the tarball), so this row runs on a
+ * fresh clone and in CI with no build step. The package also owns the outcome
+ * decoding, the account packing and the pointer-level host, none of which are
+ * this repo's business.
  *
- * READING THE WRITE ROWS FAIRLY. revm's `transact()` takes `caller` DIRECTLY: it
+ * READING THE WRITE ROWS FAIRLY. revm's `transact()` takes `from` DIRECTLY: it
  * never recovers a sender, because in revm that is the caller's job. So `deploy`
  * and `callAvg` here involve NO secp256k1 at all, and the honest comparison for
  * them is the `embedded-eth-node-fabricated` row (which also skips both signing
@@ -26,57 +28,43 @@
  * sign plus ~2ms to recover. Comparing against the default row would credit revm
  * with a saving that is really just the absence of signature work.
  *
- * (Sender recovery is still available from this module: the spike exports
- * `ecrecover` directly, measured at ~4.3x `@noble/curves`. It is simply not part
- * of `transact()`.)
+ * (Sender recovery is still available: `Revm.recoverSigner()` runs the same k256
+ * code the `0x01` precompile does, measured at ~4.3x `@noble/curves`. It is
+ * simply not part of `transact()`.)
  *
- * STATE LIVES IN JS, in the same plain `Map`s embedded-eth-node uses. The wasm
- * reads through five synchronous imported functions and writes back through five
- * more, all taking integer pointers into linear memory, so nothing is serialised
- * per access. Growing state is the host's problem, not the module's.
+ * STATE LIVES IN JS, in the package's `MemoryStore` — plain `Map`s, like the ones
+ * embedded-eth-node uses. The wasm reads and writes through synchronous host
+ * functions taking integer pointers into linear memory, so nothing is serialised
+ * per access.
  *
  * WHY THE GAS GATE IS THE POINT. Two EVMs that agree on every return value can
  * still disagree on gas, and then they disagree about where execution runs OUT of
  * gas — a state fork for anyone replaying the chain. `evm.spec.ts` asserts
  * execution gas is IDENTICAL across every backend, so this file is subject to
  * that check on both the read and the write path.
- *
- * Artifacts are vendored by `scripts/vendor-revm.mjs` (gitignored). When absent
- * the imports resolve to a stub and the spec skips this backend.
  */
-// @ts-ignore - generated wasm-bindgen glue, no types
-import initRevm, {call_persistent} from '../../vendor/revm/evm.js';
-// @ts-ignore - hand-written synchronous host, no types
-import {setMemory, setHost, makeState} from '../../vendor/revm/eeth_host.js';
-import {keccak_256} from '@noble/hashes/sha3.js';
+import {
+	createRevm,
+	KECCAK_EMPTY,
+	MemoryStore,
+	Spec,
+	type Outcome,
+	type Revm,
+} from 'revm-wasm';
 import type {EvmBackend} from './scenario.js';
 import {intrinsicGasForCall, DEPLOYER} from './scenario.js';
 
-const CHAIN_ID = 1;
-const SPEC_CANCUN = 11; // revm SpecId::CANCUN (FRONTIER = 0)
-
-// Outcome flag word, mirroring the spike's `flags` module.
-const COMMIT = 1;
-const CREATE = 2;
-// CHECK_NONCE is OFF by default in the spike, because parts 1-2 ran everything
-// with nonce checking disabled. That default is an `eth_call` semantic: without
-// it a replayed transaction succeeds. A transaction path must set it, so the two
-// write paths here do, and `deploy`/`sendCall` therefore have to carry a real
-// nonce (tracked below, incremented by the commit).
-const CHECK_NONCE = 8;
-
-// Per-account flag bits in the outcome blob.
-const F_CREATED = 4;
-const F_CODE_CHANGED = 8;
+const CHAIN_ID = 1n;
 
 const BLOCK = {
 	number: 12345n,
 	timestamp: 1_700_000_000n,
 	gasLimit: 30_000_000n,
-	coinbase: '0x00000000000000000000000000000000c0173a5e',
+	coinbase: hexToBytes('0x00000000000000000000000000000000c0173a5e'),
 };
 const GAS_LIMIT = 25_000_000n;
-const ZERO_ADDR = '0x0000000000000000000000000000000000000000';
+/** The deployer is the only pre-funded account, as in every other backend. */
+const DEPLOYER_BALANCE = 10n ** 24n;
 
 function hexToBytes(hex: string): Uint8Array {
 	const h = hex.replace(/^0x/, '');
@@ -90,210 +78,138 @@ function bytesToHex(b: Uint8Array): string {
 	for (const x of b) s += x.toString(16).padStart(2, '0');
 	return s;
 }
-function padLeft(b: Uint8Array, n: number): Uint8Array {
-	if (b.length >= n) return b.slice(b.length - n);
-	const out = new Uint8Array(n);
-	out.set(b, n - b.length);
-	return out;
-}
-/** lowercase hex without 0x — the key format `eeth_host.js` builds from memory. */
-const key = (hex: string) => hex.replace(/^0x/, '').toLowerCase();
 
-interface Outcome {
-	success: boolean;
-	status: string;
-	gasUsed: bigint;
-	returnData: Uint8Array;
-	created: string | null;
-}
+const DEPLOYER_ADDR = hexToBytes(DEPLOYER);
 
 /**
- * Decode the outcome blob, format v3.
+ * Compile the module ONCE for the page, instantiate per run.
  *
- * The head (status | gasUsed | totalGasSpent | refunded | returnData) has sat at
- * the same offsets since v1, which is why this decoder survived two format
- * changes while only reading gas. Everything after it has moved twice:
+ * Compilation is the expensive half and the scenario runs the whole backend
+ * several times over, so re-fetching and re-compiling would show up in the
+ * `coldStart` row as an artefact of the harness rather than of revm. Each run
+ * still gets its OWN instance, its own linear memory and its own store, so no
+ * run can observe another's state.
  *
- *   v2 inserted the LOG LIST before the accounts
- *   v3 inserts a 256-byte LOGS BLOOM after the logs, but ONLY when the log count
- *      is non-zero, and appends a 16-byte effective gas price after the accounts
+ * The `.wasm` is copied out of the `revm-wasm` package and served next to the
+ * bundle by `evm.spec.ts`. It is fetched by URL rather than reached through
+ * `revm-wasm/wasm-url`, because the benchmark bundle is built by a bare esbuild
+ * pass with no asset pipeline to rewrite an `import.meta.url` reference.
  *
- * The conditional bloom is the sharp edge: a call that emits no logs has no
- * bloom, so a decoder that always skips 256 bytes works on exactly the calls
- * that are easiest to test with. We only need the created address, but the log
- * list and bloom still have to be walked to find where the accounts start.
+ * Compiled from bytes rather than with `compileStreaming`, which would throw on a
+ * static server that does not label the file `application/wasm`. Streaming would
+ * save a few milliseconds once per page, and no measured row includes it.
  */
-function decodeOutcome(buf: Uint8Array): Outcome {
-	const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-	let o = 0;
-	const status = buf[o];
-	o += 1;
-	const gasUsed = dv.getBigUint64(o, true);
-	o += 8 + 8 + 8; // gasUsed | totalGasSpent | refunded
-	const retLen = dv.getUint32(o, true);
-	o += 4;
-	const returnData = buf.slice(o, o + retLen);
-	o += retLen;
-
-	// logs: [20] address, u8 topicCount, [32]*n topics, u32 dataLen + bytes
-	const nLogs = dv.getUint32(o, true);
-	o += 4;
-	for (let i = 0; i < nLogs; i++) {
-		o += 20;
-		const nTopics = buf[o];
-		o += 1 + nTopics * 32;
-		const dataLen = dv.getUint32(o, true);
-		o += 4 + dataLen;
+let modulePromise: Promise<WebAssembly.Module> | undefined;
+function compiledModule(): Promise<WebAssembly.Module> {
+	if (!modulePromise) {
+		modulePromise = fetch(new URL('revm.wasm', location.href))
+			.then((res) => res.arrayBuffer())
+			.then((bytes) => WebAssembly.compile(bytes));
 	}
-	// v3: the 256-byte receipts bloom follows the logs, but only if there were any.
-	if (nLogs > 0) o += 256;
-
-	// accounts: [20] address, u8 flags, [32] balance, u64 nonce, [32] codeHash,
-	//           if flags&8: u32 codeLen + bytes; then u32 slotCount + slots
-	const nAcc = dv.getUint32(o, true);
-	o += 4;
-	let created: string | null = null;
-	for (let i = 0; i < nAcc; i++) {
-		const address = bytesToHex(buf.slice(o, o + 20));
-		o += 20;
-		const flags = buf[o];
-		o += 1 + 32 + 8 + 32; // flags | balance | nonce | codeHash
-		if (flags & F_CODE_CHANGED) {
-			const codeLen = dv.getUint32(o, true);
-			o += 4 + codeLen;
-		}
-		const nSlots = dv.getUint32(o, true);
-		o += 4 + nSlots * 64;
-		if (flags & F_CREATED) created = address;
-	}
-
-	return {
-		success: status === 0,
-		status: ['success', 'revert', 'halt', 'validation-error'][status],
-		gasUsed,
-		returnData,
-		created,
-	};
+	return modulePromise;
 }
-
-/** keccak256("") — the code hash of any account with no code. */
-const KECCAK_EMPTY = keccak_256(new Uint8Array(0));
-
-/** Pack into the 72-byte layout the wasm reads directly. */
-function packAccount(balance: bigint, nonce: bigint, codeHash: Uint8Array) {
-	const packed = new Uint8Array(72);
-	let h = balance.toString(16);
-	if (h.length % 2) h = '0' + h;
-	packed.set(padLeft(hexToBytes(h), 32), 0);
-	let n = nonce;
-	for (let i = 0; i < 8; i++) {
-		packed[32 + i] = Number(n & 0xffn);
-		n >>= 8n;
-	}
-	packed.set(codeHash, 40);
-	return packed;
-}
-
-/**
- * The optional trailing `extra` blob (format v3), carrying the transaction-level
- * fields that do not fit in the positional arguments.
- *
- * We only need the NONCE here. Fees are deliberately left at zero: the gate
- * compares EXECUTION gas, which is fee-independent, and charging a fee would make
- * this backend's balances diverge from the other backends' for no measurement
- * benefit. (The fee path itself is proven in the spike: a value transfer charges
- * value + gasUsed * effectiveGasPrice and credits the coinbase the tip.)
- *
- * Layout: u8 version | u8 present | u8 txType | u8 reserved | [16] gasPrice |
- *         [16] maxPriorityFee | [16] maxFeePerBlobGas | u64 basefee |
- *         u64 nonce | u64 excessBlobGas | u32 accessList | u32 blobs | u32 auths
- */
-function encodeExtra(nonce: bigint): Uint8Array {
-	const buf = new Uint8Array(88);
-	const dv = new DataView(buf.buffer);
-	buf[0] = 1; // version
-	// present = 0: no priority fee, no explicit tx type, no excess blob gas.
-	// gasPrice / maxPriorityFee / maxFeePerBlobGas / basefee all stay zero.
-	dv.setBigUint64(60, nonce, true); // after 4 + 48 bytes, past basefee
-	// trailing u32 counts (access list, blob hashes, authorizations) stay zero
-	return buf;
-}
-
-let initialised = false;
 
 export function makeRevmBackend(): EvmBackend {
-	// Mirrors the sender's on-chain nonce. Only advanced by committing calls,
-	// because only those increment it in host state.
-	let nonce = 0n;
+	let evm: Revm | undefined;
+	let store: MemoryStore | undefined;
 
-	function run(
-		to: string,
+	/**
+	 * The sender's on-chain nonce, read from the state the commits update.
+	 *
+	 * `transact()` and `create()` check the nonce by default, which is the right
+	 * default (a transaction executed without the check is silently replayable) and
+	 * means the write paths have to carry a real one. Reads do not: `call()` leaves
+	 * the check off, which is `eth_call` semantics.
+	 */
+	const senderNonce = (): bigint =>
+		store!.getAccount(DEPLOYER_ADDR)?.nonce ?? 0n;
+
+	function checked(out: Outcome, label: string): Outcome {
+		if (!out.success)
+			throw new Error(`revm ${out.status} on ${label}: ${out.error ?? ''}`);
+		return out;
+	}
+
+	/**
+	 * One read. Kept on the default (full-state) path rather than
+	 * `returnState: false`: the lighter path skips building the state map and is
+	 * worth roughly 0.9 microseconds per call, which would make these rows
+	 * incomparable to every number measured before this backend moved to the
+	 * published package. It is an `eth_call` optimisation, not a benchmark one.
+	 */
+	function read(
+		to: `0x${string}`,
 		data: `0x${string}`,
-		flags: number,
 		label: string,
 	): Outcome {
-		const committing = (flags & COMMIT) !== 0;
-		const out = call_persistent(
-			padLeft(hexToBytes(DEPLOYER), 20),
-			padLeft(hexToBytes(to), 20),
-			hexToBytes(data),
-			GAS_LIMIT,
-			new Uint8Array(32),
-			SPEC_CANCUN,
-			BigInt(CHAIN_ID),
-			BLOCK.number,
-			BLOCK.timestamp,
-			BLOCK.gasLimit,
-			padLeft(hexToBytes(BLOCK.coinbase), 20),
-			committing ? flags | CHECK_NONCE : flags,
-			committing ? encodeExtra(nonce) : undefined,
-		) as Uint8Array;
-		const r = decodeOutcome(out);
-		if (!r.success) throw new Error(`revm ${r.status} on ${label}`);
-		if (committing) nonce += 1n;
-		return r;
+		return checked(
+			evm!.call({
+				from: DEPLOYER_ADDR,
+				to: hexToBytes(to),
+				data: hexToBytes(data),
+				gasLimit: GAS_LIMIT,
+			}),
+			label,
+		);
 	}
 
 	return {
 		name: 'revm-wasm (full: CREATE + committing txs + eth_call)',
 
 		async setup() {
-			if (!initialised) {
-				// `--target web` glue: fetch + instantiate, then hand the host the
-				// module's linear memory so state reads are answered in place.
-				const exports = await initRevm({
-					module_or_path: new URL('evm_bg.wasm', location.href),
-				});
-				setMemory(exports.memory);
-				initialised = true;
-			}
 			// Fresh state per run; the deployer is the only pre-funded account.
-			nonce = 0n;
-			const state = makeState();
-			state.accounts.set(
-				key(DEPLOYER),
-				packAccount(10n ** 24n, 0n, KECCAK_EMPTY),
-			);
-			setHost(state);
+			store = new MemoryStore();
+			store.setAccount(DEPLOYER_ADDR, {
+				balance: DEPLOYER_BALANCE,
+				nonce: 0n,
+				codeHash: KECCAK_EMPTY,
+			});
+			evm = await createRevm({
+				wasm: await compiledModule(),
+				state: store,
+				spec: Spec.CANCUN,
+				chainId: CHAIN_ID,
+				block: BLOCK,
+			});
 		},
 
 		async deploy(bytecode) {
-			// CREATE: `to` is ignored and `data` is the init code. COMMIT so the
-			// deployed account, its code and its storage land in host state.
-			const r = run(ZERO_ADDR, bytecode, CREATE | COMMIT, 'deploy');
-			if (!r.created)
-				throw new Error('revm deploy reported no created account');
-			return r.created as `0x${string}`;
+			// `create()`: `to` is ignored, `data` is the init code, and it commits, so
+			// the deployed account, its code and its storage land in the store.
+			//
+			// Fees are deliberately left at zero. The gate compares EXECUTION gas,
+			// which is fee-independent, and charging a fee would make this backend's
+			// balances diverge from the other backends' for no measurement benefit.
+			const out = checked(
+				evm!.create({
+					from: DEPLOYER_ADDR,
+					data: hexToBytes(bytecode),
+					gasLimit: GAS_LIMIT,
+					nonce: senderNonce(),
+				}),
+				'deploy',
+			);
+			const created = out.stateChanges?.find((c) => c.created);
+			if (!created) throw new Error('revm deploy reported no created account');
+			return bytesToHex(created.address) as `0x${string}`;
 		},
 
 		async sendCall(to, data) {
-			run(to, data, COMMIT, `sendCall ${data.slice(0, 10)}`);
+			checked(
+				evm!.transact({
+					from: DEPLOYER_ADDR,
+					to: hexToBytes(to),
+					data: hexToBytes(data),
+					gasLimit: GAS_LIMIT,
+					nonce: senderNonce(),
+				}),
+				`sendCall ${data.slice(0, 10)}`,
+			);
 		},
 
 		async staticCall(to, data) {
-			// flags = 0: structurally incapable of mutating state.
 			return bytesToHex(
-				run(to, data, 0, `staticCall ${data.slice(0, 10)}`).returnData,
+				read(to, data, `staticCall ${data.slice(0, 10)}`).returnData,
 			) as `0x${string}`;
 		},
 
@@ -301,8 +217,8 @@ export function makeRevmBackend(): EvmBackend {
 		// `eth_estimateGas` does, so the same subtraction yields the EXECUTION gas
 		// the raw-EVM backends report. This is what the equality gate compares.
 		async staticCallGas(to, data) {
-			const r = run(to, data, 0, `staticCallGas ${data.slice(0, 10)}`);
-			return r.gasUsed - intrinsicGasForCall(data);
+			const out = read(to, data, `staticCallGas ${data.slice(0, 10)}`);
+			return out.gasUsed - intrinsicGasForCall(data);
 		},
 	};
 }

@@ -18,32 +18,37 @@ pnpm install          # at the monorepo root
 pnpm --filter embedded-eth-node-benchmarks test
 ```
 
-## The optional `revm` row
+## The `revm` row
 
-`revm` (Rust, compiled to WebAssembly) is included as a **7th backend**, but its
-artifacts are **not committed** — `evm_bg.wasm` is ~1.1 MB and comes from a
-separate feasibility spike in a revm clone. Vendor them in first:
+`revm` (Rust, compiled to WebAssembly) is included as a **7th backend**. It needs
+no extra step: the module comes from the [`revm-wasm`](https://www.npmjs.com/package/revm-wasm)
+package (MIT, zero runtime dependencies, prebuilt `.wasm` in the tarball), so the
+row runs on a fresh clone and in CI like any other. `pnpm install` is the whole
+setup, and no Rust toolchain is involved.
 
-```sh
-pnpm --filter embedded-eth-node-benchmarks vendor:revm \
-  ../../../revm/spike/dist-speed/c-all-precompiles
-```
+That package ships the `all-precompiles` build at `opt-level=3`, which is the only
+configuration worth measuring: omitting precompiles **changes gas** (an omitted
+address stops being pre-warmed, costing +2500 per cold access), and `opt-level="z"`
+costs **~5x on keccak**.
 
-Without them the imports resolve to a stub and the row is **skipped**, so the
-suite still passes on a machine that has never seen the spike.
+The dependency is an ordinary `^0.1.0` range rather than an exact pin: gas equality
+is asserted here on every run, so a `revm-wasm` release that changed what revm
+charges turns this suite red instead of passing quietly. That is the gate doing its
+job, and pinning would only hide it until someone bumped the pin.
 
-Use the `c-all-precompiles` build at `opt-level=3`. Both halves of that are load
-bearing: the spike measured that omitting precompiles **changes gas** (an omitted
-address stops being pre-warmed, costing +2500 per cold access), and that
-`opt-level="z"` costs **~5x on keccak**.
+The `.wasm` is fetched at runtime by the backend, so `evm.spec.ts` copies it out of
+the package into the served directory next to the bundle. That is also where the
+bundle-size row weighs it — esbuild cannot weigh a module that is fetched rather
+than imported.
 
 revm drives **everything** — the deployment, the state-changing transactions and
 the reads — with no `@ethereumjs/*` involved, so every row is comparable and the
-write path is under the gas gate too. The three paths differ only by a flag word:
-`CREATE|COMMIT` to deploy, `COMMIT` to send, `0` to read. Commit is never implicit,
-so `eth_call` is structurally incapable of mutating state.
+write path is under the gas gate too. The three paths are one entry point each:
+`create()` to deploy, `transact()` to send, `call()` to read. `call()` never
+commits whatever the options say, so `eth_call` is structurally incapable of
+mutating state.
 
-One caveat when reading the write rows: revm's `transact()` takes `caller`
+One caveat when reading the write rows: revm's `transact()` takes the sender
 directly and **never recovers a sender**, so `deploy` and `callAvg` involve no
 secp256k1 at all. The honest comparison for them is the
 `embedded-eth-node-fabricated` row, which also skips both signing and recovery —

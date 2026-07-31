@@ -23,6 +23,7 @@
 		"esbuild": "^0.28.0",
 		"playwright-browser-harness": "^0.3.0",
 		"prettier": "^3.8.0",
+		"revm-wasm": "^0.1.0",
 		"tevm": "1.0.0-next.149",
 		"typescript": "^5.3.3",
 		"viem": "2.45.0"
@@ -31,8 +32,6 @@
 		"build": "echo 'benchmarks: nothing to build (test-only package)'",
 		"format": "prettier --write .",
 		"format:check": "prettier --check .",
-		"vendor:revm": "node scripts/vendor-revm.mjs",
-		"pretest": "node scripts/vendor-revm.mjs --if-missing",
 		"test": "playwright test"
 	}
 }

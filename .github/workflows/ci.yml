@@ -63,12 +63,9 @@ jobs:
       # frame timings are printed for information and are NOT asserted on; treat
       # CI numbers as indicative only and measure perf locally.
       #
-      # The revm-wasm row SKIPS here: its artifacts are ~1.1 MB, produced by a
-      # separate feasibility spike, and deliberately not committed (see
-      # packages/benchmarks/scripts/vendor-revm.mjs). If revm ever becomes a real
-      # dependency, build it from a pinned source in a release workflow rather
-      # than fetching a prebuilt blob, and let this gate be the acceptance check.
-      # `pretest` runs scripts/vendor-revm.mjs --if-missing, which installs the
-      # stub so the static import resolves and the bundle builds on a fresh clone.
+      # EVERY backend runs here, revm-wasm included: its module is an ordinary
+      # npm dependency (`revm-wasm`, prebuilt .wasm in the tarball), so there is
+      # no build step and no artifact to fetch. The suite fails if any backend
+      # drops out, because a gate that silently loses a backend is not a gate.
       - name: cross-backend gate
         run: pnpm --filter embedded-eth-node-benchmarks test --project=${{ matrix.browser }}

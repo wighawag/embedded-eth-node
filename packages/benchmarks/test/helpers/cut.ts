@@ -38,8 +38,10 @@ const BACKENDS: Record<string, () => EvmBackend> = {
 	// same again but the client doesn't sign either (dummy signature) — shows the
 	// ceiling of the trusted primitive: NO secp256k1 anywhere in the round trip.
 	'embedded-eth-node-fabricated': makeSlimNodeFabricatedBackend,
-	// revm (Rust) compiled to wasm, driving the READ path only. Hybrid — only its
-	// read rows and its gas are meaningful; see backend-revm.ts.
+	// revm (Rust) compiled to wasm, from the `revm-wasm` package. It drives
+	// EVERYTHING — deploy, the state-changing txs and the reads — with no
+	// @ethereumjs/* involved, so every row is comparable and the write path is
+	// under the gas gate too; see backend-revm.ts.
 	revm: makeRevmBackend,
 };
 

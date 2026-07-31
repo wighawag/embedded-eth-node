@@ -27,7 +27,7 @@ Standing per-change rules agents must follow in this repo.
 
 - **Every user-facing change needs a changeset.** Run `pnpm changeset` (or hand-write a file in `.changeset/`) describing the change and its semver bump. This repo publishes `embedded-eth-node` to npm via changesets; a release without one silently ships unversioned. Not currently enforced by the `verify` gate — to enforce it, add your own check (e.g. `changeset status --since=main`) to `verify` in `dorfl.json`.
 - **The dorfl version is PINNED** via `dorflCmd` in `dorfl.json`, pointing at the project-local `node_modules/.bin/dorfl`, so bare `dorfl` self-forwards to the version in this repo's `devDependencies` rather than floating with whatever is globally installed. To bump: change the `dorfl` devDependency, `pnpm install`, then `dorfl sync` to re-sync `work/protocol/`.
-- **Never commit the revm-wasm artifacts.** `packages/benchmarks/vendor/` is gitignored; `scripts/vendor-revm.mjs` copies them in on demand and installs a throwing stub when they are absent, so the suite still builds and simply skips that row.
+- **Never commit a wasm artifact.** The revm module is consumed as the `revm-wasm` npm package (prebuilt `.wasm` in the tarball, zero runtime dependencies), so `packages/benchmarks` needs no build step and no vendored blob; the benchmark spec copies the package's `.wasm` into the served directory at test time. If another wasm engine is ever added, add it the same way rather than checking bytes in.
 
 ## Skills this repo uses
 
