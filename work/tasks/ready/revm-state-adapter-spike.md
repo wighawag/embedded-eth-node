@@ -4,6 +4,7 @@ slug: revm-state-adapter-spike
 spec: revm-engine-behind-eth-call
 blockedBy: []
 covers: []
+needsAnswers: true
 ---
 
 ## What to build
