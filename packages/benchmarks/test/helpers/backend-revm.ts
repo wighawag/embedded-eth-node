@@ -58,9 +58,16 @@ const SPEC_CANCUN = 11; // revm SpecId::CANCUN (FRONTIER = 0)
 // Outcome flag word, mirroring the spike's `flags` module.
 const COMMIT = 1;
 const CREATE = 2;
+// CHECK_NONCE is OFF by default in the spike, because parts 1-2 ran everything
+// with nonce checking disabled. That default is an `eth_call` semantic: without
+// it a replayed transaction succeeds. A transaction path must set it, so the two
+// write paths here do, and `deploy`/`sendCall` therefore have to carry a real
+// nonce (tracked below, incremented by the commit).
+const CHECK_NONCE = 8;
 
 // Per-account flag bits in the outcome blob.
 const F_CREATED = 4;
+const F_CODE_CHANGED = 8;
 
 const BLOCK = {
 	number: 12345n,
@@ -101,13 +108,20 @@ interface Outcome {
 }
 
 /**
- * Decode the outcome blob, format v2.
+ * Decode the outcome blob, format v3.
  *
- * The head (status | gasUsed | totalGasSpent | refunded | returnData) sits at the
- * same offsets as v1, but the LOG LIST is now inserted before the account list,
- * so anything reading accounts at a fixed offset after the return data must skip
- * the logs first. We only need the created address, but the log list still has to
- * be walked to find where the accounts start.
+ * The head (status | gasUsed | totalGasSpent | refunded | returnData) has sat at
+ * the same offsets since v1, which is why this decoder survived two format
+ * changes while only reading gas. Everything after it has moved twice:
+ *
+ *   v2 inserted the LOG LIST before the accounts
+ *   v3 inserts a 256-byte LOGS BLOOM after the logs, but ONLY when the log count
+ *      is non-zero, and appends a 16-byte effective gas price after the accounts
+ *
+ * The conditional bloom is the sharp edge: a call that emits no logs has no
+ * bloom, so a decoder that always skips 256 bytes works on exactly the calls
+ * that are easiest to test with. We only need the created address, but the log
+ * list and bloom still have to be walked to find where the accounts start.
  */
 function decodeOutcome(buf: Uint8Array): Outcome {
 	const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
@@ -131,6 +145,8 @@ function decodeOutcome(buf: Uint8Array): Outcome {
 		const dataLen = dv.getUint32(o, true);
 		o += 4 + dataLen;
 	}
+	// v3: the 256-byte receipts bloom follows the logs, but only if there were any.
+	if (nLogs > 0) o += 256;
 
 	// accounts: [20] address, u8 flags, [32] balance, u64 nonce, [32] codeHash,
 	//           if flags&8: u32 codeLen + bytes; then u32 slotCount + slots
@@ -142,7 +158,7 @@ function decodeOutcome(buf: Uint8Array): Outcome {
 		o += 20;
 		const flags = buf[o];
 		o += 1 + 32 + 8 + 32; // flags | balance | nonce | codeHash
-		if (flags & 8) {
+		if (flags & F_CODE_CHANGED) {
 			const codeLen = dv.getUint32(o, true);
 			o += 4 + codeLen;
 		}
@@ -178,15 +194,45 @@ function packAccount(balance: bigint, nonce: bigint, codeHash: Uint8Array) {
 	return packed;
 }
 
+/**
+ * The optional trailing `extra` blob (format v3), carrying the transaction-level
+ * fields that do not fit in the positional arguments.
+ *
+ * We only need the NONCE here. Fees are deliberately left at zero: the gate
+ * compares EXECUTION gas, which is fee-independent, and charging a fee would make
+ * this backend's balances diverge from the other backends' for no measurement
+ * benefit. (The fee path itself is proven in the spike: a value transfer charges
+ * value + gasUsed * effectiveGasPrice and credits the coinbase the tip.)
+ *
+ * Layout: u8 version | u8 present | u8 txType | u8 reserved | [16] gasPrice |
+ *         [16] maxPriorityFee | [16] maxFeePerBlobGas | u64 basefee |
+ *         u64 nonce | u64 excessBlobGas | u32 accessList | u32 blobs | u32 auths
+ */
+function encodeExtra(nonce: bigint): Uint8Array {
+	const buf = new Uint8Array(88);
+	const dv = new DataView(buf.buffer);
+	buf[0] = 1; // version
+	// present = 0: no priority fee, no explicit tx type, no excess blob gas.
+	// gasPrice / maxPriorityFee / maxFeePerBlobGas / basefee all stay zero.
+	dv.setBigUint64(60, nonce, true); // after 4 + 48 bytes, past basefee
+	// trailing u32 counts (access list, blob hashes, authorizations) stay zero
+	return buf;
+}
+
 let initialised = false;
 
 export function makeRevmBackend(): EvmBackend {
+	// Mirrors the sender's on-chain nonce. Only advanced by committing calls,
+	// because only those increment it in host state.
+	let nonce = 0n;
+
 	function run(
 		to: string,
 		data: `0x${string}`,
 		flags: number,
 		label: string,
 	): Outcome {
+		const committing = (flags & COMMIT) !== 0;
 		const out = call_persistent(
 			padLeft(hexToBytes(DEPLOYER), 20),
 			padLeft(hexToBytes(to), 20),
@@ -199,10 +245,12 @@ export function makeRevmBackend(): EvmBackend {
 			BLOCK.timestamp,
 			BLOCK.gasLimit,
 			padLeft(hexToBytes(BLOCK.coinbase), 20),
-			flags,
+			committing ? flags | CHECK_NONCE : flags,
+			committing ? encodeExtra(nonce) : undefined,
 		) as Uint8Array;
 		const r = decodeOutcome(out);
 		if (!r.success) throw new Error(`revm ${r.status} on ${label}`);
+		if (committing) nonce += 1n;
 		return r;
 	}
 
@@ -220,6 +268,7 @@ export function makeRevmBackend(): EvmBackend {
 				initialised = true;
 			}
 			// Fresh state per run; the deployer is the only pre-funded account.
+			nonce = 0n;
 			const state = makeState();
 			state.accounts.set(
 				key(DEPLOYER),
