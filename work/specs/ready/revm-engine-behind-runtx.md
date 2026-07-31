@@ -39,6 +39,13 @@ The bar is the existing conformance differential: **a revm-executed transaction 
 
 ## Implementation Decisions
 
+> **PROMOTE TO ADR at tasking time.** Two of the subsections below are not spec detail to be trimmed away — they are decisions that clear the ADR bar (hard to reverse, surprising without context, the result of a real trade-off), and the whole point of `docs/adr/` is that they outlive this launch snapshot. Write them as ADRs rather than discarding them:
+>
+> - **State ownership stays with `SimpleStateManager`** — proposed title: "revm reads and writes through host callbacks; the node keeps owning state". The why is engine swappability against identical state, and the measured evidence for its affordability is in Further Notes.
+> - **`stateMode: 'trie'` is rejected under revm** — proposed title: "a revm-backed node has no state root, and says so". The why is the honest-edge convention plus the named cost (no GeneralStateTests for that configuration) and the `@ethereumjs/mpt` escape route.
+>
+> Everything else here is ordinary implementation detail and can be trimmed into tasks as usual.
+
 ### State ownership: `SimpleStateManager` stays authoritative
 
 The node keeps owning state. The engine binding's ten imported host functions (five read, five write) become an **adapter over `SimpleStateManager`**: revm reads accounts, code, storage and block hashes on demand through the read callbacks, and its commit path writes changes back through the write callbacks.
@@ -97,6 +104,34 @@ Not a blocker: type-3 transactions are not an intended use. **Document the gap**
 - Where the first disagreement is most likely, per the engine's own authors: `effectiveGasPrice` on a legacy transaction with a non-zero base fee, and the disappearing zero-tip coinbase.
 - Story 13 is a REGRESSION bar, so test it as one: run the existing persistence-reload, genesis-cheats and dump/load tests unchanged with a revm engine installed. If they need editing to pass, the state-ownership decision was implemented wrongly.
 - Story 12 is cheap to assert and easy to forget: a `createNode({stateMode: 'trie', engine: revm})` must throw, and the message must say why.
+
+### Why the host-callback design is affordable (measured, so it need not be re-derived)
+
+The obvious worry about keeping state on the JS side is that every `SLOAD` crosses the wasm boundary. It does not. **The boundary is crossed once per COLD state access, because the engine's journal caches within a transaction.** Measured directly, by counting host storage callbacks for two contracts that each execute 2,000 `SLOAD`s:
+
+| contract | host storage callbacks | gas |
+| --- | --- | --- |
+| reads the SAME slot 2,000 times | **1** | 283,003 |
+| reads 2,000 DIFFERENT slots | **2,000** | 4,283,003 |
+
+The 4,000,000 gas difference is exactly 2000 x 2000, the cold-2100 versus warm-100 delta, so callbacks track EIP-2929 cold accesses one-for-one. In other words, a crossing is paid precisely when the EVM already charges a cold-access premium.
+
+At roughly 1.3 microseconds per cold access, the cost per frame is therefore driven by DISTINCT slots touched, not by `SLOAD` count:
+
+| distinct slots read per tick | cost per frame | share of a 16.6 ms budget |
+| --- | --- | --- |
+| 200 | 0.26 ms | 1.6% |
+| 2,000 | 2.6 ms | 16% |
+| 10,000 | 13 ms | 78% |
+
+Two caveats that cut in opposite directions, both worth knowing:
+
+- **Against this design:** EIP-2929 resets warm/cold every transaction, so a game loop re-reading the same entities every tick RE-PAYS those crossings every tick. State living inside wasm would pay once, ever. Gas is identical either way; only wall-clock differs.
+- **For it:** roughly 60% of the 1.3 microseconds is JS-side hex key construction (a 104-character string per access), not the crossing itself, which measures ~0.51 microseconds against a null host. That is fixable WITHOUT moving ownership, and it is the same flat `addr_slot` map problem noted above for `clear_storage`.
+
+**When to revisit:** if a real contract reads thousands of DISTINCT storage slots per tick. That is directly measurable with the `frame` and `floor` rows already in the benchmark suite, so it should be measured rather than argued. Moving ownership into wasm is not foreclosed by this decision — because the host functions are an adapter, a wasm-side cache spanning transactions could be added later (it would need invalidation on the `evm_set*` cheats), and the seam survives.
+
+The reason ownership stays on the JS side is NOT primarily the migration cost of `dumpState`/persistence/cheats. It is that both engines can then run against IDENTICAL state, which is what lets the conformance differential compare them in place, keeps a JS-only fallback working when the wasm fails to load, and preserves the `@ethereumjs/mpt`-over-authoritative-state route to a state root. Moving state into wasm would forfeit all three permanently.
 
 ## Out of Scope
 

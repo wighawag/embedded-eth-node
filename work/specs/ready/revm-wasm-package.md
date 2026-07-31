@@ -37,6 +37,10 @@ A SEPARATE repository producing an npm package that ships the prebuilt `.wasm` p
 
 ## Implementation Decisions
 
+> **PROMOTE TO ADR at tasking time**, in the NEW repository's own `docs/adr/`, since that is where it will be read: the build configuration below — proposed title: "all precompiles, opt-level 3, and why neither half is negotiable". Both halves are counterintuitive and both are measured: subsetting precompiles CHANGES GAS (an omitted address stops being pre-warmed, costing an extra cold access), and `opt-level = "z"` halves the artifact but costs 2.4x to 6x on keccak, which is the workload that motivated the exercise. A future maintainer looking at a 434 KB artifact will absolutely try to shrink it, and this is the record that tells them what breaks.
+>
+> The choice of a separate repository is already recorded in this repo's `docs/adr/0003-revm-wasm-is-the-engine-direction.md` (no candidate ships a browser-ready wasm, so the artifact must be built and published from a repo we control) and does not need a second ADR.
+
 - A SEPARATE repository, not a directory in this monorepo. The Rust toolchain belongs in the package's repo, not in `embedded-eth-node`'s CI. Confirmed with the maintainer.
 - Ship the prebuilt `.wasm` in the published tarball. Consumers never build.
 - Build configuration is fixed by measurement and both halves are load-bearing: **all precompiles, `opt-level = 3`**. Subsetting precompiles CHANGES GAS, because an omitted precompile address stops being pre-warmed and costs an extra cold access; and `opt-level = "z"` halves the artifact but costs 2.4x to 6x on keccak, which is the workload that motivated the whole exercise.

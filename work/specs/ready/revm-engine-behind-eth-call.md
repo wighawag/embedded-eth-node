@@ -41,6 +41,10 @@ Both delivery shapes are supported by the same seam: a bundler-resolved asset fo
 
 ## Implementation Decisions
 
+> **PROMOTE TO ADR at tasking time.** The engine-injection shape below clears the ADR bar and should outlive this launch snapshot — proposed title: "the EVM engine is an injected object, not a named string". The why: naming an engine by string (`engine: 'revm'`) would force the core to reference every engine it can name, which defeats tree-shaking and makes the JS-only consumer pay for revm. Injecting an object keeps the core's dependency graph free of revm entirely. It is hard to reverse because it is the public API shape, and it is surprising because the string form is the more obvious design.
+>
+> Everything else here is ordinary implementation detail and can be trimmed into tasks as usual.
+
 - The engine is an OBJECT satisfying a small interface, passed as `NodeOptions.engine`. The core must not `import` any revm module; only the optional subpath export does.
 - Ship the revm binding as a separate subpath (`embedded-eth-node/revm`) so the default entry point's dependency graph is unchanged.
 - Route only `eth_call` and `eth_estimateGas`. `eth_estimateGas` must keep its current semantics (execution gas plus intrinsic, verified equal to `runTx`'s `totalGasSpent`), which means the engine reports execution gas and the node adds intrinsic exactly as it does now.
