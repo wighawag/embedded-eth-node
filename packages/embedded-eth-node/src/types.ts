@@ -5,7 +5,14 @@
  * NOTHING about Workers — because `request()` is already async, the exact same
  * object works unchanged whether called on the main thread or across a thread
  * boundary (see ../worker.ts for the optional comlink wrapper).
+ *
+ * The `@ethereumjs/*` imports below are TYPE-ONLY (erased at build time), so this
+ * module — and the core entry point that re-exports it — adds no runtime import.
  */
+import type {Address} from '@ethereumjs/util';
+import type {Block} from '@ethereumjs/block';
+import type {StateManagerInterface} from '@ethereumjs/common';
+import type {Common} from '@ethereumjs/common';
 
 /** Minimal EIP-1193 request args. */
 export interface RequestArguments {
@@ -84,6 +91,98 @@ export type StateMode = 'none' | 'trie';
  */
 export type SenderMode = 'recover' | 'trusted';
 
+/**
+ * One read-only call for an {@link ReadEngine} to execute: exactly the inputs the
+ * node's pure-read helper has always handed `runCall`, and nothing more.
+ *
+ * The value types are `@ethereumjs/*`'s own (`Address`, `Block`) rather than hex
+ * strings, because the node already holds them in that form and the default
+ * engine passes them straight through — converting at the seam would add cost and
+ * a chance to change behaviour, in a refactor whose whole point is changing none.
+ */
+export interface ReadCallRequest {
+	/** Caller (`msg.sender`). The node defaults it to the zero address. */
+	readonly from: Address;
+	/** Callee, or `undefined` for a CREATE-shaped call (gas estimation). */
+	readonly to?: Address;
+	/** Calldata (or init code when `to` is absent). */
+	readonly data: Uint8Array;
+	readonly value: bigint;
+	/** Gas made available to EXECUTION (intrinsic gas is the node's business). */
+	readonly gasLimit: bigint;
+	/** The block the call observes (NUMBER, TIMESTAMP, COINBASE, BASEFEE...). */
+	readonly block: Block;
+}
+
+/** What an engine reports back for a read-only call. */
+export interface ReadCallResult {
+	/** Return data (or the revert data when `error` is set). */
+	readonly returnValue: Uint8Array;
+	/**
+	 * EXECUTION gas only — NOT a transaction's total. `eth_estimateGas` adds the
+	 * intrinsic gas (21000 base, +32000 create, calldata bytes, EIP-3860 initcode)
+	 * on top, exactly as it did before the seam existed.
+	 */
+	readonly executionGasUsed: bigint;
+	/** Set iff execution failed (revert/halt); the EVM's own error string. */
+	readonly error?: string;
+}
+
+/**
+ * What the node hands an engine once, at construction, so the engine can reach
+ * the node's AUTHORITATIVE state. Deliberately minimal: a later engine that needs
+ * more (block hashes, say) adds a field here rather than the node guessing now.
+ */
+export interface ReadEngineContext {
+	/** The node's live state manager. The node keeps ownership; do not fork it. */
+	readonly stateManager: StateManagerInterface;
+	/** Chain params (chain id, hardfork, custom crypto) the node runs under. */
+	readonly common: Common;
+	/**
+	 * The node's state mode. An engine that cannot serve it must THROW here —
+	 * `connect` is called during `createNode()`, so the refusal lands at
+	 * construction rather than at the first opcode.
+	 */
+	readonly stateMode: StateMode;
+}
+
+/**
+ * An EVM behind the node's READ path — `eth_call`, `eth_estimateGas` and
+ * `eth_fillTransaction`'s gas estimation. Transactions are NOT routed through it
+ * (they run on `@ethereumjs/vm`), which is why the node exposes it as
+ * {@link SlimNode.readEngine} rather than as "the engine".
+ *
+ * An engine is an INJECTED OBJECT, never a name the core resolves — see
+ * `docs/adr/0006-the-engine-is-an-injected-object-not-a-named-string.md`.
+ *
+ * A read-only call MUST NOT mutate the node's state. Whatever it takes to hold
+ * that (a checkpoint/revert, a warm-slot reset, or nothing at all) is the
+ * ENGINE's business, not the node's: the default `@ethereumjs/evm` engine needs
+ * both and pays for both, an engine that is structurally incapable of committing
+ * pays for neither.
+ */
+export interface ReadEngine {
+	/**
+	 * Stable identifier for bug reports (`'@ethereumjs/evm'` for the default).
+	 * Surfaced verbatim as `node.readEngine.id`.
+	 */
+	readonly id: string;
+	/**
+	 * Bind to the node's state + chain context. Called EXACTLY once, during
+	 * `createNode()`, before any call. Optional: an engine the node itself builds
+	 * already has what it needs. Throwing here fails node construction.
+	 */
+	connect?(context: ReadEngineContext): void | Promise<void>;
+	/** Execute one read-only call against the node's CURRENT state. */
+	call(request: ReadCallRequest): Promise<ReadCallResult>;
+}
+
+/** Which engine a node is running its reads on (see {@link SlimNode.readEngine}). */
+export interface ReadEngineInfo {
+	/** The engine's stable identifier, e.g. `'@ethereumjs/evm'`. */
+	readonly id: string;
+}
+
 export interface NodeOptions {
 	/** EIP-155 chain id. Default 31337 (anvil/hardhat-style local). */
 	chainId?: number;
@@ -125,6 +224,19 @@ export interface NodeOptions {
 	 * omitted, the node uses its own constant fee market + a zero coinbase.
 	 */
 	blockEnv?: BlockEnv;
+	/**
+	 * EVM engine for the READ path (`eth_call`, `eth_estimateGas` and
+	 * `eth_fillTransaction`'s estimation). Default: `@ethereumjs/evm`, i.e. exactly
+	 * what the node has always run. Transactions run on `@ethereumjs/vm`
+	 * regardless, so a node with a non-default engine runs TWO EVMs — read
+	 * `node.readEngine` to know which one produced a read.
+	 *
+	 * An engine is passed as an OBJECT, never named by a string: the core must not
+	 * reference engines it does not use, or a consumer of the JS-only path would
+	 * pay (in bundle size) for an engine they never import. See
+	 * `docs/adr/0006-the-engine-is-an-injected-object-not-a-named-string.md`.
+	 */
+	engine?: ReadEngine;
 }
 
 /** A full genesis account (all fields optional except an implicit zero default). */
@@ -167,6 +279,13 @@ export interface SlimNode {
 	readonly stateMode: 'none' | 'trie';
 	/** The sender mode this node was created with. */
 	readonly senderMode: SenderMode;
+	/**
+	 * The engine this node runs READS on (`eth_call`, `eth_estimateGas`,
+	 * `eth_fillTransaction`'s estimation) — `{id: '@ethereumjs/evm'}` unless an
+	 * engine was injected. It is NOT what executed transactions: those always run
+	 * on `@ethereumjs/vm`, so a receipt can never be attributed to this engine.
+	 */
+	readonly readEngine: ReadEngineInfo;
 	/** Stop timers / release resources. */
 	dispose(): Promise<void>;
 }

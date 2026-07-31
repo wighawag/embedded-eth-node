@@ -25,6 +25,8 @@ export const workerApi = {
 			loadState: (s: any) => node.loadState(s),
 			getStateRoot: () => node.getStateRoot(),
 			stateMode: node.stateMode,
+			// Plain values, so they clone across the boundary as-is.
+			readEngine: node.readEngine,
 			// newHeads over comlink: the callback must be a comlink-proxied function.
 			onNewHead: (cb: (h: {number: number; hash: string}) => void) =>
 				proxy(node.onNewHead(cb)),

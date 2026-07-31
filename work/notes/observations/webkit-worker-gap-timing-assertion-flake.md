@@ -31,6 +31,10 @@ The assertion is not worthless — it is guarding a real property (the Worker ke
 
 It reds the acceptance gate for work that has nothing to do with it. Every task in this repo pays the gate, so a coin-flip in it costs an entire `do` run (build agent + gate + review, tens of minutes) and routes an innocent task to needs-attention. It cost exactly that here.
 
+## Addendum, 2026-07-31 (seen again while driving `engine-seam-with-ethereumjs-default`)
+
+Same assertion, wider margin, and not only on WebKit. Across five back-to-back full-suite runs on one machine the reported `mainThreadMaxGap` was 9, 12, 12.5, 13, 14.999, 19.4, 21, 23 ms — i.e. it fails or passes depending on how busy the machine is, and Chromium failed it once too. Running `test/worker.spec.ts` alone passed every time. So the bound is not merely one clock-quantum tight on WebKit: it is a wall-clock scheduler measurement asserted under whatever load the rest of the suite (and the previous run's browsers shutting down) happens to impose. The task being gated when this was seen touches nothing in the Worker path beyond adding one plain property to the proxied node.
+
 ## Shapes a fix could take (not chosen, not tasked)
 
 - Raise the bound to something the clamp cannot reach (e.g. `< 25`), keeping the property while stepping off the quantum boundary.

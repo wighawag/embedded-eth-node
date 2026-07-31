@@ -17,6 +17,12 @@
  *     (tx.maxFeePerGas ? min(maxPriorityFeePerGas, maxFeePerGas-baseFee)+baseFee
  *      : tx.gasPrice) — reading maxFeePerGas unconditionally throws on legacy txs.
  *
+ * The READ path (`eth_call`, `eth_estimateGas`, `eth_fillTransaction`'s
+ * estimation) runs on a swappable ENGINE (see ./engine.ts), defaulting to this
+ * VM's own `@ethereumjs/evm`. Transactions are NOT routed through it — they run
+ * on `@ethereumjs/vm` whatever engine is installed, which is why the node reports
+ * `readEngine` rather than "the engine".
+ *
  * Transport-agnostic: just `request()` (async) + mine/dump/load. Knows nothing
  * about Workers — see ./worker-entry.ts for the optional comlink wrapper.
  */
@@ -44,9 +50,12 @@ function hexToBytes(s: string): Uint8Array {
 	return hexToBytesStrict((s.startsWith('0x') ? s : '0x' + s) as `0x${string}`);
 }
 import {keccak_256} from '@noble/hashes/sha3.js';
+import {createEthereumjsReadEngine} from './engine.js';
 import {
 	RpcError,
 	type NodeOptions,
+	type ReadCallResult,
+	type ReadEngine,
 	type SenderMode,
 	type SlimNode,
 	type RequestArguments,
@@ -179,6 +188,16 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 		stateManager: sm,
 		blockchain: mockBlockchain,
 	});
+
+	// The READ engine: what `eth_call` / `eth_estimateGas` / `eth_fillTransaction`
+	// execute on. Default = this VM's own `@ethereumjs/evm`. An injected engine is
+	// connected HERE, during construction, so an engine that cannot serve this
+	// node's configuration throws now rather than at the first opcode. Note the
+	// scope: transactions run on `@ethereumjs/vm` whatever engine is installed.
+	const readEngine: ReadEngine =
+		options.engine ??
+		createEthereumjsReadEngine({evm: vm.evm, stateManager: sm});
+	await readEngine.connect?.({stateManager: sm, common, stateMode});
 
 	let latestNumber = 0;
 	let parentHash = hexToBytes(ZERO_HASH);
@@ -622,10 +641,19 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 		};
 	}
 
-	// ---------- eth_call / estimateGas via runCall on the EVM (no signing) ----------
-	async function evmCall(
-		params: any,
-	): Promise<{returnValue: Uint8Array; gasUsed: bigint; error?: string}> {
+	// ---------- eth_call / estimateGas through the READ ENGINE (no signing) ----------
+	/**
+	 * The node's single pure-read helper, and the engine seam: it normalises RPC
+	 * params into a {@link ReadCallRequest} and hands them to the read engine.
+	 * Three dispatcher cases use it (`eth_call`, `eth_estimateGas` and
+	 * `eth_fillTransaction`'s estimation).
+	 *
+	 * Keeping a read PURE is the engine's job, not this function's — the default
+	 * `@ethereumjs/evm` engine checkpoints/reverts and resets EIP-2929 warmth
+	 * because that EVM requires it; an engine that cannot commit pays for neither.
+	 * See ./engine.ts.
+	 */
+	async function evmCall(params: any): Promise<ReadCallResult> {
 		const from = params.from
 			? createAddressFromString(params.from)
 			: createAddressFromString('0x0000000000000000000000000000000000000000');
@@ -637,42 +665,14 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 				: new Uint8Array();
 		const value = params.value ? BigInt(params.value) : 0n;
 		const gasLimit = params.gas ? BigInt(params.gas) : 30_000_000n;
-		// eth_call / eth_estimateGas must NEVER mutate state. runCall on a CREATE
-		// bumps the caller nonce (for address derivation) and writes storage, so we
-		// checkpoint the SimpleStateManager and revert after — reads stay pure.
-		//
-		// CRITICAL: runCall (unlike runTx) does NOT reset the EVM journal's
-		// warm/access (EIP-2929) tracking or the EIP-2200 original-storage cache
-		// between calls — only runTx calls journal.cleanup(). Without resetting them
-		// here, slot warmth + "original value" leak from one pure call into the next,
-		// so the SECOND+ eth_estimateGas for a warm SSTORE comes back ~2000 gas too
-		// low (warm/dirty pricing instead of SSTORE_RESET). viem then uses that
-		// under-estimate as the tx gas LIMIT and the real tx runs OUT OF GAS. Reset
-		// the per-tx EVM state before each call so every estimate is computed from a
-		// clean baseline, exactly as a fresh transaction would see it. (cleanJournal
-		// + originalStorageCache.clear() reset only the warm/access bookkeeping; they
-		// do NOT mutate account state.)
-		const evmAny = vm.evm as any;
-		evmAny.journal?.cleanJournal?.();
-		sm.originalStorageCache?.clear?.();
-		await sm.checkpoint();
-		try {
-			const res = await vm.evm.runCall({
-				caller: from,
-				to,
-				data,
-				value,
-				gasLimit,
-				block: blockStore.get(latestNumber)!.block as any,
-			});
-			return {
-				returnValue: res.execResult.returnValue,
-				gasUsed: res.execResult.executionGasUsed,
-				error: res.execResult.exceptionError?.error,
-			};
-		} finally {
-			await sm.revert();
-		}
+		return readEngine.call({
+			from,
+			to,
+			data,
+			value,
+			gasLimit,
+			block: blockStore.get(latestNumber)!.block,
+		});
 	}
 
 	// ---------- the EIP-1193 dispatcher ----------
@@ -714,7 +714,7 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 					throw new RpcError(3, 'execution reverted', hex(r.returnValue));
 				const dataHex: string = p.data ?? p.input ?? '0x';
 				const isCreate = !p.to;
-				return numHex(r.gasUsed + intrinsicGas(dataHex, isCreate));
+				return numHex(r.executionGasUsed + intrinsicGas(dataHex, isCreate));
 			}
 
 			case 'eth_fillTransaction': {
@@ -742,7 +742,7 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 					const r = await evmCall(p);
 					if (r.error)
 						throw new RpcError(3, 'execution reverted', hex(r.returnValue));
-					gas = r.gasUsed + intrinsicGas(dataHex, isCreate);
+					gas = r.executionGasUsed + intrinsicGas(dataHex, isCreate);
 				}
 				// Fee fields: legacy iff caller passed gasPrice (and no 1559 fields),
 				// otherwise EIP-1559 with the node's constant fee market.
@@ -1164,6 +1164,9 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 		loadState,
 		stateMode,
 		senderMode,
+		// Identity only: the engine object itself stays internal, so the reading is a
+		// plain value that survives a Worker/comlink boundary unchanged.
+		readEngine: {id: readEngine.id},
 		async getStateRoot() {
 			if (stateMode !== 'trie') {
 				throw new RpcError(

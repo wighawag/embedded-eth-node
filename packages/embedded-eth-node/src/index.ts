@@ -16,6 +16,13 @@ export type {
 	MiningConfig,
 	StateMode,
 	SenderMode,
+	// The engine seam: implement `ReadEngine` to put a different EVM behind the
+	// node's read path. Types only — the core never imports a non-default engine.
+	ReadEngine,
+	ReadEngineContext,
+	ReadEngineInfo,
+	ReadCallRequest,
+	ReadCallResult,
 	GenesisAccount,
 	BlockEnv,
 	PersistenceAdapter,

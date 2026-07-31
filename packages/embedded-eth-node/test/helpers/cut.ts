@@ -6,6 +6,9 @@
  * Modes (one per library test):
  *   - 'slim-node-checks'   : legacy/1559 receipts, honest -32601 gaps, dump/load,
  *                            state-root mode (none throws / trie real root)
+ *   - 'engine-seam'        : the read path runs on an ENGINE — default
+ *                            @ethereumjs/evm, injected engine serves all three
+ *                            read-path callers, transactions stay on the VM
  *   - 'trusted-sender'     : senderMode:'trusted' (skip ecrecover) is byte-identical
  *                            to 'recover', the cheat is absent by default, and it
  *                            really does impersonate
@@ -27,6 +30,7 @@ import type {
 } from 'playwright-browser-harness/contract';
 import {captureEnv} from 'playwright-browser-harness/contract';
 import {slimNodeHonestyChecks} from './slim-node-checks.js';
+import {runEngineSeamChecks} from './engine-seam.js';
 import {runTrustedSenderChecks} from './trusted-sender.js';
 import {workerRoundtrip} from './worker-roundtrip.js';
 import {runConformance} from './conformance.js';
@@ -48,6 +52,18 @@ const cut: CodeUnderTest = {
 		if (ctx.params.mode === 'slim-node-checks') {
 			try {
 				results.slimNodeChecks = await slimNodeHonestyChecks();
+			} catch (e) {
+				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
+			}
+			return {results, timings, errors, env: captureEnv()};
+		}
+
+		// engine-seam: the node's READ path (eth_call / eth_estimateGas /
+		// eth_fillTransaction) runs on an injected engine, defaulting to
+		// @ethereumjs/evm with its pure-read checkpoint + EIP-2929 reset intact.
+		if (ctx.params.mode === 'engine-seam') {
+			try {
+				results.engineSeam = await runEngineSeamChecks();
 			} catch (e) {
 				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
 			}
