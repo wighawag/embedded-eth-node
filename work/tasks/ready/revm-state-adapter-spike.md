@@ -66,3 +66,7 @@ The deliverable is the ANSWER, not the code. Land it as an ADR in `docs/adr/` (i
 > Done means: `revm-engine-subpath` can be rewritten from a known answer instead of an assumption, and the reason is written down where the next reader will find it.
 >
 > RECORD non-obvious in-scope decisions durably and link them from the done record.
+
+## Requeue 2026-07-31
+
+Bounce was a WebKit timing flake in worker.spec.ts (main-thread gap: expected < 15, received exactly 15), not a defect in this task — this task writes docs only. Continue from the kept branch; no code change is needed to satisfy the gate.
