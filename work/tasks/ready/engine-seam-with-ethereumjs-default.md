@@ -18,6 +18,10 @@ Also expose which engine is active, so a bug report can say unambiguously which 
 
 This is deliberately a pure refactor. It is a real tracer bullet rather than a stub because "the entire existing suite still passes, on both browser engines" is a complete, demoable outcome — and because every later task in this spec is only safe if this one changed nothing.
 
+> **FORWARD-POINTER, added after `revm-state-adapter-spike` landed (`docs/adr/0005-revm-reads-the-nodes-state-through-simplestatemanagers-stacks.md`) — it constrains WHERE you put the seam.** The pure-read helper described below does two things before running the call: it resets the EIP-2929 warm/access tracking, and it `checkpoint()`s the state manager so the call cannot mutate state. Both are requirements of `@ethereumjs/evm` specifically. A revm engine needs NEITHER: `Revm#call` is structurally incapable of committing (proved in the spike, section 5), so it needs no checkpoint at all — and the checkpoint is not free, because `checkpointSync()` copies all three state maps and clones every account. Measured in the spike: 0.384 ms per call at 2002 accounts, which is larger than the entire revm read it would be wrapping (0.016 ms).
+>
+> So do NOT leave the checkpoint/revert and the 2929 reset in a node-side wrapper that every engine pays. Put them INSIDE the default `@ethereumjs/evm` engine, where they belong, and let the seam be the plain "execute this read-only call" boundary. Getting this wrong is silent: everything still works, the gas is still right, and the revm engine simply carries an O(state) copy per call forever, which is most of what it came to remove.
+
 ## Acceptance criteria
 
 - [ ] `createNode()` with no engine option behaves identically to before: the whole existing test suite passes unchanged, on both Chromium and WebKit.
@@ -28,6 +32,7 @@ This is deliberately a pure refactor. It is a real tracer bullet rather than a s
 - [ ] The engine interface is exported as a TYPE so an external engine can be written against it.
 - [ ] `CONTEXT.md`'s glossary entry for *engine* is updated to match what the seam actually is: today it says "the EVM implementation behind the node", which after this change is true only of the READ path. Pin the term so the next author cannot re-fork it.
 - [ ] The EIP-2929 warm/access reset that the current read path performs before each pure call is preserved by the default engine. Dropping it silently under-reports gas by ~2000 on a warm slot; there is a long comment at the existing reset site explaining why, and a benchmark assertion that catches it.
+- [ ] The reset AND the state-manager checkpoint/revert live inside the default engine, not in a node-side wrapper above the seam, so an engine that needs neither does not pay for them (see the forward-pointer above and ADR 0005).
 - [ ] `eth_estimateGas` keeps its exact current semantics: the engine reports EXECUTION gas and the node adds intrinsic gas, as it does today.
 - [ ] No new runtime dependency is added to the core entry point.
 - [ ] Tests cover the new behaviour (mirror the repo's existing test style).
