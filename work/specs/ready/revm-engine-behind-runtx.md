@@ -1,10 +1,20 @@
 ---
 title: revm-wasm behind transaction execution
 slug: revm-engine-behind-runtx
+needsAnswers: true
 taskedAfter: [revm-engine-behind-eth-call]
 ---
 
 > Launch snapshot — records intent at creation, NOT maintained. Current truth: `docs/adr/` (decisions) + the code; remaining work: `work/tasks/ready/` tasks.
+
+<!-- open-questions -->
+
+## Open questions
+
+1. **Can revm's host callbacks read the node's state at all, given they must be SYNCHRONOUS?** This spec's "State ownership" section below assumes an adapter over `SimpleStateManager` with reads on demand, and that assumption is not yet established. `revm-wasm`'s own contract says `getAccount`, `getStorage`, `getCode` and `getBlockHash` must be synchronous, because the interpreter is a synchronous loop inside wasm with no suspension point mid-opcode; every read on `SimpleStateManager` and `MerkleStateManager` returns a `Promise`. The task `revm-state-adapter-spike` (in `work/tasks/ready/`) exists to answer this for the READ half. Do not task this spec until it has, or its tasks will be cut from a premise nobody has checked.
+2. **Which stories does the sibling spec already deliver?** `revm-engine-behind-eth-call` is now tasked, and three of the stories below overlap with tasks it already emitted: story 12 (reject `stateMode:'trie'` at `createNode()`) is a criterion of `revm-engine-subpath`; story 11 (loud failure for a configuration the engine cannot serve) is the same sentence as that spec's story 10, owned by `engine-seam-docs-and-honest-edges`; story 9 (conformance differential against the revm engine) is owned for the READ half by `revm-engine-under-conformance-and-gate`. Before tasking, check what actually landed and cut only the remainder — a task that narrates already-done work is a changelog wearing a spec's shape.
+
+<!-- /open-questions -->
 
 ## Problem Statement
 

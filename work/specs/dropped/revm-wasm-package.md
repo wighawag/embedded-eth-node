@@ -2,9 +2,12 @@
 title: A published revm-wasm package, built reproducibly from a pinned revm
 slug: revm-wasm-package
 humanOnly: true
+reason: delivered externally — revm-wasm@0.1.0 is published on npm (MIT, zero runtime dependencies, prebuilt wasm in the tarball, typed API, ./wasm-url subpath, per-account storage indexing in MemoryStore), so stories 1, 2, 3, 5, 6, 9 and 12 are shipped; the remaining stories (7, 8, 10, 11 — pinned rebuild, release workflow, in-package fixtures) belong to that package's own repository, not this one. No tasks were ever emitted from this spec here.
 ---
 
 > Launch snapshot — records intent at creation, NOT maintained. Current truth: `docs/adr/` (decisions) + the code; remaining work: `work/tasks/ready/` tasks.
+
+> **DROPPED — the premise below is no longer true.** This spec opens by stating that no published package exists. `revm-wasm@0.1.0` has since been published from a separate repository, which is exactly the shape this spec asked for, and `work/specs/tasked/revm-engine-behind-eth-call.md` now consumes it as an ordinary npm dependency. The maintainer-facing remainder (an exactly pinned revm revision, the release workflow, the behavioural rebuild gate) is work for the package's own repo and is not tracked here. Kept for the reasoning, not as pending work.
 
 ## Problem Statement
 
