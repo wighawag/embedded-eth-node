@@ -40,7 +40,9 @@ The core entry point must not grow. A consumer who never imports the subpath mus
 
 ## Acceptance criteria
 
-- [ ] `embedded-eth-node/revm` exports a factory producing an engine the node accepts.
+- [ ] `embedded-eth-node/revm` exports a factory producing an engine the node accepts, receiving its context through the seam's `connect(context)` hook (the lifecycle hook `engine-seam-with-ethereumjs-default` shipped) rather than capturing anything at construction.
+- [ ] `getBlockHash` is wired to the node's blocks by WIDENING `ReadEngineContext` additively, not by reaching around the seam. The context currently carries `{stateManager, common, stateMode}` and no block access, while an unwired `getBlockHash` makes `BLOCKHASH` silently answer nothing. ADR 0006 names this as the sanctioned additive change. (Raised by the Gate-2 reviews of both preceding tasks.)
+- [ ] The engine identity survives the comlink Worker boundary, with a test. `readEngine` was added to the worker-entry proxy but nothing asserts it round-trips — that is the precise omission that silently dropped `senderMode` (`work/notes/observations/worker-entry-drops-sendermode.md`).
 - [ ] `eth_call` and `eth_estimateGas` through the revm engine return the SAME results and the SAME gas as the default engine, on the same state.
 - [ ] The engine reads the node's authoritative state — a value written by a transaction is visible to a subsequent `eth_call` on the revm engine, without any explicit sync step.
 - [ ] The mechanism by which that read is SYNCHRONOUS is the one the spike's ADR sanctions, and any coupling it introduces (e.g. to a specific state-manager implementation) is documented at the code site.

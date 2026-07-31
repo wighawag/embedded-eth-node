@@ -23,6 +23,7 @@ Those sections justify themselves with real measured numbers rather than adjecti
 - [ ] An engine that fails to initialise surfaces a real error naming the cause; the node does NOT silently construct with the default engine instead.
 - [ ] The node-side mechanism for refusing a configuration an engine cannot serve exists and fails loudly rather than degrading. (The revm + `stateMode:'trie'` INSTANCE is owned by `revm-engine-subpath`; this criterion is the general mechanism and its test, not a second copy of that check.)
 - [ ] The RPC-surface table in the README notes which methods route through the engine.
+- [ ] Passing an engine to `createWorkerNode` fails HONESTLY. `WorkerNodeOptions extends NodeOptions`, so `engine` is now typed-legal on the Worker path, but comlink structured-clones the options object and an engine is a function-bearing object — today that produces an opaque `DataCloneError` from deep inside comlink, which is exactly the plausible-looking-failure this repo's honest-edge convention exists to prevent. Either reject it at the worker client with a real error naming the reason, or make it work; do not leave it as a `DataCloneError`. (Raised by the Gate-2 review of `engine-seam-with-ethereumjs-default`.)
 - [ ] Tests cover the failure paths, in the style of the existing honest-edge checks.
 
 ## Blocked by
