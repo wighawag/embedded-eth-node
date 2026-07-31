@@ -1,0 +1,65 @@
+
+=== 1. control: revm-wasm + its own MemoryStore ===
+      revm 42.0.1 rev 640eafa91beae73bafb7776845d53133f603048f abi=1 outcome=v3
+PASS  control deploy status: success
+PASS  control number() execution gas: 2446
+PASS  control sumTo(2000) execution gas: 498689
+PASS  control keccakLoop(2000) execution gas: 1107052
+PASS  control keccakLoop(2000) result: 0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a
+
+=== 2. stateMode:'none' — revm over the node's live SimpleStateManager ===
+PASS  node state manager: SimpleStateManager
+PASS  deployed through the node: 0x1
+      counter at 0x5fbdb2315678afecb367f032d93f642f64180aa3
+PASS  revm number() status: success
+PASS  revm number() execution gas: 2446
+PASS  revm number() return: 0
+PASS  revm sumTo(2000) execution gas: 498689
+PASS  revm keccakLoop(2000) execution gas: 1107052
+PASS  revm keccakLoop(2000) result: 0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a
+      number() asked the store for 3 account(s), 2 code blob(s), 1 slot(s)
+      sumTo(2000) asked for 3 account(s), 2 code blob(s), 0 slot(s)
+PASS  a call to an account that does not exist is fine: success
+PASS  ethereumjs number() execution gas: 2446
+
+=== 3. state coherence: a transaction, then a revm read ===
+PASS  revm sees the tx with no sync step: 1
+      warm-slot read now costs 2446 execution gas
+
+=== 4. checkpoint/revert: top-of-stack vs a cached frame ===
+PASS  top-of-stack view sees the checkpointed write: 42
+PASS  cached-frame view is STALE: 1
+PASS  top-of-stack view follows the revert: 1
+
+=== 5. a mid-call write never reaches the store (call cannot commit) ===
+PASS  revm increment() as a CALL succeeds: success
+PASS  its log carries the post-write value: 2
+PASS  node's state is unchanged by it: 1
+PASS  node agrees: 1
+      every write method on the store throws; none was called
+
+=== 6. the codeHash -> code index ===
+      index holds 1 entr(ies), derived from the live code map
+PASS  code written AFTER the index was built is readable: success
+PASS    and returns real data: 42
+      index now holds 2 entr(ies)
+PASS  a stale index fails SILENTLY (status): success
+PASS    with empty return data: 0
+
+=== 7. rough cost, Node 24 (indicative only; the real budget is a browser) ===
+      ethereumjs eth_call, 2 accounts in state: 0.172 ms
+      revm + adapter,      2 accounts in state: 0.035 ms
+      ethereumjs eth_call, 2002 accounts:       1.012 ms
+      revm + adapter,      2002 accounts:       0.016 ms
+      one checkpoint+revert alone, 2002 accounts: 0.384 ms (the O(state) copy)
+
+=== 8. stateMode:'trie' — is there a synchronous view? ===
+      state manager is MerkleStateManager
+PASS  has accountStack (the sync view): false
+PASS  has a trie instead: true
+PASS  its account cache is configured: false
+PASS  getAccount returns a Promise: true
+      MerkleStateManager reads go through @ethereumjs/mpt: trie.get() is async
+      and the optional caches are (a) off here and (b) miss to the trie anyway.
+
+ALL CHECKS PASSED

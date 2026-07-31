@@ -1,0 +1,53 @@
+# revm reads the node's state through `SimpleStateManager`'s checkpoint stacks, so the revm engine serves `stateMode:'none'` only
+
+`revm-wasm`'s `StateStore` reads must be synchronous (the interpreter is a synchronous loop inside wasm, and a state read happens mid-opcode), while every method on `StateManagerInterface` returns a `Promise`. There IS a synchronous path underneath the interface, but only for `SimpleStateManager`: its `accountStack`, `codeStack` and `storageStack` are public `Map` stacks whose TOP frame is the live state. We adopt that reach-through for the revm read path, and refuse `stateMode:'trie'` at construction, because `MerkleStateManager` has no synchronous view at any depth. Measured, not assumed: `docs/spikes/revm-state-adapter-spike/` runs `eth_call` on `revm-wasm@0.1.0` against the node's own live state with nothing copied in ahead of the call, and charges the reference gas exactly (`number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 returning `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`).
+
+## What the synchronous path is, precisely
+
+`SimpleStateManager` declares three fields with no access modifier, so they are public in the published `.d.ts`:
+
+```ts
+accountStack: Map<PrefixedHexString, Account | undefined>[];
+codeStack: Map<PrefixedHexString, Uint8Array>[];
+storageStack: Map<string, Uint8Array>[];
+```
+
+The adapter reads `stack[stack.length - 1]` on every access. It cannot use `topAccountStack()` / `topCodeStack()` / `topStorageStack()`, which express exactly this intent, because those are `protected`. Key formats are the state manager's own and must be reproduced byte for byte: `address.toString()` (`0x`-prefixed lowercase hex) for accounts and code, and `` `${address}_${bytesToHex(slot32)}` `` for storage. Storage VALUES are stored in shortest form (the interpreter strips leading zeros before `putStorage`), so the adapter left-pads to 32 bytes and maps a zero-length value to `undefined`.
+
+**The read must take the TOP of the stack every time, not a frame captured once.** The node checkpoints the state manager around each pure call (and the EVM journal checkpoints again per frame), and `checkpointSync()` pushes a full COPY of all three maps. An adapter that caches the frame it saw at construction keeps answering from the frame below: the spike's section 4 shows the top-of-stack view returning 42 after a checkpointed write and 1 again after the revert, while the cached-frame view answers 1 throughout, with no error. This is not a theoretical hazard, it is the default outcome of the obvious implementation.
+
+A read after a mid-call WRITE is a non-issue by construction: `Revm#call` cannot be made to commit, so a store backing `eth_call` never sees `setStorage` at all. revm resolves the SSTORE-then-SLOAD inside its own journal. The spike proves it both ways: `increment()` run as a `call` returns a log carrying the post-write value while the node's slot 0 is untouched, and all five write methods on the adapter throw.
+
+## `stateMode:'trie'` is a no, and the reason is short
+
+`MerkleStateManager.getAccount` does `await this._trie.get(address.bytes)` against `@ethereumjs/mpt`; storage and code are the same shape. Its optional `caches` are (a) not configured by `node.ts`, and (b) would not help anyway, because a miss falls through to the async trie and there is no synchronous "is it cached" answer the EVM could take. There is no top-of-stack equivalent, no synchronous read at any depth, and nothing to reach through to. So `createNode({stateMode:'trie', engine: revmEngine})` must throw AT CONSTRUCTION naming the reason, rather than constructing and failing at the first opcode.
+
+## What it costs
+
+This reaches past `StateManagerInterface` into one implementation's internals, and the type system will not catch it going wrong:
+
+- **The node is pinned to `SimpleStateManager` for the revm path.** A consumer supplying their own state manager (not currently possible through `NodeOptions`, but a plausible extension) would break the revm engine.
+- **An ethereumjs refactor breaks it silently-ish.** Renaming the stacks is a TypeScript error, which is the good case. Changing the storage KEY format, or the value padding, or making a checkpoint something other than a pushed copy, would compile and return wrong values. The mitigations are cheap and belong in `revm-engine-subpath`: assert the shape once at engine construction (the three stacks exist, are non-empty arrays of `Map`), and let the cross-backend gas gate carry the rest, since feeding revm the wrong state changes gas, not just results.
+- **`@ethereumjs/statemanager` must be version-pinned deliberately.** The coupling is to `10.1.2`'s internals, not to a documented interface, so a minor bump is a real change here.
+
+There is precedent, which is why this is acceptable rather than novel: `node.ts`'s `dumpState` already reads the same three stacks directly in `'none'` mode ("the top of each stack IS the live set"). This ADR makes an existing, working reach-through load-bearing for a second consumer rather than introducing the technique.
+
+**The alternatives, and why not.** A pre-load (walk the state a call needs before executing it) is not implementable for `eth_call`: you cannot know which slots an arbitrary call touches without running it, and running it is the thing you are trying to do. A worker with a synchronous view (`SharedArrayBuffer` + `Atomics.wait`) is a real answer for an async store, but it needs cross-origin isolation, a second copy of the state, and a serialisation format between them, which is a much larger project than the thing it protects. Moving state ownership to revm entirely is the honest end state, and it is exactly what `revm-engine-behind-runtx` contemplates: at that point revm owns the maps, the node reads THROUGH it, and this reach-through disappears rather than being maintained. The read path should not wait for that.
+
+## The `codeHash -> code` index
+
+revm asks `getCode(codeHash)`; ethereumjs keys code by ADDRESS. Nothing in the node holds the inverse, so the adapter derives and owns it: a `Map<codeHashHex, code>` rebuilt from the live code map on a MISS, costing one keccak per account-with-code per newly-observed contract, and nothing on a hit. The account's `codeHash` field itself is correct and maintained by ethereumjs (`SimpleStateManager.putCode` writes the hash through `modifyAccountFields`), so only the inverse is ours.
+
+**Yes, it can go stale, and staleness is silent.** A code blob deployed after the index was built is a miss; if the adapter did not rebuild on a miss, the call would run EMPTY code and return `status: 'success'` with empty return data — no error, no warning, a plausible-looking answer (spike section 6). Rebuild-on-miss is chosen over hooking `putCode` precisely because it cannot be forgotten by a code path that writes code some other way (`evm_setCode`, `loadState`, a contract creation inside a transaction all reach `putCode` by different routes). The remaining hole is a collision-free one: a hash that is a hit can never be wrong, because the key IS the content hash. So the index is derived state, owned by the engine, populated lazily, and self-healing; it is never authoritative, and it must never be treated as a state store in its own right.
+
+## `clearStorage` later, without redesigning the adapter
+
+`clearStorage(address)` must be O(that account). `SimpleStateManager`'s storage is one FLAT map keyed by `address_slot`, so a prefix scan over the whole map is the only implementation available today — O(total state) per contract creation and per `SELFDESTRUCT`. The write half is out of scope here, but the shape that keeps it open is: the adapter must expose storage behind a per-account accessor (`storageOf(addressKey)`) rather than letting call sites build flat keys inline. Then the flat map can be swapped for `Map<account, Map<slot, value>>` — the layout `MemoryStore` documents and the one revm's commit semantics assume — behind that one accessor, and only the accessor changes. `revm-engine-behind-runtx` will have to decide whether the node's flat keying is re-layered or whether revm takes ownership of storage outright; either way the read adapter survives.
+
+Related and separate: `SimpleStateManager.clearStorage()` takes no argument and is a no-op, so the node's `'none'` mode already inherits storage across a re-creation at the same address (`work/notes/observations/simplestatemanager-clearstorage-is-a-noop.md`). That is an existing node bug, not a revm one, but the write half must not build on the assumption that ethereumjs clears anything.
+
+## Consequences
+
+- `revm-engine-subpath`'s open questions 1-3 are answered: (1) the reach-through into the three stacks, reading the top frame per access; (2) an engine-owned, lazily rebuilt `codeHash -> code` index; (3) `'none'` only, refused loudly at construction for `'trie'`. Its premise holds, so stories 2, 4, 5, 6, 8 and 11 of `revm-engine-behind-eth-call` keep their delivering task and the spec needs no drift annotation. Question 4 (`package.json` placement) is untouched by this ADR and still needs a human call.
+- The adapter is allocation-light but not allocation-free: it builds one hex key string per access (~0.8 microseconds by `revm-wasm`'s own measurement, against a ~0.51 microsecond wasm crossing), because the key format is the state manager's and cannot be chosen. If the read path is ever hot enough to matter, that is where the time is, and the fix is a state layout the node controls, i.e. the same end state as above.
+- Indicatively (Node 24, not a browser, so treat as shape rather than budget): `number()` costs 0.155 ms through the node's ethereumjs path and 0.025 ms through revm plus this adapter with two accounts in state; at 2002 accounts the ethereumjs path degrades to 1.060 ms while revm stays at 0.017 ms. The degradation is the node's own checkpoint: one `checkpoint()`+`revert()` alone costs 0.416 ms at that size, because `checkpointSync()` copies all three maps and clones every account. A revm `call` cannot commit, so the revm read path needs no checkpoint at all — which means the engine seam should NOT wrap the revm path in the checkpoint/revert the ethereumjs path requires. That is a per-call saving that grows with state, on top of the interpreter difference.
