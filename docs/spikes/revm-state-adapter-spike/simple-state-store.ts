@@ -5,6 +5,10 @@
  * See docs/adr/0005 for what this costs. The short version: it reaches PAST
  * `StateManagerInterface` into `SimpleStateManager`'s three public checkpoint
  * stacks, which is the only synchronous view of the node's state that exists.
+ *
+ * `Address` and `Bytes32` arguments are revm's REUSED scratch buffers, valid
+ * only for the duration of the call. Everything below consumes them immediately
+ * (into a string key, or into a keccak hash); nothing retains one.
  */
 import type {SimpleStateManager} from '@ethereumjs/statemanager';
 import type {Account} from '@ethereumjs/util';
