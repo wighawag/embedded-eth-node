@@ -108,7 +108,15 @@ export async function workerRoundtrip(workerUrl: string, sumTo: number) {
 		functionName: 'sumTo',
 		args: [BigInt(sumTo)],
 	});
+	// We report maxGap but do NOT assert a raw millisecond bound on it: WebKit
+	// clamps `performance.now()` to 1 ms and `setTimeout(…, 0)` is clamped too, so
+	// the value quantises to integers and any fixed bound sits one quantum from a
+	// coin flip (a `< 15` bound returned exactly 15 on WebKit and reddened the
+	// gate for unrelated work). `sampleCount` is the load-invariant proof: a main
+	// thread that is BLOCKED cannot run the sampler at all, so "it fired many
+	// times during the compute" is the property, measured on no clock.
 	let maxGap = 0;
+	let sampleCount = 0;
 	let last = performance.now();
 	let stop = false;
 	const sampler = () => {
@@ -116,21 +124,36 @@ export async function workerRoundtrip(workerUrl: string, sumTo: number) {
 		const gap = now - last;
 		if (gap > maxGap) maxGap = gap;
 		last = now;
+		sampleCount++;
 		if (!stop) setTimeout(sampler, 0);
 	};
 	sampler();
 	// run a batch of heavy compute calls in the Worker
+	const tCompute = performance.now();
 	for (let i = 0; i < 5; i++) {
 		await node.request({
 			method: 'eth_call',
 			params: [{to: address, data: sumData}, 'latest'],
 		});
 	}
+	const workerComputeMs = performance.now() - tCompute;
 	stop = true;
 
-	// The engine identity, as read back THROUGH comlink.
+	// Read back THROUGH comlink: every plain SlimNode field the worker-entry
+	// proxy is supposed to forward. An omission here reads as `undefined`.
 	const readEngineId = node.readEngine?.id;
+	const senderMode = node.senderMode;
+	const stateMode = node.stateMode;
 
 	await node.dispose();
-	return {number, readEngineId, roundtripAvgMs, mainThreadMaxGapMs: maxGap};
+	return {
+		number,
+		readEngineId,
+		senderMode,
+		stateMode,
+		roundtripAvgMs,
+		mainThreadMaxGapMs: maxGap,
+		mainThreadSampleCount: sampleCount,
+		workerComputeMs,
+	};
 }

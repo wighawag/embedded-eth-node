@@ -25,7 +25,12 @@ export const workerApi = {
 			loadState: (s: any) => node.loadState(s),
 			getStateRoot: () => node.getStateRoot(),
 			stateMode: node.stateMode,
-			// Plain values, so they clone across the boundary as-is.
+			// Plain values, so they clone across the boundary as-is. EVERY plain
+			// field of SlimNode belongs here: worker-client reads them off the
+			// remote, so one omitted here reads as `undefined` on a typed property
+			// (senderMode was missing until 2026-08-01 and nothing caught it,
+			// because worker-client's read is behind an `as any`).
+			senderMode: node.senderMode,
 			readEngine: node.readEngine,
 			// newHeads over comlink: the callback must be a comlink-proxied function.
 			onNewHead: (cb: (h: {number: number; hash: string}) => void) =>

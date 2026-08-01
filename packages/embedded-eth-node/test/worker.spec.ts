@@ -47,16 +47,41 @@ test('slim-node over a comlink Worker: same API + main-thread non-blocking', asy
 	expect(r.results.number).toBe('20');
 	// the engine identity survived the comlink boundary as a plain value
 	expect(r.results.readEngineId).toBe('@ethereumjs/evm');
+	// ...and so did every OTHER plain SlimNode field the worker-entry proxy
+	// forwards. `senderMode` was silently absent from that proxy until
+	// 2026-08-01, reading as `undefined` on a property typed
+	// `'recover' | 'trusted'`; worker-client's `as any` hid it from the compiler
+	// and nothing here asserted it. Assert the CLASS, not just the instance.
+	expect(r.results.senderMode).toBe('recover');
+	expect(r.results.stateMode).toBe('none');
 
 	const t = Object.fromEntries(r.timings.map((x: any) => [x.label, x.ms]));
-	// The heavy compute ran in the Worker; the main-thread sampler should never
-	// have stalled for anywhere near the compute time. Generous bound (the same
-	// sumTo on the MAIN thread blocks ~tens of ms); here it must stay small.
 	console.log(
 		'[worker] main-thread max gap during Worker compute (ms):',
 		t.mainThreadMaxGap,
+		'| samples:',
+		r.results.mainThreadSampleCount,
+		'| worker compute (ms):',
+		t.workerCompute,
 	);
-	expect(t.mainThreadMaxGap).toBeLessThan(15);
+
+	// THE PROPERTY: the heavy compute ran in the Worker, so the main thread kept
+	// running throughout. A BLOCKED main thread cannot run the sampler at all, so
+	// "the sampler fired many times during the compute" proves it on no clock at
+	// all, which is what makes this load-invariant.
+	//
+	// We deliberately do NOT assert a raw millisecond bound on the max gap. WebKit
+	// clamps `performance.now()` to 1 ms (and `setTimeout(…, 0)` is clamped too),
+	// so the gap quantises to integers and a fixed bound sits one quantum away from
+	// a coin flip: the previous `toBeLessThan(15)` returned exactly 15 on WebKit and
+	// reddened the acceptance gate for a change that touched no executable code.
+	// The repo's stance everywhere else (CI comments, benchmark config) is that
+	// wall-clock numbers are reported, not asserted; this now matches it.
+	expect(r.results.mainThreadSampleCount).toBeGreaterThan(10);
+	// And the stall was nothing like the compute it overlapped: a wide-margin
+	// RATIO of two figures measured in the SAME window on the SAME clock, so load
+	// inflates both together (unlike a fixed bound, or a ratio across two runs).
+	expect(t.mainThreadMaxGap).toBeLessThan(t.workerCompute / 3);
 
 	await h.dispose();
 });

@@ -162,8 +162,15 @@ const cut: CodeUnderTest = {
 				);
 				results.number = out.number;
 				results.readEngineId = out.readEngineId;
+				// Every plain field the worker-entry proxy must forward, read back
+				// through comlink so an omission fails here instead of silently
+				// reading `undefined` in a consumer.
+				results.senderMode = out.senderMode;
+				results.stateMode = out.stateMode;
+				results.mainThreadSampleCount = out.mainThreadSampleCount;
 				timings.push({label: 'workerRoundtripAvg', ms: out.roundtripAvgMs});
 				timings.push({label: 'mainThreadMaxGap', ms: out.mainThreadMaxGapMs});
+				timings.push({label: 'workerCompute', ms: out.workerComputeMs});
 			} catch (e) {
 				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
 			}

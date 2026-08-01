@@ -49,10 +49,19 @@ test('custom genesis + runtime cheats + trie-vs-none perf', async ({page}) => {
 	// (3) perf: both produce correct outputs; trie has a real root, none throws.
 	expect(s.perf.none.getRootThrows).toBe(true);
 	expect(s.perf.trie.rootIsReal).toBe(true);
-	// Sanity bounds: timings are positive and trie is NOT faster than none.
+	// Sanity bounds: timings are positive, and trie is not GROSSLY faster than
+	// none (which would mean the two modes got swapped, or one never ran).
+	//
+	// The bound is deliberately slack. This is a RATIO of two short wall-clock
+	// measurements taken in separate runs, so on a loaded machine it inverts:
+	// `toBeGreaterThanOrEqual(1)` failed once on Chromium during a full parallel
+	// `pnpm test` while measuring 1.62x when the file ran alone, reddening the
+	// whole acceptance gate. The real trie-vs-none cost is REPORTED below and
+	// belongs in the benchmark package, which is where this repo keeps numbers it
+	// looks at rather than asserts on.
 	expect(s.perf.none.avgCallMs).toBeGreaterThan(0);
 	expect(s.perf.trie.avgCallMs).toBeGreaterThan(0);
-	expect(s.perf.callSlowdownX).toBeGreaterThanOrEqual(1);
+	expect(s.perf.callSlowdownX).toBeGreaterThan(0.5);
 	console.log(
 		`[gcp] trie is ~${s.perf.callSlowdownX}x slower per call, ~${s.perf.deploySlowdownX}x on deploy`,
 	);
