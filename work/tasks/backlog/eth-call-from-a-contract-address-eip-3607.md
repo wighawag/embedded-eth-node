@@ -1,5 +1,5 @@
 ---
-title: Establish what eth_call from a CONTRACT address does on each engine (EIP-3607)
+title: Surface the EIP-3607 divergence on the revm engine, and ask upstream for the opt-out
 slug: eth-call-from-a-contract-address-eip-3607
 spec: revm-engine-behind-eth-call
 blockedBy: []
@@ -8,23 +8,31 @@ covers: []
 
 ## What to build
 
-Find out, then make the two engines agree or document why they cannot.
+> **VERIFIED 2026-08-01, so this is no longer an investigation.** Probed directly against `revm-wasm@0.2.0` (revm 42.0.1, abi 1, outcome v3) with a `MemoryStore`: a `call()` from an EOA returns `success`, 21018 gas, the expected return data; the SAME call with `from` set to an account holding code returns `status: 'validation-error'` carrying `Transaction(RejectCallerWithCode)` and burns no gas. On the other side, `@ethereumjs/evm`'s `runCall` performs NO such check (EIP-3607 is enforced in `@ethereumjs/vm`'s `runTx`, at `runTx.js:528`, with the message `invalid sender address, address is not EOA (EIP-3607)`). So the divergence is real and one-directional: an `eth_call` from a contract address works on the default engine and fails on the revm engine.
+>
+> That layering is also the argument to make upstream: ethereumjs puts the check on `runTx` and NOT on `runCall`, because EIP-3607 is a transaction-VALIDITY rule, not an execution rule. A simulation should not be bound by it. revm itself agrees in principle, exposing `disable_eip3607` on `CfgEnv`; `revm-wasm` simply does not surface it, in `0.1.0` or `0.2.0`.
+
+Make the two engines agree, or fail loudly, and ask upstream for the flag that would let them agree properly.
 
 EIP-3607 rejects a transaction whose sender has code. revm enforces it (`RejectCallerWithCode` is in the wasm's error set) and `revm-wasm` exposes no flag to disable it, including in `0.2.0`, which added `disableBaseFee`, `disableBalanceCheck` and `disableBlockGasLimit` but nothing for this. The Gate-2 review of `revm-engine-subpath` flagged that this looks unexamined: an `eth_call` with `from` set to a CONTRACT address may fail on the revm engine while working on `@ethereumjs/evm`.
 
 This matters more than it sounds, because simulating a call FROM a contract is ordinary practice, not an edge case: smart-account / ERC-4337 flows, multicall aggregators, and any UI that previews "what would this contract see if it called that one". Real clients deliberately relax EIP-3607 for `eth_call` for exactly this reason.
 
-Start by establishing the facts, because nobody has: does an `eth_call` with a contract `from` actually fail on our revm engine today, and what does `@ethereumjs/evm` do with the same call? The answer decides the work, and it may be that both engines already agree, in which case this closes with a test that pins it.
+Two things, one now and one when upstream lands:
 
-If they diverge, the options are, in preference order: an upstream request to `revm-wasm` for a `disableEip3607` flag (the same shape as the three that landed in 0.2.0, and the same argument: it is a transaction-validity rule, not an execution rule, so a simulation should not be bound by it); or refusing the call loudly on the revm engine so a consumer is told rather than silently given a different answer; or documenting it in the README's engine caveats beside the block-environment notes.
+**Now.** The revm engine must not hand back an opaque validation error for this. Surface it as a real, specific failure that names EIP-3607, names the engine, and says the default engine can serve the call, and document it in the README's engine caveats beside the block-environment notes. A consumer simulating a smart-account or multicall flow must be told which engine limitation they hit, not left comparing two nodes.
+
+**When upstream lands.** File the `revm-wasm` request for a `disableEip3607` option on `ExecuteOptions`, the same shape and the same argument as the three that landed in `0.2.0`. When it exists, set it for reads and delete the refusal, because then the engines simply agree.
 
 Do NOT paper over it by making the default engine reject too. Matching downward would break a case that works today, on the default path, for every existing consumer.
 
 ## Acceptance criteria
 
-- [ ] The actual behaviour of `eth_call` with a contract `from` is established for BOTH engines, and recorded (a test that pins it, not prose).
-- [ ] If they agree: a test asserts it, so a future engine change cannot silently break it, and this task closes.
-- [ ] If they diverge: the divergence is either removed, or surfaced LOUDLY on the revm path with an error naming the reason, and documented in the README's engine section beside the existing caveats. It is never left silent.
+- [ ] A test pins the behaviour of `eth_call` with a contract `from` on BOTH engines, so this can never regress silently again in either direction.
+- [ ] On the revm engine the failure names EIP-3607, names the engine, and points at the default engine as the way to serve the call. Not an opaque `validation-error`.
+- [ ] The README's engine section documents it beside the existing caveats.
+- [ ] The upstream request for a `disableEip3607` option is filed and linked from the task's done record.
+- [ ] If that option has ALREADY shipped by the time this is built, use it instead and skip the refusal: the engines then agree, which is the outcome this task actually wants.
 - [ ] The default `@ethereumjs/evm` path's behaviour is UNCHANGED either way.
 - [ ] If an upstream flag is the right answer, the request is filed and linked from the note or ADR that records the decision.
 
@@ -40,7 +48,7 @@ Do NOT paper over it by making the default engine reject too. Matching downward 
 >
 > Read `CONTEXT.md` for *honest edge* and *conformance differential*. The convention that governs this task: a thing the node cannot do fails LOUDLY with a real error; it never returns a plausible-looking different answer.
 >
-> INVESTIGATE BEFORE YOU BUILD. The premise is a review finding, not a measurement: nobody has run the case. Write the smallest probe first (deploy any contract, then `eth_call` with `from` set to its address, on the default engine and on the revm engine) and let the result choose the branch. If both engines already agree, the deliverable is one test and a closed task, and that is a GOOD outcome, not a failed one.
+> THE FACTS ARE ESTABLISHED, so do not re-derive them: `revm-wasm@0.2.0` returns `validation-error` / `Transaction(RejectCallerWithCode)` for a `call()` from an account with code, while `@ethereumjs/evm`'s `runCall` never checks (ethereumjs enforces EIP-3607 in `runTx` instead, `runTx.js:528`). Re-confirm cheaply if you like, but the work is the refusal, the docs and the upstream request, not the discovery.
 >
 > WHY THE CASE IS REAL: simulating a call from a contract is how smart-account and multicall UIs preview behaviour. This is not an exotic corner, which is why upstream clients relax EIP-3607 for `eth_call` specifically. Weight it accordingly, but confirm before acting.
 >
