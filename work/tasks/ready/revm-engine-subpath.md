@@ -2,27 +2,20 @@
 title: A revm engine on the embedded-eth-node/revm subpath
 slug: revm-engine-subpath
 spec: revm-engine-behind-eth-call
-needsAnswers: true
 blockedBy: [engine-seam-with-ethereumjs-default, revm-state-adapter-spike, retire-vendored-revm-in-benchmarks]
 covers: [2, 3, 4, 5, 6, 8, 11]
 ---
 
-<!-- open-questions -->
+## Resolved before this task became buildable
 
-## Open questions
+Everything that used to gate this task is now decided. Kept here because the ANSWERS are what you build against.
 
-**Questions 1-3 are now ANSWERED** by `revm-state-adapter-spike`, which landed: see `docs/adr/0005-revm-reads-the-nodes-state-through-simplestatemanagers-stacks.md` and the working adapter at `docs/spikes/revm-state-adapter-spike/simple-state-store.ts`. They are kept below for the record, each with its answer. **Question 4 is still open and needs a human call**, which is why `needsAnswers` is still set.
+1. **How the engine reads the node's state synchronously.** Reach through `SimpleStateManager`'s public `accountStack` / `codeStack` / `storageStack`, reading `stack[stack.length - 1]` on EVERY access — a view cached across a checkpoint silently answers from the frame below, with no error. The node already does exactly this in `dumpState`, so it is an existing technique rather than a new one. See `docs/adr/0005-revm-reads-the-nodes-state-through-simplestatemanagers-stacks.md` and the working adapter at `docs/spikes/revm-state-adapter-spike/simple-state-store.ts`.
+2. **What indexes codeHash to code.** An engine-owned `codeHash -> code` map, rebuilt lazily on a MISS. A stale index fails SILENTLY: the call runs empty code and returns `status: success` with empty return data. Rebuild-on-miss is therefore load-bearing, not an optimisation.
+3. **Which `stateMode` the engine serves.** `'none'` only. `MerkleStateManager` has no synchronous view at any depth, so `stateMode:'trie'` must be refused AT CONSTRUCTION, in the engine's `connect(context)`, naming the reason.
+4. **Where `revm-wasm` lands in `package.json`: plain `dependencies`.** Decided by the maintainer. The failure mode of a missing optional peer is worse than the install bytes, and the "pay nothing" promise of story 3 is about what a consumer SHIPS, not what npm downloads — that half is enforced separately by the bundle-size assertion and by the core never importing the subpath. Say this plainly in the changeset (and the README section the docs task writes): a JS-only consumer pays install bytes and zero bundle bytes. Do not silently re-litigate it into an optional peer.
 
-1. **ANSWERED — how does the engine read the node's state synchronously?** `revm-wasm`'s `StateStore` read methods must be synchronous (the interpreter is a sync loop inside wasm, with no suspension point mid-opcode), while every read on `SimpleStateManager` / `MerkleStateManager` returns a `Promise`. Is the sanctioned path a reach-through into `SimpleStateManager`'s public `accountStack` / `codeStack` / `storageStack` Maps, a worker with a synchronous view, or something else? This decides the whole shape of the adapter, and the answer must survive the node's checkpoint/revert around each pure call.
-2. **ANSWERED — what indexes codeHash to code?** revm asks `getCode(codeHash)`; ethereumjs stores code by ADDRESS. Some index has to exist, it lives outside the node's state manager, and "the node's state is the single source of truth" has to be restated honestly once it does.
-3. **ANSWERED — which `stateMode` can this engine serve?** `'trie'` (`MerkleStateManager`) has no synchronous view at all, so the answer is probably `'none'` only — which makes revm + `stateMode:'trie'` a combination this task must refuse loudly, not one a later task discovers.
-4. **STILL OPEN — where does `revm-wasm` land in `package.json`?** A plain `dependency` means every installer downloads it even if they never import the subpath; an optional `peerDependency` keeps the install lean but makes the subpath fail confusingly when it is missing. Story 3 is about paying nothing for an unused feature, and bundle-size tree-shaking only answers half of that.
-
-> **The answers, from ADR 0005.** (1) Reach through `SimpleStateManager`'s public `accountStack` / `codeStack` / `storageStack`, reading `stack[stack.length - 1]` on EVERY access — a view cached across a checkpoint silently answers from the frame below. The node already does this in `dumpState`, so it is an existing technique, not a new one. (2) An engine-owned `codeHash -> code` index, rebuilt lazily on a miss; a stale index fails SILENTLY with empty code and a success status, so rebuild-on-miss is load-bearing. (3) `'none'` only; `'trie'` has no synchronous view at any depth and must be refused at construction.
->
 > **Four things Gate-2 flagged on the spike artifact, all of which land on THIS task.** The adapter is a spike, not a shipping component — lift it with these fixed: (a) it reaches the stacks through an `as any` cast, which throws away the compile error that is the whole mitigation for this coupling; the fields are public in `@ethereumjs/statemanager@10.1.2`, so drop the cast. (b) `getBlockHash` is delegated to an optional callback and returns `undefined` when unwired, so `BLOCKHASH` silently answers nothing even though the node has blocks — wire it to the node's block store. (c) The ADR prescribes a per-account `storageOf` accessor so the write half can re-layer storage later, but the spike builds the flat key inline; ship the accessor. (d) The index rebuild has no negative caching, so a genuinely absent hash re-scans the whole code map on every read.
-
-<!-- /open-questions -->
 
 ## What to build
 
@@ -32,7 +25,7 @@ An optional subpath export, `embedded-eth-node/revm`, providing an engine backed
 const node = await createNode({engine: await createRevmEngine({wasm})});
 ```
 
-The engine implements the read half of the seam from `engine-seam-with-ethereumjs-default`. It reads state from the node's EXISTING state, which stays authoritative: it does not copy state into the package's own store, and it does not own state. (How it does that synchronously is open question 1 — do not start until it is answered.)
+The engine implements the read half of the seam from `engine-seam-with-ethereumjs-default`. It reads state from the node's EXISTING state, which stays authoritative: it does not copy state into the package's own store, and it does not own state. (How it does that synchronously is resolved above: the top-of-stack reach-through from ADR 0005.)
 
 The wasm may be supplied either as a runtime-fetched URL or as a bundler-resolved asset. Both are the same code path, because `revm-wasm` accepts bytes, a URL, a `Response` or a compiled module.
 
@@ -51,7 +44,7 @@ The core entry point must not grow. A consumer who never imports the subpath mus
 - [ ] The wasm loads from a runtime-fetched URL, in a real browser.
 - [ ] The wasm loads from a bundler-resolved asset, in a real browser.
 - [ ] **The default entry point's bundle size has not grown**, asserted against a baseline PINNED IN THIS TASK's change (the existing size measurement only prints numbers, so the baseline has to be established here), and `revm-wasm` does not appear in the default entry's dependency graph.
-- [ ] The `package.json` placement decided in open question 4 is implemented, and the reasoning recorded.
+- [ ] `revm-wasm` is a plain entry in `dependencies` (decided — see Resolved item 4), and the changeset states that a JS-only consumer pays install bytes and zero bundle bytes.
 - [ ] No outcome-blob parsing is written in this repo — the typed results from `revm-wasm` are consumed directly.
 - [ ] Tests cover the new behaviour (mirror the repo's existing test style).
 
@@ -65,7 +58,7 @@ The core entry point must not grow. A consumer who never imports the subpath mus
 
 > Goal: a revm-backed engine for `embedded-eth-node`, behind an optional subpath, reading the node's own state.
 >
-> FIRST, check this task against current reality (it is a launch snapshot and may have DRIFTED): does it still match the code in `tasks/done/`, the relevant ADRs, and the tasks it depends on? In particular, read the engine interface `engine-seam-with-ethereumjs-default` actually shipped, and the ADR `revm-state-adapter-spike` produced — this task's `## Open questions` were written BEFORE that answer existed, so the ADR wins wherever they disagree. If the open questions are still unanswered, do not build: the task is flagged `needsAnswers` for a reason.
+> FIRST, check this task against current reality (it is a launch snapshot and may have DRIFTED): does it still match the code in `tasks/done/`, the relevant ADRs, and the tasks it depends on? In particular, read the engine interface `engine-seam-with-ethereumjs-default` actually shipped (the `ReadEngine` type, the `connect(context)` hook, and where purity now lives) and the ADR `revm-state-adapter-spike` produced. This task's body was written BEFORE both landed and then updated from them, so where the prose and the shipped code disagree, the CODE wins — read `src/engine.ts`, `src/types.ts` and `docs/spikes/revm-state-adapter-spike/simple-state-store.ts` before designing anything.
 >
 > Read `CONTEXT.md` for the vocabulary and `docs/adr/0003-revm-wasm-is-the-engine-direction.md` for why revm and not the alternatives.
 >
