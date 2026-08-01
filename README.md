@@ -159,6 +159,24 @@ const conformant = await createNode({stateMode: 'trie'});  // MerkleStateManager
   storage — use `'none'` for IndexedDB persistence, `'trie'` for the state root /
   conformance.
 
+One behaviour genuinely differs between the modes, when a contract is created at
+an address that **already holds storage** (reachable via `evm_setStorageAt`, a
+`loadState`, or a re-deploy after `SELFDESTRUCT`):
+
+- **`'none'`** clears that storage and the creation **succeeds**, so the new
+  contract starts empty. This is the pre-EIP-7610 behaviour, and it is what the
+  EVM itself asks for on every create.
+- **`'trie'`** has a real `storageRoot`, so the EIP-7610 collision check fires and
+  the creation **fails** with a revert. This is the spec-current behaviour.
+
+Neither mode lets the new contract *inherit* the old storage, which is the part
+that would silently corrupt results. `'none'` cannot detect the collision at all,
+because detecting it means reading a `storageRoot` that mode does not have. Note
+that `@ethereumjs/statemanager@10.1.2` does not clear it either — its
+`SimpleStateManager.clearStorage` is an empty no-op, so we override it and a fresh
+contract does read `0`
+([ADR 0007](docs/adr/0007-we-override-simplestatemanagers-no-op-clearstorage.md)).
+
 ## Sender mode: `'recover'` (authenticated, default) vs `'trusted'` (no ecrecover)
 
 ```ts

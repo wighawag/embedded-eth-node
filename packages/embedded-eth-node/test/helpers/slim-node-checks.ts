@@ -17,7 +17,13 @@ import {
 } from '../../src/index.js';
 import type {ReadCallResult, ReadEngine} from '../../src/index.js';
 import {createWorkerNode} from '../../src/worker-client.js';
-import {createWalletClient, createPublicClient, custom, parseGwei} from 'viem';
+import {
+	createWalletClient,
+	createPublicClient,
+	custom,
+	parseGwei,
+	getContractAddress,
+} from 'viem';
 import {privateKeyToAccount} from 'viem/accounts';
 import {counterAbi, counterBytecode} from './counter.js';
 
@@ -309,6 +315,88 @@ async function engineSeamHonestyChecks(): Promise<Record<string, unknown>> {
 	} finally {
 		worker.terminate();
 		URL.revokeObjectURL(blobUrl);
+	}
+
+	// 7) a CREATE must not inherit storage that was already sitting at its address.
+	// `@ethereumjs/statemanager@10.1.2` ships `SimpleStateManager.clearStorage()` as
+	// an empty no-op that drops its address argument, so the EVM's own
+	// clear-on-create (evm.js:555) did nothing and a fresh contract silently read a
+	// previous tenant's slots. We override it (src/state-manager.ts). Reproduced
+	// here through the node's PUBLIC surface: seed slot 0, then deploy onto that
+	// exact address.
+	//
+	// The two modes legitimately differ, and both are asserted so the asymmetry is
+	// pinned rather than discovered: 'none' has no storageRoot, so the EIP-7610
+	// collision guard cannot fire and creation proceeds with CLEARED storage
+	// (pre-7610 semantics, what the EVM asks for); 'trie' computes a real
+	// storageRoot, so the guard fires and creation is REJECTED. Neither inherits.
+	for (const mode of ['none', 'trie'] as const) {
+		const n = await createNode({
+			chainId: CHAIN_ID,
+			stateMode: mode,
+			miningConfig: {type: 'auto'},
+			initialBalances: {[account.address]: 10n ** 24n},
+		});
+		const t = custom(
+			{request: ({method, params}: any) => n.request({method, params})},
+			{retryCount: 0},
+		);
+		const wallet = createWalletClient({account, chain, transport: t});
+		const pub = createPublicClient({chain, transport: t});
+		// Where the next deployment from this account will land.
+		const nonce = await pub.getTransactionCount({address: account.address});
+		const target = getContractAddress({
+			from: account.address,
+			nonce: BigInt(nonce),
+		});
+		// Give the target a balance FIRST. This is not incidental:
+		// `MerkleStateManager.putStorage` throws `putStorage() called on non-existing
+		// account`, so 'trie' mode cannot seed storage at a bare address at all. A
+		// balance-only account is still not an EIP-7610 collision (the guard reads
+		// nonce, codeHash and storageRoot, never balance), so creation is decided by
+		// the storage alone, which is the thing under test. Doing it in BOTH modes
+		// keeps the setup identical so the only variable is storageRoot tracking.
+		await n.request({method: 'evm_setBalance', params: [target, '0x1']});
+		// Seed slot 0 = 99 at that address. No nonce and no code, so the account is
+		// not a collision for any reason OTHER than its storage.
+		await n.request({
+			method: 'evm_setStorageAt',
+			params: [
+				target,
+				`0x${'0'.repeat(64)}`,
+				`0x${(99).toString(16).padStart(64, '0')}`,
+			],
+		});
+		out[`seededSlot0.${mode}`] = String(
+			await pub.getStorageAt({address: target, slot: `0x${'0'.repeat(64)}`}),
+		);
+		try {
+			const hash = await wallet.deployContract({
+				abi: counterAbi,
+				bytecode: counterBytecode,
+				args: [],
+			});
+			const rcpt = await pub.waitForTransactionReceipt({hash});
+			out[`deployStatus.${mode}`] = rcpt.status;
+			out[`deployLandedOnTarget.${mode}`] =
+				(rcpt.contractAddress ?? '').toLowerCase() === target.toLowerCase();
+			// THE ASSERTION THAT MATTERS: a fresh Counter reads 0, never the seeded 99.
+			out[`numberAfterRedeploy.${mode}`] =
+				rcpt.status === 'success' && rcpt.contractAddress
+					? (
+							await pub.readContract({
+								address: rcpt.contractAddress,
+								abi: counterAbi,
+								functionName: 'number',
+							})
+						).toString()
+					: 'n/a';
+		} catch (e) {
+			out[`deployStatus.${mode}`] =
+				`threw:${String((e as Error)?.message ?? e)}`;
+			out[`numberAfterRedeploy.${mode}`] = 'n/a';
+		}
+		await n.dispose();
 	}
 
 	return out;

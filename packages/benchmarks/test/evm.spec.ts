@@ -90,7 +90,18 @@ const collected: Record<string, unknown>[] = [];
  * change that grows it, and say why in the changeset. A red assertion here means
  * either that or an accidental import into the core graph.
  *
- * RE-PINNED ONCE SINCE, by `engine-seam-docs-and-honest-edges`: 412.4 -> 413.5 KB
+ * RE-PINNED TWICE SINCE. Most recent first:
+ *
+ * 413.5 -> 413.7 KB raw (gzip unchanged at 124.6), by the `clearStorage` fix:
+ * `src/state-manager.ts` subclasses `SimpleStateManager` to implement the
+ * `clearStorage(address)` that `@ethereumjs/statemanager@10.1.2` ships as an empty
+ * no-op, so a contract created at an address that already held storage no longer
+ * inherits it. 0.2 KB, and it is a loop over the storage map plus its comment. It
+ * has to be in the CORE graph because it is the default state manager for
+ * `stateMode:'none'`, which is every consumer who passes no options. Still zero
+ * bytes of `revm-wasm`.
+ *
+ * `engine-seam-docs-and-honest-edges`: 412.4 -> 413.5 KB
  * raw / 124.1 -> 124.6 KB gzip. The 1.1 KB is the text of the node's engine
  * refusals (`connectReadEngine` in `src/engine.ts`: a bad engine object, and an
  * engine whose `connect` throws, both fail construction rather than silently
@@ -103,7 +114,7 @@ const collected: Record<string, unknown>[] = [];
  * carries 1% of slack because the zlib shipped with different Node builds does
  * not compress byte-identically, which is noise rather than growth.
  */
-const DEFAULT_ENTRY_BASELINE = {rawKB: 413.5, gzipKB: 124.6};
+const DEFAULT_ENTRY_BASELINE = {rawKB: 413.7, gzipKB: 124.6};
 const GZIP_SLACK = 1.01;
 
 // Build + serve once for the whole file (the cut contains all backends).

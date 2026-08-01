@@ -89,5 +89,23 @@ test('node honesty + correctness (receipts, gaps, persistence, state-root mode)'
 	);
 	expect(c.workerEngine).toContain('createNode');
 
+	// (7) a CREATE never inherits storage that was already at its address.
+	// Upstream `SimpleStateManager.clearStorage()` is an empty no-op that drops its
+	// address argument, so without our override (src/state-manager.ts) a fresh
+	// Counter deployed onto a seeded address returned 99 here instead of 0 —
+	// silently, with a success receipt.
+	for (const mode of ['none', 'trie'] as const) {
+		expect(BigInt(c[`seededSlot0.${mode}`])).toBe(99n);
+	}
+	// 'none': no storageRoot, so EIP-7610 cannot fire; creation proceeds and the
+	// storage is CLEARED.
+	expect(c['deployStatus.none']).toBe('success');
+	expect(c['deployLandedOnTarget.none']).toBe(true);
+	expect(c['numberAfterRedeploy.none']).toBe('0');
+	// 'trie': a real storageRoot, so the collision guard REJECTS the creation. The
+	// mode difference is deliberate and asserted so it cannot drift unnoticed.
+	expect(c['deployStatus.trie']).not.toBe('success');
+	expect(c['numberAfterRedeploy.trie']).toBe('n/a');
+
 	await h.dispose();
 });

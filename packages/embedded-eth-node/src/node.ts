@@ -27,7 +27,8 @@
  * about Workers — see ./worker-entry.ts for the optional comlink wrapper.
  */
 import {createVM, runTx, type VM} from '@ethereumjs/vm';
-import {SimpleStateManager, MerkleStateManager} from '@ethereumjs/statemanager';
+import {MerkleStateManager} from '@ethereumjs/statemanager';
+import {SimpleStateManagerWithClearStorage} from './state-manager.js';
 import {Common, Mainnet, Hardfork} from '@ethereumjs/common';
 import {createBlock, type Block} from '@ethereumjs/block';
 import {createTxFromRLP, createTx, type TypedTransaction} from '@ethereumjs/tx';
@@ -120,8 +121,13 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 
 	// State backing: SimpleStateManager (no trie, fast — default) or
 	// MerkleStateManager (real trie + state root — opt-in, slower, conformance-able).
+	// The 'none' manager is our SUBCLASS, which implements the `clearStorage(address)`
+	// that upstream ships as an empty no-op; without it a contract created at an
+	// address that already holds storage inherits it. See ./state-manager.ts.
 	const sm =
-		stateMode === 'trie' ? new MerkleStateManager() : new SimpleStateManager();
+		stateMode === 'trie'
+			? new MerkleStateManager()
+			: new SimpleStateManagerWithClearStorage();
 
 	// Touched-account set for the trie-mode dump (storage is read back via the
 	// trie's own dumpStorage). We record the addresses each tx touches at the NODE
