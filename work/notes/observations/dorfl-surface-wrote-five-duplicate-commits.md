@@ -42,3 +42,22 @@ The push SUCCEEDS, then the post-push read-back concludes "origin/main is not ou
 ## Not investigated
 
 Whether the read-back compares the wrong ref, compares against a stale mirror, or is confused by this repo being unregistered (`dorfl status` reports "participates but is NOT registered", and separately "no 'arbiter' remote configured in this repo" despite `defaultArbiter: origin` resolving fine). The unregistered/arbiter-naming angle is the first thing worth checking.
+
+## Update, 2026-08-01 — a second instance, same shape, different check
+
+Driving `revm-engine-subpath`, the agent hit the internal deadline (`agentDeadlineMinutes: 60`) and auto-checkpointed. The runner emitted these four lines in order:
+
+```
+>> Bounced 'revm-engine-subpath' to stuck (lock): deadline-checkpoint save for 'revm-engine-subpath' (see branch)
+>> 'revm-engine-subpath' has no work branch on origin — requeueing to backlog for a FRESH claim
+   (nothing to continue from; no --reset needed).
+>> Returned 'revm-engine-subpath' to backlog (released the lock; body rests in pool).
+>> Auto-continued ... (checkpoint 1/5): WIP saved + branch pushed, lock released so the next tick
+   continues from work/task-revm-engine-subpath.
+```
+
+Lines 2 and 4 contradict each other. Line 4 is the true one: `refs/heads/work/task-revm-engine-subpath` exists on the arbiter at `ade30de` carrying ~1,280 lines of real work (the engine, the state store, tests, a decisions note). Line 2's "no work branch on origin, nothing to continue from" is the same failure as the original observation above: **a state check that reads the arbiter before, or independently of, the push it is describing, and then reports the opposite of reality.**
+
+Generalising the two instances: it is not specifically the surface path. Both the post-surface read-back and the checkpoint's branch-existence probe decide "did my own write land?" against a view that does not yet include it. The consequence is worse here than in the first instance, because acting on line 2 (believing there is nothing to continue from) would mean re-driving the task from scratch and discarding an hour of work that is sitting on the arbiter. Nothing was lost this time only because the branch was checked by hand before re-dispatching.
+
+Worth checking whether both call sites share a mirror-refresh helper that needs a prune-fetch before it reads.
