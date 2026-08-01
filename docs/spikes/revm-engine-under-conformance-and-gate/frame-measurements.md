@@ -43,6 +43,13 @@ part.
 | `embedded-eth-node-revm-engine` | 3.7, 3.9    | 4.0, 4.0  |
 | `revm` (raw, owns its state)    | 3.4, 2.9    | 4.0, 4.0  |
 
+One further sample, same machine, taken 2026-08-01 by
+`engine-seam-docs-and-honest-edges` while verifying the figures it publishes in
+the README: Chromium 10.2 / 3.5 / 4.2, WebKit 13.0 / 4.0 / 4.0 (same row order).
+Note the raw-revm row landing ABOVE the node-on-revm row there: the gap between
+those two is inside the noise on this machine, which is the same conclusion as
+below stated from the other side.
+
 As a share of the 16.6 ms frame budget: the JS node ~63% Chromium / ~78% WebKit;
 the node on revm ~22% / ~24%; raw revm ~20% / ~24%.
 

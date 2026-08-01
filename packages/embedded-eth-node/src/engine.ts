@@ -1,5 +1,7 @@
 /**
- * engine.ts — the DEFAULT read engine: `@ethereumjs/evm` via `runCall`.
+ * engine.ts — the node-side half of the engine seam: the DEFAULT read engine
+ * (`@ethereumjs/evm` via `runCall`), plus {@link connectReadEngine}, the one
+ * place an engine is brought up.
  *
  * This is the engine the node uses when the consumer supplies none, and it is
  * exactly what the node's pure-read helper used to do inline. Everything
@@ -14,7 +16,12 @@
  */
 import type {EVMInterface} from '@ethereumjs/evm';
 import type {StateManagerInterface} from '@ethereumjs/common';
-import type {ReadCallRequest, ReadCallResult, ReadEngine} from './types.js';
+import type {
+	ReadCallRequest,
+	ReadCallResult,
+	ReadEngine,
+	ReadEngineContext,
+} from './types.js';
 
 /** The default engine's stable identifier, as reported by `node.readEngine.id`. */
 export const ETHEREUMJS_ENGINE_ID = '@ethereumjs/evm';
@@ -68,4 +75,69 @@ export function createEthereumjsReadEngine(deps: {
 			}
 		},
 	};
+}
+
+/**
+ * Bring an engine up for this node, or FAIL THE WHOLE CONSTRUCTION.
+ *
+ * THE POINT OF THIS FUNCTION IS THE ABSENCE OF A FALLBACK. Every other outcome
+ * here is a silent lie: a consumer who passed a revm engine and was quietly
+ * given `@ethereumjs/evm` instead would get a node that comes up, answers every
+ * call correctly, and runs an order of magnitude slower than they believe. They
+ * would measure it, be confused, and have no signal to follow. So there is no
+ * `catch` that continues, no default substituted on failure, and no partially
+ * connected engine: if the engine cannot serve this node, `createNode()` throws
+ * (honest edge — see `docs/adr/0004-no-account-or-signing-methods.md` for the
+ * same convention on the RPC surface).
+ *
+ * Two ways an injected engine fails, both landing here at construction rather
+ * than at the first opcode:
+ *  1. it is not a `ReadEngine` at all (a stray object, a module namespace, a
+ *     forgotten `await` on `createRevmEngine()`) — otherwise the node comes up
+ *     and dies at the first `eth_call` with a `not a function` TypeError that
+ *     reads like a node bug;
+ *  2. its `connect(context)` throws, either because it cannot initialise (no
+ *     wasm, no memory) or because it refuses this node's configuration (the
+ *     revm engine refuses `stateMode:'trie'`, having no synchronous view of a
+ *     `MerkleStateManager` to read through).
+ *
+ * The engine's own message is preserved verbatim inside the thrown error's
+ * message (not only as `cause`), because the engine is the only party that
+ * knows WHY, and browser consoles routinely show a message without its cause.
+ */
+export async function connectReadEngine(
+	engine: ReadEngine,
+	context: ReadEngineContext,
+): Promise<void> {
+	if (typeof engine?.call !== 'function' || typeof engine?.id !== 'string') {
+		throw new Error(
+			`embedded-eth-node: the value passed as \`engine\` is not a ReadEngine — it must have a string \`id\` and a \`call(request)\` method (got ${describe(engine)}). ` +
+				`The node does NOT fall back to the default @ethereumjs/evm engine, because a node running an engine you did not ask for is indistinguishable from one that works. ` +
+				`If you built it with an async factory (e.g. \`createRevmEngine()\`), await it first.`,
+		);
+	}
+	try {
+		await engine.connect?.(context);
+	} catch (err) {
+		throw new Error(
+			`embedded-eth-node: the read engine '${engine.id}' could not be connected, so the node was NOT created. ` +
+				`It is deliberately NOT replaced by the default @ethereumjs/evm engine: that node would work, return correct results, and run at a completely different speed from the one you asked for, silently. ` +
+				`Fix the configuration (this node is stateMode:'${context.stateMode}') or pass a different engine. Cause: ${message(err)}`,
+			{cause: err},
+		);
+	}
+}
+
+/** A short, safe rendering of whatever was passed as an engine. */
+function describe(value: unknown): string {
+	if (value === null) return 'null';
+	if (typeof value !== 'object') return typeof value;
+	if (typeof (value as ReadEngine).id === 'string') {
+		return `an object with id '${(value as ReadEngine).id}' and no call()`;
+	}
+	return `an object with keys [${Object.keys(value as object).join(', ')}]`;
+}
+
+function message(err: unknown): string {
+	return String((err as Error)?.message ?? err);
 }

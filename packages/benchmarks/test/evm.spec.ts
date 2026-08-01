@@ -90,11 +90,20 @@ const collected: Record<string, unknown>[] = [];
  * change that grows it, and say why in the changeset. A red assertion here means
  * either that or an accidental import into the core graph.
  *
+ * RE-PINNED ONCE SINCE, by `engine-seam-docs-and-honest-edges`: 412.4 -> 413.5 KB
+ * raw / 124.1 -> 124.6 KB gzip. The 1.1 KB is the text of the node's engine
+ * refusals (`connectReadEngine` in `src/engine.ts`: a bad engine object, and an
+ * engine whose `connect` throws, both fail construction rather than silently
+ * falling back to the default engine). It is prose in the core bundle, paid by
+ * every consumer including the JS-only one, and it is the feature: an error that
+ * does not say what happened is the thing that change exists to remove. Still
+ * zero bytes of `revm-wasm`.
+ *
  * Raw bytes are esbuild-deterministic, so that bound is exact. The gzip bound
  * carries 1% of slack because the zlib shipped with different Node builds does
  * not compress byte-identically, which is noise rather than growth.
  */
-const DEFAULT_ENTRY_BASELINE = {rawKB: 412.4, gzipKB: 124.1};
+const DEFAULT_ENTRY_BASELINE = {rawKB: 413.5, gzipKB: 124.6};
 const GZIP_SLACK = 1.01;
 
 // Build + serve once for the whole file (the cut contains all backends).

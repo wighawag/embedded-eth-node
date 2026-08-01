@@ -20,6 +20,12 @@ faking success.
   (Worker) are interchangeable one-liners — the consumer never hand-rolls comlink.
 - **IndexedDB persistence** (`createIndexedDBPersistence()`), verified to survive a
   real page reload (state + balances + `eth_getLogs`).
+- **Swappable READ engine:** `eth_call`/`eth_estimateGas` run on an injected
+  engine — `@ethereumjs/evm` by default, or
+  [revm-wasm](#read-engine-ethereumjsevm-default-vs-revm-wasm-opt-in) via the
+  optional `embedded-eth-node/revm` subpath (measured **2.7× on Chromium /
+  3.3× on WebKit** for a 100-read frame, byte-identical gas). Transactions always
+  run on `@ethereumjs/vm`.
 - **Simple by design:** account/signing methods are NOT implemented; legacy
   (type-0) receipts work (legacy-safe `effectiveGasPrice`); `eth_estimateGas` is a
   real run-and-measure (no fudge), verified equal to `runTx`'s `totalGasSpent`.
@@ -92,13 +98,13 @@ method-not-found (`-32601`) — it never fakes a result.
 | `eth_chainId`, `net_version` | from `chainId` option |
 | `eth_blockNumber` | latest mined block number |
 | `eth_getBlockByNumber`, `eth_getBlockByHash` | header + (optional) full txs; roots are zero in `'none'` mode |
-| `eth_call` | pure (checkpoint/revert, never mutates); reverts throw `RpcError(3, 'execution reverted')` |
-| `eth_estimateGas` | honest run-and-measure (`executionGasUsed` + intrinsic incl. EIP-3860); verified == `runTx` `totalGasSpent` |
+| `eth_call` | **runs on the [read engine](#read-engine-ethereumjsevm-default-vs-revm-wasm-opt-in)**; pure (never mutates); reverts throw `RpcError(3, 'execution reverted')` |
+| `eth_estimateGas` | **runs on the [read engine](#read-engine-ethereumjsevm-default-vs-revm-wasm-opt-in)**; honest run-and-measure (`executionGasUsed` + intrinsic incl. EIP-3860); verified == `runTx` `totalGasSpent` |
 | `eth_getBalance`, `eth_getCode`, `eth_getStorageAt`, `eth_getTransactionCount` | state reads at a block tag |
 | `eth_gasPrice`, `eth_maxPriorityFeePerGas` | **constant** (faked fee market — local chain) |
 | `eth_feeHistory` | correct response **shape**, but **constant/faked values** — not for real fee prediction |
-| `eth_fillTransaction` | fills missing nonce/gas/fees of a tx request and returns `{tx, raw}` (the `raw` is **unsigned** — sign client-side); viem's `prepareTransactionRequest` uses it |
-| **`eth_sendRawTransaction`** | accepts a **signed** raw tx; mines per `miningConfig` |
+| `eth_fillTransaction` | fills missing nonce/gas/fees of a tx request and returns `{tx, raw}` (the `raw` is **unsigned** — sign client-side); viem's `prepareTransactionRequest` uses it. Its gas estimate **runs on the [read engine](#read-engine-ethereumjsevm-default-vs-revm-wasm-opt-in)** |
+| **`eth_sendRawTransaction`** | accepts a **signed** raw tx; mines per `miningConfig`. Transactions always run on `@ethereumjs/vm` — **never** on the read engine |
 | **`eth_sendRawTransactionSync`** | the fast path: send + mine + return receipt in one call |
 | `eth_getTransactionReceipt`, `eth_getTransactionByHash` | from the in-memory store |
 | `eth_getLogs` | address + topic filtering over mined logs. **Perf note:** a full linear scan over all logs per call (O(total_logs), no index/cache) — fine for a local chain |
@@ -207,6 +213,119 @@ layer above.
 
 Both caveats apply *only* to fabricated signatures. Genuinely-signed txs (case 1)
 are unaffected: real signatures already differ per signer and validate anywhere.
+
+## Read engine: `@ethereumjs/evm` (default) vs revm-wasm (opt-in)
+
+```ts
+import {createNode} from 'embedded-eth-node';
+import {createRevmEngine} from 'embedded-eth-node/revm';
+import {wasmUrl} from 'revm-wasm/wasm-url';
+
+const js = await createNode({}); // default — reads on @ethereumjs/evm
+const fast = await createNode({engine: await createRevmEngine({wasm: wasmUrl})});
+
+fast.readEngine.id; // 'revm-wasm' — which EVM answered your reads
+```
+
+The **read engine** is the EVM behind `eth_call`, `eth_estimateGas` and
+`eth_fillTransaction`'s estimation, and **only** those. It is an injected
+**object**, never a name the core resolves, so the core imports no engine you did
+not ([ADR 0006](docs/adr/0006-the-engine-is-an-injected-object-not-a-named-string.md)).
+
+- **`@ethereumjs/evm`** (default): the node's own EVM, exactly as it has always
+  behaved — including the pure-read checkpoint/revert and the EIP-2929
+  warm/access reset. Costs nothing: no option, no extra bytes, no wasm.
+- **revm-wasm** (opt-in, `embedded-eth-node/revm`): the same reads on
+  [revm](https://github.com/bluealloy/revm) compiled to WebAssembly, charging
+  **byte-identical gas**
+  ([ADR 0003](docs/adr/0003-revm-wasm-is-the-engine-direction.md)). It reads the
+  node's own authoritative state — a value written by a transaction is visible to
+  the next `eth_call` with no sync step.
+
+**Measured, on the node — not on the raw engines.** The `frame` row is 100 small
+view reads back to back against the 16.6 ms 60fps budget, median of 7 repeats,
+one ordinary laptop
+([conditions + raw samples](docs/spikes/revm-engine-under-conformance-and-gate/frame-measurements.md)):
+
+| configuration | Chromium | WebKit |
+|---|---|---|
+| `createNode({})` — default `@ethereumjs/evm` engine | 10.2–10.4 ms (~62% of the frame) | 13.0 ms (~78%) |
+| `createNode({engine: revm})` — **the node**, reads on revm | 3.5–3.9 ms (~22%) | 4.0 ms (~24%) |
+| raw revm-wasm, no node, owning its own state (context only) | 2.9–4.2 ms | 4.0 ms |
+
+So for this call shape the node itself gets **roughly 2.7× on Chromium and 3.3×
+on WebKit**, and the node's per-call dispatch (the gap between rows 2 and 3) is
+small — a fraction of a millisecond per 100 reads on Chromium, and below the
+measurement floor on WebKit (which clamps `performance.now()` to 1 ms).
+Do not quote the third row as what you get, and do not mix these with the
+**raw-engine** figures elsewhere (11× compute / 19× keccak, and a 12.4 ms → 3.8 ms
+frame): those compare interpreters with no node in the path, on a different, quiet
+machine. Heavier calls (tight arithmetic, keccak loops) gain much more than this
+frame row, which is dominated by per-call overhead rather than by execution.
+
+**Scope, and it is narrow: READS only.** Transactions, mining, receipts and state
+ownership stay on `@ethereumjs/vm` whatever engine is installed — a receipt can
+never be attributed to the read engine. That is why the node reports
+`node.readEngine` and not `node.engine`.
+
+```ts
+// both wasm delivery shapes are the SAME code path — `wasm` takes bytes, a URL,
+// a string, a Response, or an already-compiled WebAssembly.Module.
+import {wasmUrl} from 'revm-wasm/wasm-url';         // bundler-resolved asset
+await createRevmEngine({wasm: wasmUrl});
+await createRevmEngine({wasm: '/assets/revm.wasm'}); // fetched at runtime, so you
+                                                     // can paint UI first
+```
+
+Caveats, all of them real:
+
+- **`stateMode:'none'` only.** revm reads the node's state SYNCHRONOUSLY (an
+  interpreter has no suspension point mid-opcode) through `SimpleStateManager`'s
+  checkpoint stacks, and `MerkleStateManager` has no synchronous view at any
+  depth ([ADR 0005](docs/adr/0005-revm-reads-the-nodes-state-through-simplestatemanagers-stacks.md)).
+  `createNode({stateMode:'trie', engine: revm})` **throws at construction**,
+  naming the reason.
+- **One engine instance serves one node.** `connect` binds it; handing a
+  connected engine to a second `createNode()` throws (it would otherwise
+  re-point the FIRST node's reads at the second node's state). Call
+  `createRevmEngine()` per node, passing the same compiled `WebAssembly.Module`
+  to skip recompiling.
+- **`BASEFEE` reads 0 inside a revm read** (and `PREVRANDAO` cannot be set):
+  `revm-wasm@0.1.0` exposes no disable-base-fee/balance-check flag, so a zero
+  base fee is how an `eth_call` from an unfunded address stays possible. Gas is
+  unaffected; a contract that *reads* `block.basefee` in a view function sees 0
+  on revm and the block's real value on `@ethereumjs/evm`.
+- **Not on the Worker path.** `createWorkerNode({engine})` is refused with a real
+  error (an engine is a function-bearing object; comlink structured-clones the
+  options, which would otherwise give you an opaque `DataCloneError`). To run
+  revm in a Worker, build the engine INSIDE your own worker module —
+  `createNode({engine: await createRevmEngine({wasm})})` there, then
+  comlink-expose the node.
+- **In Node.js**, `revm-wasm/wasm-url` is a `file:` URL and Node's `fetch` cannot
+  resolve that scheme: read the bytes yourself
+  (`readFileSync(fileURLToPath(wasmUrl))`) and pass those. In a browser the URL
+  works as-is.
+- **What you pay if you never opt in: nothing you ship.** `revm-wasm` is a plain
+  dependency, so a JS-only consumer downloads its install bytes but bundles
+  **zero** of them — the default entry point is 413.5 KB raw / 124.6 KB gzip and
+  the benchmark suite asserts both that bound and that `revm-wasm` is absent from
+  the default entry's module graph. Opting in adds the `.wasm` itself: 1.17 MB
+  raw, 413 KB gzipped, fetched or bundled only by
+  `import 'embedded-eth-node/revm'`.
+
+**An engine that cannot come up takes the node down with it.** There is no
+fallback path anywhere: if an engine fails to initialise, or refuses this node's
+configuration, `createNode()` throws an error naming the engine and the cause. A
+node quietly running `@ethereumjs/evm` when you asked for revm would work, return
+correct results, and be an order of magnitude slower than you believe — you would
+measure it, be confused, and have no signal. Pinned in
+`test/slim-node-checks.spec.ts` beside the other honest-edge checks.
+
+The revm engine faces the same bars as the default one: the differential
+conformance battery (`test/revm-conformance.spec.ts`) and the cross-backend
+execution-gas gate in `packages/benchmarks`, which asserts every backend charges
+the same gas — two EVMs that agree on every return value can still disagree on
+where execution runs OUT of gas.
 
 ## Genesis pre-state + block env
 

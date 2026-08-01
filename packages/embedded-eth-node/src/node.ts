@@ -50,7 +50,7 @@ function hexToBytes(s: string): Uint8Array {
 	return hexToBytesStrict((s.startsWith('0x') ? s : '0x' + s) as `0x${string}`);
 }
 import {keccak_256} from '@noble/hashes/sha3.js';
-import {createEthereumjsReadEngine} from './engine.js';
+import {connectReadEngine, createEthereumjsReadEngine} from './engine.js';
 // The read engine reports EXECUTION gas and the node adds intrinsic gas on top;
 // an engine that charges intrinsic gas itself (revm) subtracts the SAME formula,
 // so it has exactly one home. See ./intrinsic-gas.ts.
@@ -191,10 +191,15 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 	// connected HERE, during construction, so an engine that cannot serve this
 	// node's configuration throws now rather than at the first opcode. Note the
 	// scope: transactions run on `@ethereumjs/vm` whatever engine is installed.
+	//
+	// `??` is the ONLY place the default is chosen, and it reads an ABSENT option,
+	// never a failure: an engine that was supplied and cannot come up fails the
+	// construction (see connectReadEngine). There is deliberately no path from
+	// "your engine did not work" to "here is a node on the default engine".
 	const readEngine: ReadEngine =
 		options.engine ??
 		createEthereumjsReadEngine({evm: vm.evm, stateManager: sm});
-	await readEngine.connect?.({
+	await connectReadEngine(readEngine, {
 		stateManager: sm,
 		common,
 		stateMode,

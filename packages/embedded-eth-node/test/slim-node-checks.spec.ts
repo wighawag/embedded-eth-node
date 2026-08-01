@@ -7,6 +7,10 @@
  *   - dump/load persistence round-trips into a fresh node.
  *   - State-root mode: `'none'` throws / zero block root; `'trie'` produces a REAL
  *     Merkle-Patricia root that matches the block header; both modes agree.
+ *   - Engine seam: an engine that cannot start, cannot serve the node's
+ *     configuration, or is not an engine at all fails LOUDLY at construction
+ *     (never a silent fallback to the default engine), and an engine handed to
+ *     `createWorkerNode` is refused by name rather than by a DataCloneError.
  */
 import {test, expect} from '@playwright/test';
 import {fileURLToPath} from 'node:url';
@@ -47,6 +51,43 @@ test('node honesty + correctness (receipts, gaps, persistence, state-root mode)'
 	expect(c.trieModeNumber).toBe('3');
 	expect(c.trieModeRootIsReal).toBe(true);
 	expect(c.trieBlockStateRootMatches).toBe(true);
+
+	// ---- engine seam: the honest edges of `createNode({engine})` ----
+	// The failure that matters is a SILENT FALLBACK. Every probe below reports the
+	// engine the node CAME UP on, so a fallback would read as
+	// `DID_NOT_THROW:@ethereumjs/evm` instead of quietly passing.
+
+	// an engine that fails to initialise: construction fails, naming the engine and
+	// the cause the engine itself reported.
+	expect(c.engineInitFailure).not.toContain('DID_NOT_THROW');
+	expect(c.engineInitFailure).toContain(c.engineInitCause);
+	expect(c.engineInitFailure).toContain('test-engine-that-cannot-start');
+
+	// a configuration the engine cannot serve: refused at construction, carrying
+	// the engine's own reason...
+	expect(c.engineRefusedMode).not.toContain('DID_NOT_THROW');
+	expect(c.engineRefusedMode).toContain("stateMode:'trie'");
+	// ...while the SAME engine serves the mode it supports, so the refusal is about
+	// the configuration, not the engine.
+	expect(c.engineServedMode).toBe('DID_NOT_THROW:test-engine-none-only');
+
+	// an object that is not a ReadEngine is refused at construction, not at the
+	// first read.
+	expect(c.engineNotAnEngine).not.toContain('DID_NOT_THROW');
+	expect(c.engineNotAnEngine).toContain('call');
+
+	// the Worker path refuses an engine by NAME (an engine cannot be
+	// structured-cloned into a Worker) rather than surfacing comlink's opaque
+	// DataCloneError. The probe reports `threw:<name>:<message>`, so the ERROR
+	// TYPE is what distinguishes the two: our own Error, not comlink's
+	// DataCloneError DOMException. (The message mentions DataCloneError on
+	// purpose, for anyone who got one before this guard existed.)
+	expect(c.workerEngine).not.toContain('DID_NOT_THROW');
+	expect(c.workerEngine).not.toContain('threw:DataCloneError');
+	expect(c.workerEngine).toMatch(
+		/^threw:Error:embedded-eth-node\/worker-client: `engine`/,
+	);
+	expect(c.workerEngine).toContain('createNode');
 
 	await h.dispose();
 });
