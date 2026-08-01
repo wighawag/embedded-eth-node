@@ -241,6 +241,13 @@ Beyond that, the test suite also runs a **differential** conformance check
 hand-wired trie-backed `@ethereumjs/vm` `runTx` reference, asserting field-by-field
 equality of receipts/logs/return-data/gas/post-state in both state modes.
 
+That same battery runs once more with the optional revm read engine installed
+(`test/revm-conformance.spec.ts`), in the one state mode that engine serves
+(`'none'` — it refuses `'trie'` at construction), so the alternative EVM faces
+the repo's strongest correctness bar rather than a softer one of its own. Nothing
+is relaxed for it: `test/conformance.spec.ts` still runs both modes on the
+default engine, unchanged.
+
 ## Development
 
 ```sh

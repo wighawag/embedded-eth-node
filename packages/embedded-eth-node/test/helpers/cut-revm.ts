@@ -6,6 +6,14 @@
  * asset loader and adds ~1.2 MB to the page. Every other spec shares ./cut.ts
  * and must keep paying nothing for an engine it does not use — the same property
  * the revm subpath itself exists to preserve for consumers.
+ *
+ * Modes (one per revm spec):
+ *   - 'revm-engine'  : the engine itself — same results + same gas as the
+ *                      default engine, the node's own state, purity, BLOCKHASH,
+ *                      both wasm delivery shapes, the refused state mode
+ *   - 'conformance'  : the SHARED differential battery (helpers/conformance.ts)
+ *                      run with the revm engine installed, in the one state mode
+ *                      it serves
  */
 import type {
 	CodeUnderTest,
@@ -14,6 +22,7 @@ import type {
 } from 'playwright-browser-harness/contract';
 import {captureEnv} from 'playwright-browser-harness/contract';
 import {runRevmEngineChecks} from './revm-engine.js';
+import {runRevmConformance} from './revm-conformance.js';
 
 const cut: CodeUnderTest = {
 	name: 'embedded-eth-node/revm',
@@ -23,14 +32,37 @@ const cut: CodeUnderTest = {
 		const timings: Timing[] = [];
 		const results: Record<string, unknown> = {};
 
-		try {
-			results.revmEngine = await runRevmEngineChecks({
-				runtimeWasmUrl: String(ctx.params.runtimeWasmUrl),
-			});
-		} catch (e) {
-			errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
+		// The engine itself: results + gas against the default engine, the node's
+		// own state, purity, BLOCKHASH, both delivery shapes, the refused mode.
+		if (ctx.params.mode === 'revm-engine') {
+			try {
+				results.revmEngine = await runRevmEngineChecks({
+					runtimeWasmUrl: String(ctx.params.runtimeWasmUrl),
+				});
+			} catch (e) {
+				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
+			}
+			return {results, timings, errors, env: captureEnv()};
 		}
-		return {results, timings, errors, env: captureEnv()};
+
+		// The SHARED differential battery, with the revm engine installed. Same
+		// steps, same reference, same assertions as `conformance.spec.ts` — only the
+		// EVM behind the read path differs.
+		if (ctx.params.mode === 'conformance') {
+			try {
+				results.revmConformance = await runRevmConformance();
+			} catch (e) {
+				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
+			}
+			return {results, timings, errors, env: captureEnv()};
+		}
+
+		return {
+			results: {},
+			timings: [],
+			errors: [`unknown mode: ${String(ctx.params.mode)}`],
+			env: captureEnv(),
+		};
 	},
 };
 

@@ -34,6 +34,13 @@ const BACKENDS = [
 	'embedded-eth-node',
 	'embedded-eth-node-trusted',
 	'embedded-eth-node-fabricated',
+	// The node WITH the optional `embedded-eth-node/revm` read engine installed:
+	// the configuration a consumer actually ships when they opt into revm, and
+	// therefore the one the README's frame number has to come from. Distinct from
+	// both neighbours: `embedded-eth-node` is the same node on `@ethereumjs/evm`
+	// (so the delta between them IS the engine swap), and `revm` below is RAW revm
+	// owning its own state with no node in the path at all.
+	'embedded-eth-node-revm-engine',
 	'revm',
 ] as const;
 
@@ -196,6 +203,27 @@ test('every backend contributed to the gate', () => {
 	expect(revm?.computeGas).toBe(gasReference.computeGas);
 	expect(revm?.keccakGas).toBe(gasReference.keccakGas);
 	expect(revm?.keccakResult).toBe(keccakReference);
+
+	// THE NODE ON REVM is an ordinary backend under the same gate, and named
+	// explicitly here for the same reason the raw `revm` row is: a swapped
+	// interpreter is exactly the change this gate exists to catch, and the row it
+	// runs in must not be able to drop out quietly. Its gas is compared against
+	// the JS node and raw revm alike — they all sit in `gasReference`.
+	const onRevm = collected.find(
+		(c) => c.backend === 'embedded-eth-node-revm-engine',
+	);
+	const jsNode = collected.find((c) => c.backend === 'embedded-eth-node');
+	expect(onRevm?.computeGas).toBe(gasReference.computeGas);
+	expect(onRevm?.keccakGas).toBe(gasReference.keccakGas);
+	expect(onRevm?.keccakResult).toBe(keccakReference);
+	// ...stated the other way round too, because THIS is the pair a consumer
+	// switches between with one option: the node on revm and the node on
+	// @ethereumjs/evm must charge identical gas, or the swap forks a replay.
+	expect(onRevm?.computeGas).toBe(jsNode?.computeGas);
+	expect(onRevm?.keccakGas).toBe(jsNode?.keccakGas);
+	expect(onRevm?.computeGas).toBe(revm?.computeGas);
+	expect(onRevm?.keccakGas).toBe(revm?.keccakGas);
+	expect(onRevm?.keccakResult).toBe(jsNode?.keccakResult);
 });
 
 test('bundle size per backend (raw + gzip)', async () => {
@@ -204,9 +232,12 @@ test('bundle size per backend (raw + gzip)', async () => {
 	// The default entry's module graph, kept for the "revm is not in it" check.
 	let defaultEntryInputs: string[] = [];
 	for (const backend of BACKENDS) {
-		// the trusted/fabricated rows are the SAME package as 'embedded-eth-node'
-		// (only a node option and the send path differ), so they add no bytes and
-		// need no separate size entry.
+		// the trusted/fabricated rows are the SAME entry point as
+		// 'embedded-eth-node' (only a node option and the send path differ), so they
+		// add no bytes and need no separate size entry. The revm-engine row DOES
+		// import a second entry point (`embedded-eth-node/revm`), but what it costs
+		// is the `.wasm` — already weighed in its own row below, and fetched at
+		// runtime, which esbuild cannot weigh anyway.
 		if (backend.startsWith('embedded-eth-node-')) continue;
 		// revm's cost is the .wasm itself, reported separately below; esbuild cannot
 		// weigh a module that is fetched at runtime.
@@ -318,4 +349,31 @@ test('bundle size per backend (raw + gzip)', async () => {
 	console.log(
 		`\nframe = ${FRAME_CALLS} small view reads back to back; 60fps budget = ${FRAME_BUDGET_MS} ms/frame`,
 	);
+
+	// THE FRAME NUMBER THE README CITES, spelled out rather than left to be read
+	// off the table above. The figures this whole feature is justified by were
+	// measured on RAW backends; what a consumer actually gets is the `embedded-
+	// eth-node-revm-engine` row, because the node's own dispatch overhead becomes
+	// the dominant term once the interpreter stops being it.
+	//
+	// REPORTED, NOT ASSERTED. Timing rows are load-sensitive, this suite runs on a
+	// shared runner, and WebKit clamps `performance.now()` to 1 ms. Only gas
+	// equality, keccak equality and the scenario results are assertions here.
+	console.log(
+		'\n=== frame budget: the number to cite (REPORTED, not asserted) ===',
+	);
+	for (const key of [
+		'embedded-eth-node',
+		'embedded-eth-node-revm-engine',
+		'revm',
+	] as const) {
+		const c = collected.find((x) => x.backend === key);
+		const ms = typeof c?.frame === 'number' ? c.frame : undefined;
+		console.log(
+			`${key.padEnd(32)}${ms === undefined ? '     -' : ms.toFixed(1).padStart(6)} ms / ${FRAME_BUDGET_MS} ms` +
+				(ms === undefined
+					? ''
+					: `  (${((ms / FRAME_BUDGET_MS) * 100).toFixed(0)}% of the frame budget)`),
+		);
+	}
 });

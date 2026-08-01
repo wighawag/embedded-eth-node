@@ -20,6 +20,15 @@
  * and assert field-by-field equality of receipt / logs / return-data / estimateGas
  * / post-state reads. We run it against BOTH slim-node state modes ('none' AND
  * 'trie') so the cheap default fast path is covered too.
+ *
+ * The battery is ENGINE-PARAMETERISED (see {@link runConformanceOnEngine}): the
+ * same steps run with an injected read engine, so `embedded-eth-node/revm` faces
+ * this bar rather than a softer one of its own. Only the READ path changes with
+ * the engine — `eth_call` return data and `eth_estimateGas` — because
+ * transactions run on `@ethereumjs/vm` whatever engine is installed. The engine
+ * is built PER NODE by a factory, not shared: an engine instance serves exactly
+ * one node (the revm engine refuses a second `createNode()` outright), and the
+ * battery builds two.
  */
 import {createVM, runTx, type VM} from '@ethereumjs/vm';
 import {MerkleStateManager} from '@ethereumjs/statemanager';
@@ -38,7 +47,12 @@ import {
 import {keccak_256} from '@noble/hashes/sha3.js';
 import {encodeFunctionData, encodeDeployData} from 'viem';
 import {privateKeyToAccount} from 'viem/accounts';
-import {createNode, type SlimNode, type StateMode} from '../../src/index.js';
+import {
+	createNode,
+	type ReadEngine,
+	type SlimNode,
+	type StateMode,
+} from '../../src/index.js';
 import {counterAbi, counterBytecode} from './counter.js';
 import {probeAbi, probeBytecode} from './probe.js';
 
@@ -304,20 +318,35 @@ async function sign2930(args: any): Promise<string> {
 	});
 }
 
+/**
+ * Builds ONE engine for ONE node. `undefined` (or no factory) leaves the node on
+ * its default `@ethereumjs/evm` engine, which is what the unparameterised
+ * battery runs.
+ */
+export type EngineFactory = () => Promise<ReadEngine>;
+
+export interface BatteryReport {
+	stateMode: StateMode;
+	/** Which EVM answered the READ path, as the node itself reports it. */
+	engineId: string;
+	steps: {label: string; mismatches: string[]}[];
+	totalMismatches: number;
+}
+
 // ---------------------------------------------------------------------------
 // Run the WHOLE battery against one slim-node state mode, diffing every step
 // against the reference. Returns a structured report of mismatches (empty = pass).
 // ---------------------------------------------------------------------------
-async function runBattery(stateMode: StateMode): Promise<{
-	stateMode: StateMode;
-	steps: {label: string; mismatches: string[]}[];
-	totalMismatches: number;
-}> {
+async function runBattery(
+	stateMode: StateMode,
+	makeEngine?: EngineFactory,
+): Promise<BatteryReport> {
 	const node: SlimNode = await createNode({
 		chainId: CHAIN_ID,
 		stateMode,
 		miningConfig: {type: 'auto'},
 		initialBalances: {[account.address]: GENESIS_BALANCE},
+		engine: await makeEngine?.(),
 	});
 	const ref = new Reference();
 	await ref.setup();
@@ -705,6 +734,8 @@ async function runBattery(stateMode: StateMode): Promise<{
 			stateMode,
 			miningConfig: {type: 'manual'},
 			initialBalances: {[account.address]: GENESIS_BALANCE},
+			// Its OWN engine: one engine instance serves one node.
+			engine: await makeEngine?.(),
 		});
 		const depData = encodeDeployData({
 			abi: counterAbi,
@@ -777,18 +808,67 @@ async function runBattery(stateMode: StateMode): Promise<{
 		ctx.nonce += 0; // node2 is independent; ctx.nonce unchanged
 	}
 
+	const engineId = node.readEngine.id;
 	await node.dispose();
 
 	const totalMismatches = steps.reduce((n, s) => n + s.mismatches.length, 0);
-	return {stateMode, steps, totalMismatches};
+	return {stateMode, engineId, steps, totalMismatches};
 }
 
 export async function runConformance(): Promise<{
-	none: Awaited<ReturnType<typeof runBattery>>;
-	trie: Awaited<ReturnType<typeof runBattery>>;
+	none: BatteryReport;
+	trie: BatteryReport;
 }> {
 	// Cover BOTH the default fast path ('none') and the trie path ('trie').
 	const none = await runBattery('none');
 	const trie = await runBattery('trie');
 	return {none, trie};
+}
+
+export interface EngineConformanceReport {
+	/** The battery, run in the one mode this engine serves. */
+	served: BatteryReport;
+	/**
+	 * The modes this engine REFUSES, with the error it refused with. Recorded
+	 * rather than assumed: it is the refusal that decides which mode keeps its
+	 * default-engine coverage, so a mode that silently stopped being refused
+	 * (and therefore silently stopped being covered by anyone) is visible here.
+	 */
+	refusals: {stateMode: StateMode; error: string}[];
+	totalMismatches: number;
+}
+
+/**
+ * Run the SAME battery with an injected read engine, in the one state mode that
+ * engine serves, and record its refusal of the others.
+ *
+ * Deliberately NOT "run every mode on every engine": an engine that cannot serve
+ * a mode must say so at construction, and covering it anyway would mean either
+ * relaxing an assertion or running the mode on the default engine while claiming
+ * the engine was under test. The unparameterised {@link runConformance} keeps
+ * covering every mode on the default engine, so no mode loses coverage.
+ */
+export async function runConformanceOnEngine(opts: {
+	makeEngine: EngineFactory;
+	/** The one mode this engine serves — the battery runs here. */
+	serves: StateMode;
+	/** Modes this engine must refuse AT CONSTRUCTION, naming the reason. */
+	refuses: StateMode[];
+}): Promise<EngineConformanceReport> {
+	const refusals: {stateMode: StateMode; error: string}[] = [];
+	for (const stateMode of opts.refuses) {
+		try {
+			const n = await createNode({
+				chainId: CHAIN_ID,
+				stateMode,
+				engine: await opts.makeEngine(),
+			});
+			refusals.push({stateMode, error: 'DID_NOT_THROW'});
+			await n.dispose();
+		} catch (e) {
+			refusals.push({stateMode, error: String((e as Error)?.message ?? e)});
+		}
+	}
+	const served = await runBattery(opts.serves, opts.makeEngine);
+	return {served, refusals, totalMismatches: served.totalMismatches};
 }

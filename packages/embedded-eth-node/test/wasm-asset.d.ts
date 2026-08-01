@@ -8,6 +8,10 @@
  * no notion of that, so the test suite declares the shape it gets back.
  */
 declare module 'revm-wasm/revm.wasm' {
-	const bytes: Uint8Array;
+	// Over a plain `ArrayBuffer` (never a `SharedArrayBuffer`), which is what makes
+	// the bytes a `BufferSource` — i.e. directly compilable with
+	// `WebAssembly.compile`, as ./helpers/revm-conformance.ts does to share ONE
+	// compilation across the several engines its battery needs.
+	const bytes: Uint8Array<ArrayBuffer>;
 	export default bytes;
 }

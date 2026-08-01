@@ -24,6 +24,7 @@ import {
 	makeSlimNodeBackend,
 	makeSlimNodeTrustedBackend,
 	makeSlimNodeFabricatedBackend,
+	makeSlimNodeRevmEngineBackend,
 } from './backend-slim-node.js';
 import {makeRevmBackend} from './backend-revm.js';
 
@@ -38,6 +39,12 @@ const BACKENDS: Record<string, () => EvmBackend> = {
 	// same again but the client doesn't sign either (dummy signature) — shows the
 	// ceiling of the trusted primitive: NO secp256k1 anywhere in the round trip.
 	'embedded-eth-node-fabricated': makeSlimNodeFabricatedBackend,
+	// the DEFAULT node with the optional `embedded-eth-node/revm` read engine
+	// installed — the configuration a consumer ships when they opt into revm, and
+	// the one the README's frame number should come from. Reads run on revm;
+	// transactions still run on @ethereumjs/vm, so this is NOT the raw `revm` row
+	// below, which owns its own state and drives everything.
+	'embedded-eth-node-revm-engine': makeSlimNodeRevmEngineBackend,
 	// revm (Rust) compiled to wasm, from the `revm-wasm` package. It drives
 	// EVERYTHING — deploy, the state-changing txs and the reads — with no
 	// @ethereumjs/* involved, so every row is comparable and the write path is

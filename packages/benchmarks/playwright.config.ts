@@ -22,6 +22,14 @@ import {defineConfig, devices} from '@playwright/test';
 // keeps ~3x headroom. Headroom, not the median, is what decides whether frames
 // drop.
 //
+// BOTH ROWS ABOVE ARE RAW backends, which is not what a consumer ships. The
+// `embedded-eth-node-revm-engine` row measures the node WITH the revm read engine
+// installed, and that is the number to cite for the recommended configuration:
+// it keeps essentially all of raw revm's frame win (the node's own dispatch is
+// what remains, and at this call shape it is small). Measured figures, with their
+// conditions and the WebKit 1 ms clamp caveat, live in
+// docs/spikes/revm-engine-under-conformance-and-gate/frame-measurements.md.
+//
 // CORRECTION, recorded on purpose: an earlier revision of this comment claimed
 // 2.6-3.6x and "revm is the only backend that fits 60fps on WebKit". That came
 // from a single WebKit run taken while the machine was loaded, and it overstated

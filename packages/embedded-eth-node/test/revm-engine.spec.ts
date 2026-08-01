@@ -52,7 +52,10 @@ test('revm engine: same results + same gas as @ethereumjs/evm, on the node own s
 	});
 	const r = await h.run({
 		phase: 'once',
-		params: {runtimeWasmUrl: new URL('revm.wasm', h.serverUrl).href},
+		params: {
+			mode: 'revm-engine',
+			runtimeWasmUrl: new URL('revm.wasm', h.serverUrl).href,
+		},
 	});
 
 	console.log('\n[revm-engine] errors:', r.errors);

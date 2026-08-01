@@ -20,7 +20,7 @@ pnpm --filter embedded-eth-node-benchmarks test
 
 ## The `revm` row
 
-`revm` (Rust, compiled to WebAssembly) is included as a **7th backend**. It needs
+`revm` (Rust, compiled to WebAssembly) is included as a backend. It needs
 no extra step: the module comes from the [`revm-wasm`](https://www.npmjs.com/package/revm-wasm)
 package (MIT, zero runtime dependencies, prebuilt `.wasm` in the tarball), so the
 row runs on a fresh clone and in CI like any other. `pnpm install` is the whole
@@ -54,6 +54,38 @@ secp256k1 at all. The honest comparison for them is the
 `embedded-eth-node-fabricated` row, which also skips both signing and recovery —
 not the default row, which pays ~1.3ms to sign plus ~2ms to recover.
 
+## The `embedded-eth-node-revm-engine` row
+
+The row above is revm's CEILING: raw revm, owning its own state, with no node in
+the path. `embedded-eth-node-revm-engine` is the configuration a consumer
+actually ships when they opt in —
+
+```ts
+const node = await createNode({engine: await createRevmEngine({wasm})});
+```
+
+— the same node as the `embedded-eth-node` row, differing by exactly one
+`createNode` option, with the node's own dispatch, state adapter and RPC layer on
+top of the interpreter. That delta between the two node rows **is** the engine
+swap; the delta to the raw `revm` row is what the node itself costs.
+
+Only READS move. Transactions run on `@ethereumjs/vm` whatever engine is
+installed (which is why the node calls it a *read engine*), so `deploy` and
+`callAvg` are unaffected by design and any difference there is noise. The rows
+that mean something are `read`, `compute`, `keccak`, `frame` and `floor`.
+
+It is an ordinary backend under the gate: its execution gas is compared against
+both the JS node and raw revm, and its keccak-chain result against every backend.
+The `frame` figure it measures — the one the library README should cite, since
+the published 12.4 / 15.0 ms and 3.8 / 5.0 ms figures were both measured on RAW
+backends — is captured with its conditions in
+[`docs/spikes/revm-engine-under-conformance-and-gate/frame-measurements.md`](../../docs/spikes/revm-engine-under-conformance-and-gate/frame-measurements.md).
+
+The engine's own correctness (identical results and gas against the default
+engine, reading the node's authoritative state, purity, the refused `stateMode`)
+lives in the library package, as does the differential conformance battery run
+with the engine installed. This package only measures it and gates its gas.
+
 ## What it measures
 
 - **Per-phase timings** (median of repeats): cold start, deploy, state-changing
@@ -71,7 +103,9 @@ not the default row, which pays ~1.3ms to sign plus ~2ms to recover.
 - **MGas/s** — the only backend-independent speed unit, and directly comparable to
   published evmone/revm/geth figures unlike wall-clock ms.
 - **Frame budget** — 100 small view reads back to back (the on-chain-game shape),
-  against a 16.6 ms 60fps budget, plus the fixed per-call floor.
+  against a 16.6 ms 60fps budget, plus the fixed per-call floor. Printed, never
+  asserted: timing rows are load-sensitive, and WebKit clamps
+  `performance.now()` to 1 ms.
 
 The library's own correctness/conformance/honesty tests (differential conformance,
 GeneralStateTests, viem-surface, persistence-reload, the `evm_set*` cheats, the

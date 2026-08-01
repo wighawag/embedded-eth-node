@@ -53,6 +53,7 @@ import {
 } from 'revm-wasm';
 import type {EvmBackend} from './scenario.js';
 import {intrinsicGasForCall, DEPLOYER} from './scenario.js';
+import {compiledRevmModule} from './revm-wasm-module.js';
 
 const CHAIN_ID = 1n;
 
@@ -80,34 +81,6 @@ function bytesToHex(b: Uint8Array): string {
 }
 
 const DEPLOYER_ADDR = hexToBytes(DEPLOYER);
-
-/**
- * Compile the module ONCE for the page, instantiate per run.
- *
- * Compilation is the expensive half and the scenario runs the whole backend
- * several times over, so re-fetching and re-compiling would show up in the
- * `coldStart` row as an artefact of the harness rather than of revm. Each run
- * still gets its OWN instance, its own linear memory and its own store, so no
- * run can observe another's state.
- *
- * The `.wasm` is copied out of the `revm-wasm` package and served next to the
- * bundle by `evm.spec.ts`. It is fetched by URL rather than reached through
- * `revm-wasm/wasm-url`, because the benchmark bundle is built by a bare esbuild
- * pass with no asset pipeline to rewrite an `import.meta.url` reference.
- *
- * Compiled from bytes rather than with `compileStreaming`, which would throw on a
- * static server that does not label the file `application/wasm`. Streaming would
- * save a few milliseconds once per page, and no measured row includes it.
- */
-let modulePromise: Promise<WebAssembly.Module> | undefined;
-function compiledModule(): Promise<WebAssembly.Module> {
-	if (!modulePromise) {
-		modulePromise = fetch(new URL('revm.wasm', location.href))
-			.then((res) => res.arrayBuffer())
-			.then((bytes) => WebAssembly.compile(bytes));
-	}
-	return modulePromise;
-}
 
 export function makeRevmBackend(): EvmBackend {
 	let evm: Revm | undefined;
@@ -165,7 +138,9 @@ export function makeRevmBackend(): EvmBackend {
 				codeHash: KECCAK_EMPTY,
 			});
 			evm = await createRevm({
-				wasm: await compiledModule(),
+				// Compiled ONCE per page and shared with the node's revm-engine row;
+				// see ./revm-wasm-module.ts. Each run still gets its own instance.
+				wasm: await compiledRevmModule(),
 				state: store,
 				spec: Spec.CANCUN,
 				chainId: CHAIN_ID,
