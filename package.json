@@ -4,7 +4,7 @@
   "type": "module",
   "devDependencies": {
     "@changesets/cli": "^2.29.8",
-    "dorfl": "0.11.1",
+    "dorfl": "0.11.2",
     "ldenv": "^0.3.16",
     "zellij-launcher": "^0.0.1"
   },

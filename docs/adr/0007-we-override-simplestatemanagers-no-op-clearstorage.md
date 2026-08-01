@@ -2,7 +2,9 @@
 
 `@ethereumjs/statemanager@10.1.2` ships `SimpleStateManager.clearStorage` as `async clearStorage() { }`: an empty body taking NO parameter, while the `StateManagerInterface` it implements declares `clearStorage(address: Address): Promise<void>`. `@ethereumjs/evm` calls it on every contract creation (`evm.js:555`, immediately after `journal.putAccount`) precisely to guarantee a fresh contract starts with empty storage. With the no-op, a contract created at an address that already holds storage INHERITS that storage, with a success receipt and no warning. `stateMode:'none'` is our default, so this was reachable by default: seed slot 0 with `evm_setStorageAt`, deploy a Counter that lands on that address, and `number()` returned 99 instead of 0.
 
-We therefore ship `SimpleStateManagerWithClearStorage` (`src/state-manager.ts`), a subclass that implements it, and use it for `stateMode:'none'`. Reported upstream with a reproduction and a suggested patch.
+We therefore ship `SimpleStateManagerWithClearStorage` (`src/state-manager.ts`), a subclass that implements it, and use it for `stateMode:'none'`.
+
+Reported upstream with a reproduction and a fix: issue [ethereumjs/ethereumjs-monorepo#4357](https://github.com/ethereumjs/ethereumjs-monorepo/issues/4357), PR [#4358](https://github.com/ethereumjs/ethereumjs-monorepo/pull/4358). This subclass is what protects consumers until that lands and we bump past it.
 
 ## Why a subclass and not a `pnpm patch`
 

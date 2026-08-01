@@ -1,20 +1,24 @@
 ---
 title: revm-wasm behind transaction execution
 slug: revm-engine-behind-runtx
-needsAnswers: true
 taskedAfter: [revm-engine-behind-eth-call]
 ---
 
 > Launch snapshot — records intent at creation, NOT maintained. Current truth: `docs/adr/` (decisions) + the code; remaining work: `work/tasks/ready/` tasks.
 
-<!-- open-questions -->
-
-## Open questions
-
-1. **Can revm's host callbacks read the node's state at all, given they must be SYNCHRONOUS?** This spec's "State ownership" section below assumes an adapter over `SimpleStateManager` with reads on demand, and that assumption is not yet established. `revm-wasm`'s own contract says `getAccount`, `getStorage`, `getCode` and `getBlockHash` must be synchronous, because the interpreter is a synchronous loop inside wasm with no suspension point mid-opcode; every read on `SimpleStateManager` and `MerkleStateManager` returns a `Promise`. The task `revm-state-adapter-spike` (in `work/tasks/ready/`) exists to answer this for the READ half. Do not task this spec until it has, or its tasks will be cut from a premise nobody has checked.
-2. **Which stories does the sibling spec already deliver?** `revm-engine-behind-eth-call` is now tasked, and three of the stories below overlap with tasks it already emitted: story 12 (reject `stateMode:'trie'` at `createNode()`) is a criterion of `revm-engine-subpath`; story 11 (loud failure for a configuration the engine cannot serve) is the same sentence as that spec's story 10, owned by `engine-seam-docs-and-honest-edges`; story 9 (conformance differential against the revm engine) is owned for the READ half by `revm-engine-under-conformance-and-gate`. Before tasking, check what actually landed and cut only the remainder — a task that narrates already-done work is a changelog wearing a spec's shape.
-
-<!-- /open-questions -->
+> **RE-SCOPED 2026-08-01, after `revm-engine-behind-eth-call` shipped in full.** Both questions that gated this spec are resolved, so `needsAnswers` is cleared and it is taskable. What changed:
+>
+> **The premise is proven.** This spec's "State ownership" section assumed an adapter over `SimpleStateManager` with synchronous on-demand reads, which nobody had verified. `revm-state-adapter-spike` verified it, and `docs/adr/0005-revm-reads-the-nodes-state-through-simplestatemanagers-stacks.md` records the answer: the three public checkpoint stacks, read top-of-frame on EVERY access, `'none'` mode only. The read half now ships on exactly that mechanism, so the write half inherits a working, measured foundation rather than an assumption. Read that ADR and `src/revm-state-store.ts` before tasking.
+>
+> **Three stories below are ALREADY DELIVERED. Do not re-task them.**
+>
+> - **Story 12** (reject `stateMode:'trie'` at `createNode()` with a real error) is shipped by `revm-engine-subpath`, asserted in `test/revm-engine.spec.ts`, recorded in ADR 0005.
+> - **Story 11** (loud failure for a configuration the engine cannot serve, never a silent fallback) is shipped by `engine-seam-docs-and-honest-edges` as `connectReadEngine`, which also refuses a non-`ReadEngine` object and an engine whose `connect` throws. ADR 0006 records it.
+> - **Story 9** (conformance differential against the revm engine) is shipped for the READ half by `revm-engine-under-conformance-and-gate`, which made the battery engine-parameterised and asserts the refused mode. The WRITE half genuinely remains, so story 9 NARROWS rather than disappears: point the same parameterised battery at transactions.
+>
+> **One decision to make FIRST, before any task is cut, because three independent findings converge on it.** `SimpleStateManager` keys storage in ONE FLAT map (`${address}_${slot}`), and that single fact now costs three things: (a) revm's `StateStore` contract requires `clearStorage(address)` to be O(that account), which a flat map cannot give (ADR 0005); (b) our own `SimpleStateManagerWithClearStorage` has to prefix-scan the whole map, O(total storage), for the same reason (ADR 0007); (c) `revm-engine-subpath` already shipped a per-account `storageOf` accessor precisely so the layout could be swapped behind one seam. Decide up front whether the write half re-layers storage to `Map<address, Map<slot, value>>` (the layout `MemoryStore` documents and revm's commit semantics assume) or whether revm takes ownership of storage outright. This is far cheaper to settle at tasking time than to discover mid-build, and it shapes stories 2, 3, 13 and 16 below.
+>
+> **Also new since this spec was written:** `revm-wasm@0.2.0` added `disableBaseFee`, `disableBalanceCheck`, `disableBlockGasLimit` and `prevRandao`, which retires the zero-base-fee workaround the read half needed (`work/tasks/backlog/revm-wasm-0-2-0-honest-block-environment.md`). Story 14's `ecrecover` reasoning is unaffected. EIP-3607 still has no opt-out upstream and is tracked in `work/tasks/backlog/eth-call-from-a-contract-address-eip-3607.md`.
 
 ## Problem Statement
 
