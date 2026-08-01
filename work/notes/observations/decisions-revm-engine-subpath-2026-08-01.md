@@ -129,3 +129,50 @@ uses, and the lockfile pins 0.1.0, so this only follows existing precedent — t
 open question raised in
 `work/notes/observations/review-nits-retire-vendored-revm-in-benchmarks-2026-07-31.md`
 applies to both and is still open.
+
+## 11. ONE engine instance serves ONE node, and a second `createNode()` is REFUSED
+
+**Chosen:** `SimpleStateManagerStore.bind` throws if the store is already bound,
+so handing an already-connected `createRevmEngine()` result to a second
+`createNode()` fails at that second construction, naming the reason.
+
+**Why:** an engine owns one wasm instance and one store, and `connect(context)`
+is how it learns which state to read. Rebinding does not give the second node a
+second engine — it re-points the FIRST node's reads at the SECOND node's state.
+Both nodes then answer from one set of accounts, with plausible values and no
+error. Verified before the guard existed: the added browser check made the first
+node's `number()` read fail outright once a second node had been built on the
+same engine, so the failure mode is real rather than theoretical. Loud at
+construction is the same shape as the `stateMode:'trie'` refusal, and the seam
+already documents `connect` as called EXACTLY once, so this enforces an existing
+contract rather than inventing a rule.
+
+**Rejected:** silently rebinding (the status quo, and the bug above); making the
+store per-`connect` (the wasm instance is created in `createRevmEngine`, so the
+store has to exist before the node does — that is why it is created unbound at
+all); making it a documented caveat (a caveat is not a mechanism, and this one
+is invisible until a read is wrong).
+
+**Touches:** a NEW refusal, hence recorded. A consumer running several nodes
+calls `createRevmEngine()` per node; to avoid recompiling the wasm each time they
+pass the same `WebAssembly.Module`, which the `wasm` option already accepts (that
+is stated at the code site). It also constrains `revm-engine-behind-runtx`: the
+write half must keep one store per node, not share one across nodes.
+
+## 12. Reading the "flag word is zero" acceptance criterion
+
+The criterion "`eth_call` on the revm engine cannot mutate state: the flag word
+is zero, and a call that would write leaves the node's state unchanged" predates
+`revm-wasm` owning its own decoder. The "flag word" is the per-account flags byte
+in the outcome BLOB — a wire-format detail this repo is explicitly forbidden to
+parse (the task's own "do NOT hand-roll a decoder"), and one the engine cannot
+see at all because it passes `returnState: false`.
+
+It is therefore satisfied by its INTENT, through two stronger and
+format-independent statements: `Revm#call` is structurally incapable of
+committing (documented by the package, and the CREATE path passes
+`commit: false`), and all five write methods on the state adapter THROW, so a
+commit could never be silent. Both are asserted — `callDidNotMutateState` /
+`storageAfterCall` for the state half, `writeMethodsThrow` for the structural
+half. Recorded because a reviewer checking the criterion literally will find no
+flag word anywhere in the change.

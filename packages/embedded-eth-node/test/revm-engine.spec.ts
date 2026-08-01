@@ -7,6 +7,7 @@
  *   - BLOCKHASH answers with the node's real block hashes
  *   - both wasm delivery shapes (bundler-resolved asset, runtime-fetched URL)
  *   - `stateMode:'trie'` is refused at construction, naming the reason
+ *   - one engine instance serves one node (a second `createNode()` is refused)
  */
 import {test, expect} from '@playwright/test';
 import {fileURLToPath} from 'node:url';
@@ -99,6 +100,12 @@ test('revm engine: same results + same gas as @ethereumjs/evm, on the node own s
 	expect(c.trieRefusal).not.toBe('DID_NOT_THROW');
 	expect(c.trieRefusal).toContain('trie');
 	expect(c.trieRefusal).toMatch(/revm/i);
+
+	// one engine, one node: re-using a connected engine is refused rather than
+	// silently re-pointing the first node's reads at the second node's state
+	expect(c.reuseRefusal).not.toBe('DID_NOT_THROW');
+	expect(c.reuseRefusal).toMatch(/createNode/i);
+	expect(c.numberAfterReuseAttempt).toBe('1');
 
 	await h.dispose();
 });

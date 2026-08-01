@@ -34,6 +34,12 @@ bundler-resolved asset and a runtime-fetched URL are the same code path. In
 Node, note that `revm-wasm/wasm-url` is a `file:` URL and Node's `fetch` cannot
 resolve that scheme: read the bytes and pass those.
 
+One engine instance serves ONE node. Handing an already-connected engine to a
+second `createNode()` is refused, because rebinding it would silently re-point
+the FIRST node's reads at the second node's state. Running several nodes means
+calling `createRevmEngine()` per node — pass each the same compiled
+`WebAssembly.Module` to compile the wasm only once.
+
 `revm-wasm` is a plain `dependency` rather than an optional peer, because a
 missing optional peer fails worse than the install costs. **A JS-only consumer
 pays install bytes and ZERO bundle bytes**: the core entry point never imports

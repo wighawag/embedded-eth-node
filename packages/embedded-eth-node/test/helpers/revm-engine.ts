@@ -21,6 +21,9 @@
  *      runtime-fetched URL, through the same code path.
  *   7. `stateMode:'trie'` is REFUSED at construction, naming the reason, rather
  *      than constructing and failing at the first opcode.
+ *   8. One engine instance serves ONE node: handing the same engine to a second
+ *      `createNode()` is refused, rather than silently re-pointing the first
+ *      node's reads at the second node's state.
  */
 import {createNode} from '../../src/index.js';
 import {createRevmEngine, REVM_ENGINE_ID} from '../../src/revm.js';
@@ -300,6 +303,26 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 	} catch (e) {
 		out.trieRefusal = String((e as Error)?.message ?? e);
 	}
+
+	// ---------- one engine, one node ----------
+	// `fromAsset` is already bound to the `revm` node. Re-using it would rebind
+	// its store to the second node's state, and the FIRST node would then answer
+	// every read from the second node's state — plausible values, no error.
+	try {
+		const secondNode = await createNode({chainId: CHAIN_ID, engine: fromAsset});
+		out.reuseRefusal = 'DID_NOT_THROW';
+		await secondNode.dispose();
+	} catch (e) {
+		out.reuseRefusal = String((e as Error)?.message ?? e);
+	}
+	// ...and the first node still reads ITS OWN state afterwards.
+	out.numberAfterReuseAttempt = String(
+		await revm.pub.readContract({
+			address: deployed.revm,
+			abi: counterAbi,
+			functionName: 'number',
+		}),
+	);
 
 	await def.node.dispose();
 	await revm.node.dispose();

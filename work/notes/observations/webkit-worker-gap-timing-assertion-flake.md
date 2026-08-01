@@ -40,3 +40,7 @@ Same assertion, wider margin, and not only on WebKit. Across five back-to-back f
 - Raise the bound to something the clamp cannot reach (e.g. `< 25`), keeping the property while stepping off the quantum boundary.
 - Assert the property without the clock (e.g. that the main thread serviced N ticks during the Worker's compute), which is what the test actually cares about.
 - Follow the repo's own convention and report the number rather than asserting it, leaving `worker.spec.ts` asserting only the API-equivalence half.
+
+## Addendum, 2026-08-01 (seen again while driving `revm-engine-subpath`)
+
+Third sighting, same shape: the full-suite run reported `mainThreadMaxGap` 17 ms on WebKit (bound `< 15`) on a machine that had just finished a benchmark suite, and running `test/worker.spec.ts` alone immediately afterwards reported 12 ms and passed. Nothing in the task under build touches the Worker path except one added assertion on `readEngine.id`, which passed in both runs.

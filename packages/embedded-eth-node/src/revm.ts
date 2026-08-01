@@ -86,6 +86,13 @@ const SPEC_BY_HARDFORK: Record<string, SpecName> = {
  * The engine binds to the node's state later, through the seam's
  * `connect(context)` hook (ADR 0006: an injected engine exists before the node
  * does, so it cannot capture anything at construction).
+ *
+ * ONE ENGINE PER NODE. The returned engine binds to the first node it is given
+ * to and REFUSES a second, because rebinding would silently re-point the first
+ * node's reads at the second node's state. To pay the wasm compilation only
+ * once, compile it yourself and pass the same `WebAssembly.Module` to each
+ * `createRevmEngine()` call — that is what the `wasm` option accepting a
+ * compiled module is for.
  */
 export async function createRevmEngine(
 	options: RevmEngineOptions,

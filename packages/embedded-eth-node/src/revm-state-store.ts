@@ -138,8 +138,28 @@ export class SimpleStateManagerStore implements StateStore {
 	/** Memoised per-account storage views, keyed by address key. */
 	readonly #storageViews = new Map<string, AccountStorageView>();
 
-	/** Bind to the node's live state manager. Called once, from `connect`. */
+	/**
+	 * Bind to the node's live state manager. Called once, from `connect`.
+	 *
+	 * ONE ENGINE SERVES ONE NODE, and a second bind is refused rather than
+	 * honoured. An engine instance owns one wasm instance and this one store, so
+	 * rebinding would re-point an ALREADY-RUNNING node's reads at a different
+	 * node's state — the first node would then answer every `eth_call` from the
+	 * second node's accounts, with plausible values and no error. The seam
+	 * documents `connect` as called exactly once (see `ReadEngine.connect` in
+	 * ./types.ts), so a second call is a consumer sharing one engine across nodes,
+	 * and it fails at the second construction rather than at the first wrong read.
+	 */
 	bind(sm: SimpleStateManager, options: SimpleStateStoreOptions = {}): void {
+		if (this.#sm !== undefined) {
+			throw new Error(
+				'embedded-eth-node/revm: this engine is already connected to a node. An ' +
+					'engine instance serves ONE node — reconnecting it would re-point the ' +
+					"FIRST node's reads at the second node's state, silently. Call " +
+					'createRevmEngine() once per createNode(); pass the same compiled ' +
+					'WebAssembly.Module to each if you want to compile the wasm only once.',
+			);
+		}
 		assertStackShape(sm);
 		this.#sm = sm;
 		this.#blockHash = options.blockHash;
