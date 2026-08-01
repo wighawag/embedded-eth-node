@@ -62,6 +62,34 @@ const gasReference: Record<string, string> = {};
 
 const collected: Record<string, unknown>[] = [];
 
+/**
+ * THE DEFAULT ENTRY POINT'S BUNDLE BASELINE, pinned deliberately.
+ *
+ * Story 3 of `work/specs/tasked/revm-engine-behind-eth-call.md` is "I pay
+ * nothing for a feature I do not use": a consumer who imports
+ * `embedded-eth-node` and never `embedded-eth-node/revm` must ship no revm. That
+ * promise is only worth what enforces it, so these numbers are an ASSERTION and
+ * not a printed row — measured with the esbuild config below, by
+ * `revm-engine-subpath`, the change that added the subpath.
+ *
+ * WHAT THEY SAY, precisely: the same measurement immediately BEFORE that change
+ * was 412.3 KB raw / 124.0 KB gzip, so adding a whole second EVM engine to the
+ * package cost the default entry 0.1 KB — and that 0.1 KB is not revm. It is the
+ * node-side `getBlockHash` accessor added to `ReadEngineContext` (real core code,
+ * a few lines in `node.ts`). Zero bytes of `revm-wasm` are in this graph, which
+ * is what the metafile check below states directly.
+ *
+ * Re-pin DELIBERATELY when the default entry legitimately grows, in the same
+ * change that grows it, and say why in the changeset. A red assertion here means
+ * either that or an accidental import into the core graph.
+ *
+ * Raw bytes are esbuild-deterministic, so that bound is exact. The gzip bound
+ * carries 1% of slack because the zlib shipped with different Node builds does
+ * not compress byte-identically, which is noise rather than growth.
+ */
+const DEFAULT_ENTRY_BASELINE = {rawKB: 412.4, gzipKB: 124.1};
+const GZIP_SLACK = 1.01;
+
 // Build + serve once for the whole file (the cut contains all backends).
 let prebuilt: {outdir: string; serverUrl: string};
 let closeServer: (() => Promise<void>) | undefined;
@@ -173,6 +201,8 @@ test('every backend contributed to the gate', () => {
 test('bundle size per backend (raw + gzip)', async () => {
 	const bufferEntry = require.resolve('buffer/');
 	const sizes: Record<string, {rawKB: number; gzipKB: number}> = {};
+	// The default entry's module graph, kept for the "revm is not in it" check.
+	let defaultEntryInputs: string[] = [];
 	for (const backend of BACKENDS) {
 		// the trusted/fabricated rows are the SAME package as 'embedded-eth-node'
 		// (only a node option and the send path differ), so they add no bytes and
@@ -216,7 +246,10 @@ test('bundle size per backend (raw + gzip)', async () => {
 				},
 			],
 			define: {global: 'globalThis'},
+			metafile: true,
 		});
+		if (backend === 'embedded-eth-node')
+			defaultEntryInputs = Object.keys(out.metafile.inputs);
 		const raw = out.outputFiles[0].contents;
 		const gz = gzipSync(raw);
 		sizes[backend] = {
@@ -232,6 +265,27 @@ test('bundle size per backend (raw + gzip)', async () => {
 	expect(sizes['revm (wasm module only)'].rawKB).toBeGreaterThan(0);
 
 	console.log('\n=== bundle sizes ===\n', JSON.stringify(sizes, null, 2));
+
+	// THE DEFAULT ENTRY HAS NOT GROWN. `embedded-eth-node/revm` is a separate
+	// entry point and the core references only the `ReadEngine` TYPE (erased at
+	// build time), so a consumer who does not opt in ships exactly what they
+	// shipped before revm existed.
+	expect(
+		sizes['embedded-eth-node'].rawKB,
+		`the default entry point grew to ${sizes['embedded-eth-node'].rawKB} KB raw (baseline ${DEFAULT_ENTRY_BASELINE.rawKB} KB) — ` +
+			'either something was imported into the core graph, or the growth is intended and this baseline must be re-pinned in the same change',
+	).toBeLessThanOrEqual(DEFAULT_ENTRY_BASELINE.rawKB);
+	expect(sizes['embedded-eth-node'].gzipKB).toBeLessThanOrEqual(
+		DEFAULT_ENTRY_BASELINE.gzipKB * GZIP_SLACK,
+	);
+	// ...and revm is not in its dependency graph AT ALL. The size bound alone
+	// would not catch a small accidental import; this names the thing.
+	const revmInputs = defaultEntryInputs.filter((p) => p.includes('revm-wasm'));
+	expect(
+		revmInputs,
+		"`revm-wasm` reached the default entry point's module graph; it belongs to the `embedded-eth-node/revm` subpath only",
+	).toEqual([]);
+	expect(defaultEntryInputs.length).toBeGreaterThan(0);
 	console.log(
 		'\n=== collected timings ===\n',
 		JSON.stringify(collected, null, 2),

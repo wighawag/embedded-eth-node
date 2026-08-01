@@ -6,7 +6,9 @@
  *   - a viem walletClient/publicClient drives the node ACROSS the Worker boundary
  *     unchanged (signed eth_sendRawTransactionSync, eth_call);
  *   - the main thread stays NON-BLOCKING while the Worker runs heavy compute
- *     (heavy EVM compute that would otherwise stall the main thread).
+ *     (heavy EVM compute that would otherwise stall the main thread);
+ *   - the node's `readEngine` identity ROUND-TRIPS across the boundary (it is a
+ *     plain value on purpose, and nothing else asserted it survived).
  *
  * The harness bundles the page (the `cut`) AND the package's worker-entry (the
  * comlink `expose()` side) with the same Node polyfills, serving the worker as
@@ -43,6 +45,8 @@ test('slim-node over a comlink Worker: same API + main-thread non-blocking', asy
 	expect(r.errors).toEqual([]);
 	// 20 increments across the Worker boundary landed:
 	expect(r.results.number).toBe('20');
+	// the engine identity survived the comlink boundary as a plain value
+	expect(r.results.readEngineId).toBe('@ethereumjs/evm');
 
 	const t = Object.fromEntries(r.timings.map((x: any) => [x.label, x.ms]));
 	// The heavy compute ran in the Worker; the main-thread sampler should never

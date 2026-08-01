@@ -51,6 +51,10 @@ function hexToBytes(s: string): Uint8Array {
 }
 import {keccak_256} from '@noble/hashes/sha3.js';
 import {createEthereumjsReadEngine} from './engine.js';
+// The read engine reports EXECUTION gas and the node adds intrinsic gas on top;
+// an engine that charges intrinsic gas itself (revm) subtracts the SAME formula,
+// so it has exactly one home. See ./intrinsic-gas.ts.
+import {intrinsicGas as intrinsicGasOf} from './intrinsic-gas.js';
 import {
 	RpcError,
 	type NodeOptions,
@@ -86,17 +90,10 @@ function txHashOf(tx: TypedTransaction): string {
  * (verified against runTx totalGasSpent — exact, no fudge).
  */
 function intrinsicGas(dataHex: string, isCreate: boolean): bigint {
-	const bytes = hexToBytes(dataHex.startsWith('0x') ? dataHex : '0x' + dataHex);
-	let zero = 0n;
-	let nonzero = 0n;
-	for (const b of bytes) b === 0 ? (zero += 1n) : (nonzero += 1n);
-	let gas = 21_000n + zero * 4n + nonzero * 16n;
-	if (isCreate) {
-		gas += 32_000n;
-		const words = BigInt(Math.ceil(bytes.length / 32));
-		gas += words * 2n; // EIP-3860 initcode cost
-	}
-	return gas;
+	return intrinsicGasOf(
+		hexToBytes(dataHex.startsWith('0x') ? dataHex : '0x' + dataHex),
+		isCreate,
+	);
 }
 
 interface StoredBlock {
@@ -197,7 +194,17 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 	const readEngine: ReadEngine =
 		options.engine ??
 		createEthereumjsReadEngine({evm: vm.evm, stateManager: sm});
-	await readEngine.connect?.({stateManager: sm, common, stateMode});
+	await readEngine.connect?.({
+		stateManager: sm,
+		common,
+		stateMode,
+		// Block hashes for BLOCKHASH, read LIVE (no block exists yet at this point)
+		// and SYNCHRONOUSLY, because an engine answers BLOCKHASH mid-opcode.
+		getBlockHash: (blockNumber: bigint) => {
+			const sb = blockStore.get(Number(blockNumber));
+			return sb ? hexToBytes(sb.header.hash as `0x${string}`) : undefined;
+		},
+	});
 
 	let latestNumber = 0;
 	let parentHash = hexToBytes(ZERO_HASH);

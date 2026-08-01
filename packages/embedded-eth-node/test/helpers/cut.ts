@@ -9,6 +9,9 @@
  *   - 'engine-seam'        : the read path runs on an ENGINE — default
  *                            @ethereumjs/evm, injected engine serves all three
  *                            read-path callers, transactions stay on the VM
+ *
+ * `embedded-eth-node/revm` has its OWN cut (./cut-revm.ts), because its bundle
+ * carries the revm `.wasm` asset and no other spec should pay for it.
  *   - 'trusted-sender'     : senderMode:'trusted' (skip ecrecover) is byte-identical
  *                            to 'recover', the cheat is absent by default, and it
  *                            really does impersonate
@@ -158,6 +161,7 @@ const cut: CodeUnderTest = {
 					Number(ctx.params.sumTo ?? 200000),
 				);
 				results.number = out.number;
+				results.readEngineId = out.readEngineId;
 				timings.push({label: 'workerRoundtripAvg', ms: out.roundtripAvgMs});
 				timings.push({label: 'mainThreadMaxGap', ms: out.mainThreadMaxGapMs});
 			} catch (e) {

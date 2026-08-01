@@ -131,13 +131,29 @@ export interface ReadCallResult {
 /**
  * What the node hands an engine once, at construction, so the engine can reach
  * the node's AUTHORITATIVE state. Deliberately minimal: a later engine that needs
- * more (block hashes, say) adds a field here rather than the node guessing now.
+ * more adds a field here rather than the node guessing now (ADR 0006 names this
+ * additive widening as the sanctioned way to grow the seam — `getBlockHash`
+ * arrived that way, for `embedded-eth-node/revm`).
  */
 export interface ReadEngineContext {
 	/** The node's live state manager. The node keeps ownership; do not fork it. */
 	readonly stateManager: StateManagerInterface;
 	/** Chain params (chain id, hardfork, custom crypto) the node runs under. */
 	readonly common: Common;
+	/**
+	 * The hash of one of the node's blocks, by number, for the `BLOCKHASH` opcode
+	 * — `undefined` for a block the node does not have (the EVM then reads zero).
+	 *
+	 * SYNCHRONOUS, unlike everything else the node does with blocks, because
+	 * `BLOCKHASH` is answered in the middle of an opcode and a wasm interpreter has
+	 * no suspension point to await at. It is a live lookup, not a snapshot: the
+	 * node has mined no blocks yet when `connect` runs.
+	 *
+	 * An engine that leaves this unwired makes `BLOCKHASH` answer nothing for
+	 * blocks the node actually has, silently — which is why it is on the context
+	 * rather than an engine-side option to remember to pass.
+	 */
+	getBlockHash(blockNumber: bigint): Uint8Array | undefined;
 	/**
 	 * The node's state mode. An engine that cannot serve it must THROW here —
 	 * `connect` is called during `createNode()`, so the refusal lands at

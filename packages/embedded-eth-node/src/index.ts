@@ -30,6 +30,9 @@ export type {
 	SerializedState,
 } from './types.js';
 export {RpcError} from './types.js';
+// The revm engine is intentionally NOT re-exported here either, for the same
+// reason: the core must import no engine a consumer did not. Import it directly:
+//   import {createRevmEngine} from 'embedded-eth-node/revm';
 // Worker helpers are intentionally NOT re-exported here to keep comlink out of
 // the core bundle. Import them directly:
 //   import {createWorkerNode} from 'embedded-eth-node/worker-client';

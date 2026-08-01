@@ -4,6 +4,11 @@
  *   1. The SAME node API works across a comlink thread boundary (createWorkerNode
  *      returns the same {request, mine, ...} shape as createNode).
  *   2. Round-trip latency over comlink (send raw tx sync + read) is measured.
+ *   2b. The node's IDENTITY fields survive the boundary as plain values — in
+ *      particular `readEngine`, which is what a bug report quotes to say which
+ *      EVM produced a result. It is proxied by worker-entry.ts and nothing else
+ *      asserts it round-trips (the same omission silently dropped `senderMode`;
+ *      see work/notes/observations/worker-entry-drops-sendermode.md).
  *   3. The main thread stays NON-BLOCKING while the Worker runs a heavy compute:
  *      we kick off a heavy sumTo() in the Worker and simultaneously tick a
  *      main-thread rAF/now() loop; if the main thread were blocked (as it is when
@@ -123,6 +128,9 @@ export async function workerRoundtrip(workerUrl: string, sumTo: number) {
 	}
 	stop = true;
 
+	// The engine identity, as read back THROUGH comlink.
+	const readEngineId = node.readEngine?.id;
+
 	await node.dispose();
-	return {number, roundtripAvgMs, mainThreadMaxGapMs: maxGap};
+	return {number, readEngineId, roundtripAvgMs, mainThreadMaxGapMs: maxGap};
 }

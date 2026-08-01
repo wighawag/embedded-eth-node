@@ -1,0 +1,37 @@
+/**
+ * cut-revm.ts — a SECOND code-under-test, for `embedded-eth-node/revm` only.
+ *
+ * Why not a mode in ./cut.ts like every other library test: this bundle carries
+ * the revm `.wasm` as a bundler-resolved asset, which needs its own esbuild
+ * asset loader and adds ~1.2 MB to the page. Every other spec shares ./cut.ts
+ * and must keep paying nothing for an engine it does not use — the same property
+ * the revm subpath itself exists to preserve for consumers.
+ */
+import type {
+	CodeUnderTest,
+	RunResult,
+	Timing,
+} from 'playwright-browser-harness/contract';
+import {captureEnv} from 'playwright-browser-harness/contract';
+import {runRevmEngineChecks} from './revm-engine.js';
+
+const cut: CodeUnderTest = {
+	name: 'embedded-eth-node/revm',
+
+	async run(ctx): Promise<RunResult> {
+		const errors: string[] = [];
+		const timings: Timing[] = [];
+		const results: Record<string, unknown> = {};
+
+		try {
+			results.revmEngine = await runRevmEngineChecks({
+				runtimeWasmUrl: String(ctx.params.runtimeWasmUrl),
+			});
+		} catch (e) {
+			errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
+		}
+		return {results, timings, errors, env: captureEnv()};
+	},
+};
+
+export default cut;
