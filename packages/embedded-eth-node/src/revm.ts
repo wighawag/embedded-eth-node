@@ -34,6 +34,12 @@
  * stacks (see ./revm-state-store.ts and ADR 0005), which is the only synchronous
  * view of the node's state that exists — so this engine serves `stateMode:'none'`
  * ONLY, and refuses `'trie'` at construction rather than at the first opcode.
+ *
+ * AND WHICH FORKS. It serves the hardforks whose transaction costing the node's
+ * own arithmetic reproduces (`REVM_SPEC_BY_HARDFORK`), and refuses the rest BY
+ * NAME at construction (`REVM_REFUSED_HARDFORKS`) — Prague and Osaka today,
+ * because `./intrinsic-gas.ts` does not compute the EIP-7623 calldata floor that
+ * revm enforces. See ADR 0008.
  */
 import type {SimpleStateManager} from '@ethereumjs/statemanager';
 import {createRevm, type SpecName, type WasmSource} from 'revm-wasm';
@@ -60,22 +66,60 @@ export interface RevmEngineOptions {
 }
 
 /**
- * ethereumjs hardfork name -> revm spec.
+ * ethereumjs hardfork name -> revm spec: the hardforks this engine ADMITS.
  *
  * The node runs Cancun today and nothing here can change that, so this table is
  * a GUARD rather than a feature: if the node's hardfork ever moves, an engine
  * that silently kept running Cancun rules would charge different gas from the
- * default engine and nothing would say so. Only the forks whose names both
- * projects agree on are listed; anything else is refused by name.
+ * default engine and nothing would say so.
+ *
+ * WHAT MAKES A FORK ADMISSIBLE is not that revm has a spec for it. It is that
+ * everything the node computes ABOUT a transaction — today that is the shared
+ * intrinsic-gas arithmetic in ./intrinsic-gas.ts, and the read budget assembled
+ * in `call` below — still agrees with what revm ENFORCES under that spec. Prague
+ * and Osaka are deliberately absent for exactly that reason; see
+ * {@link REVM_REFUSED_HARDFORKS} and
+ * `docs/adr/0008-the-revm-engine-admits-only-hardforks-it-can-cost.md`.
+ * Anything not in either table is refused by name.
  */
-const SPEC_BY_HARDFORK: Record<string, SpecName> = {
+export const REVM_SPEC_BY_HARDFORK: Readonly<Record<string, SpecName>> = {
 	berlin: 'BERLIN',
 	london: 'LONDON',
 	paris: 'MERGE',
 	shanghai: 'SHANGHAI',
 	cancun: 'CANCUN',
-	prague: 'PRAGUE',
-	osaka: 'OSAKA',
+};
+
+/**
+ * Hardforks revm HAS a spec for and this engine still refuses, each with the
+ * reason quoted verbatim in the refusal.
+ *
+ * These are the silent-wrong-answer cases: revm would run happily and charge
+ * rules the node's own arithmetic does not implement, so the node's
+ * `eth_estimateGas` could return a number the engine that produced it would
+ * REJECT — and viem uses that number as the transaction's gas limit. A loud
+ * refusal at construction is the honest edge (ADR 0004); a plausible estimate
+ * that runs out of gas in a user's face is not.
+ *
+ * To admit one of these, implement the missing rule in ./intrinsic-gas.ts (and
+ * the read budget here), prove it against the engine, and move the entry to
+ * {@link REVM_SPEC_BY_HARDFORK}. The measurements behind each line are in
+ * `docs/spikes/prague-intrinsic-gas-floor-or-refuse/`.
+ */
+export const REVM_REFUSED_HARDFORKS: Readonly<Record<string, string>> = {
+	prague:
+		`revm enforces the EIP-7623 calldata floor (a transaction pays at least ` +
+		`21000 + 10 gas per calldata token, tokens being 1 per zero byte and 4 per ` +
+		`non-zero byte) and this node's shared intrinsic-gas arithmetic ` +
+		`(src/intrinsic-gas.ts) computes only the pre-Prague formula, so ` +
+		`eth_estimateGas would return a gas limit revm itself rejects with ` +
+		`GasFloorMoreThanGasLimit for a calldata-heavy call — and a client uses an ` +
+		`estimate as the transaction's gas limit`,
+	osaka:
+		`it inherits Prague's EIP-7623 calldata floor, which src/intrinsic-gas.ts ` +
+		`does not compute, and adds the EIP-7825 transaction gas limit cap of ` +
+		`16777216, which is below the node's default read budget of 30000000 — so ` +
+		`an ordinary eth_call would be rejected outright with TxGasLimitGreaterThanCap`,
 };
 
 /**
@@ -127,8 +171,24 @@ export async function createRevmEngine(
 						`docs/adr/0005-revm-reads-the-nodes-state-through-simplestatemanagers-stacks.md.`,
 				);
 			}
+			// A HARDFORK THIS ENGINE CANNOT COST, refused the same way and for the same
+			// reason as the state mode above: revm would run it and charge rules the
+			// node's own arithmetic does not implement. Unreachable while the node is
+			// pinned to Cancun, which is the point — it fires the day that moves,
+			// rather than letting `eth_estimateGas` return a number this engine would
+			// then reject.
 			const hardfork = context.common.hardfork();
-			const mapped = SPEC_BY_HARDFORK[hardfork];
+			const refused = REVM_REFUSED_HARDFORKS[hardfork];
+			if (refused !== undefined) {
+				throw new Error(
+					`embedded-eth-node/revm: the revm engine does not admit hardfork '${hardfork}': ` +
+						`${refused}. Use a hardfork this engine costs correctly ` +
+						`(${Object.keys(REVM_SPEC_BY_HARDFORK).join(', ')}), or the default ` +
+						`@ethereumjs/evm engine. See ` +
+						`docs/adr/0008-the-revm-engine-admits-only-hardforks-it-can-cost.md.`,
+				);
+			}
+			const mapped = REVM_SPEC_BY_HARDFORK[hardfork];
 			if (mapped === undefined) {
 				throw new Error(
 					`embedded-eth-node/revm: no revm spec is known for hardfork '${hardfork}'. ` +

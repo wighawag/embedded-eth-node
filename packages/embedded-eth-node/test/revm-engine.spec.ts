@@ -14,6 +14,11 @@
  *   - BLOCKHASH answers with the node's real block hashes
  *   - both wasm delivery shapes (bundler-resolved asset, runtime-fetched URL)
  *   - `stateMode:'trie'` is refused at construction, naming the reason
+ *   - a hardfork whose rules the node's intrinsic-gas arithmetic does not
+ *     implement is refused at construction, naming the EIP and where to look
+ *   - on every hardfork the engine DOES admit, what the node hands it is
+ *     accepted: the estimate for a calldata-heavy call and the default read
+ *     budget both survive revm's own transaction validation
  *   - one engine instance serves one node (a second `createNode()` is refused)
  */
 import {test, expect} from '@playwright/test';
@@ -147,6 +152,50 @@ test('revm engine: same results + same gas as @ethereumjs/evm, on the node own s
 	expect(c.trieRefusal).not.toBe('DID_NOT_THROW');
 	expect(c.trieRefusal).toContain('trie');
 	expect(c.trieRefusal).toMatch(/revm/i);
+
+	// a HARDFORK the engine cannot cost is refused the same way. The node runs
+	// Cancun, so this guard is unreachable through `createNode()` — which is the
+	// point: it fires the day the node's hardfork moves, instead of the node
+	// quietly charging pre-Prague intrinsic gas against post-Prague enforcement.
+	expect(c.refusedHardforks).toEqual(['prague', 'osaka']);
+	expect(c.hardforkRefusals.prague).not.toBe('DID_NOT_THROW');
+	expect(c.hardforkRefusals.prague).toContain('EIP-7623');
+	expect(c.hardforkRefusals.prague).toContain('intrinsic-gas.ts');
+	expect(c.hardforkRefusals.osaka).not.toBe('DID_NOT_THROW');
+	expect(c.hardforkRefusals.osaka).toContain('EIP-7825');
+	for (const message of Object.values(c.hardforkRefusals) as string[]) {
+		// every refusal names the ADR a reader should go and read
+		expect(message).toContain('docs/adr/0008-');
+	}
+	// ...and the fork the node actually runs is untouched
+	expect(c.cancunAdmitted).toBe(true);
+	expect(c.admittedHardforks).toEqual([
+		'berlin',
+		'london',
+		'paris',
+		'shanghai',
+		'cancun',
+	]);
+
+	// THE INVARIANT, asserted against the engine itself: on every hardfork the
+	// table admits, the number `eth_estimateGas` returned for a calldata-heavy
+	// call is a gas limit revm RUNS, and so is the node's default read budget.
+	// viem uses an estimate as the transaction's gas limit, so a rejection here
+	// would reach the user as "out of gas" with no warning.
+	expect(c.heavyEstimatesMatch).toBe(true);
+	expect(BigInt(c.heavyEstimates.revm)).toBe(21_000n + 1000n * 16n);
+	for (const hardfork of c.admittedHardforks as string[]) {
+		expect(`${hardfork}: ${c.estimateVerdicts[hardfork]}`).toBe(
+			`${hardfork}: accepted`,
+		);
+		expect(`${hardfork}: ${c.budgetVerdicts[hardfork]}`).toBe(
+			`${hardfork}: accepted`,
+		);
+	}
+	// ...and the refusals are load-bearing: the SAME numbers are rejected on the
+	// specs the table does not admit.
+	expect(c.estimateOnPrague).toContain('GasFloorMoreThanGasLimit');
+	expect(c.budgetOnOsaka).toContain('TxGasLimitGreaterThanCap');
 
 	// one engine, one node: re-using a connected engine is refused rather than
 	// silently re-pointing the first node's reads at the second node's state

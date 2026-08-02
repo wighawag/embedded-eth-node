@@ -38,11 +38,26 @@
  *   8. One engine instance serves ONE node: handing the same engine to a second
  *      `createNode()` is refused, rather than silently re-pointing the first
  *      node's reads at the second node's state.
+ *   9. Every hardfork the engine ADMITS accepts what the node hands it: the
+ *      `eth_estimateGas` for a calldata-heavy call is a gas limit revm will run
+ *      (never `GasFloorMoreThanGasLimit`), and so is the node's default read
+ *      budget (never `TxGasLimitGreaterThanCap`). The hardforks where that is
+ *      NOT true are refused BY NAME at construction — and the same numbers are
+ *      shown being rejected on them, so the refusal is visibly protecting
+ *      something real rather than being decoration.
  */
 import {createNode} from '../../src/index.js';
-import {createRevmEngine, REVM_ENGINE_ID} from '../../src/revm.js';
+import {
+	createRevmEngine,
+	REVM_ENGINE_ID,
+	REVM_REFUSED_HARDFORKS,
+	REVM_SPEC_BY_HARDFORK,
+} from '../../src/revm.js';
 import {SimpleStateManagerStore} from '../../src/revm-state-store.js';
 import type {ReadEngine} from '../../src/index.js';
+import {Common, Mainnet} from '@ethereumjs/common';
+import {SimpleStateManager} from '@ethereumjs/statemanager';
+import {createRevm, MemoryStore, type SpecName} from 'revm-wasm';
 // The BUNDLER-RESOLVED delivery shape: the build resolves the `.wasm` out of the
 // `revm-wasm` package and puts it IN the build (esbuild's `binary` loader here;
 // Vite's `?arraybuffer`, webpack's `asset/inline`), so the page fetches nothing
@@ -54,6 +69,7 @@ import {
 	custom,
 	encodeFunctionData,
 	decodeFunctionResult,
+	hexToBytes,
 } from 'viem';
 import {privateKeyToAccount} from 'viem/accounts';
 import {counterAbi, counterBytecode} from './counter.js';
@@ -109,6 +125,12 @@ const SHARED_BLOCK_ENV = {
 const SHARED_BASE_FEE = 7_000_000_000n;
 /** An address holding no ether at all — the EIP-3607-free unfunded caller. */
 const UNFUNDED_CALLER = '0x00000000000000000000000000000000dead0001';
+/**
+ * A codeless address for the calldata-heavy read: no code means no execution
+ * gas, so the transaction's cost is calldata and nothing else — which is exactly
+ * the shape EIP-7623's floor was written for.
+ */
+const CALLDATA_SINK_ADDR = '0x00000000000000000000000000000000ca11da7a';
 /** A codeless address to send ether to, for the value-bearing reads. */
 const VALUE_SINK_ADDR = '0x0000000000000000000000000000000000005151';
 /** What the funded caller starts with on both nodes (see {@link nodeWith}). */
@@ -551,6 +573,119 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 	} catch (e) {
 		out.trieRefusal = String((e as Error)?.message ?? e);
 	}
+
+	// ---------- the hardforks this engine ADMITS, and the ones it REFUSES ----------
+	// The node runs Cancun and nothing a consumer can pass changes that, so this is
+	// the one place the guard is reachable: `connect` is handed a `Common` on each
+	// fork directly, exactly as a node whose hardfork had moved would hand it.
+	const sharedModule = await WebAssembly.compile(bundlerResolvedWasm);
+	async function connectOn(hardfork: string): Promise<string> {
+		const engine = await createRevmEngine({wasm: sharedModule});
+		try {
+			await engine.connect!({
+				stateManager: new SimpleStateManager(),
+				common: new Common({
+					chain: {...Mainnet, chainId: CHAIN_ID, name: 'embedded-eth-node'},
+					hardfork,
+				}),
+				getBlockHash: () => undefined,
+				stateMode: 'none',
+			});
+			return 'DID_NOT_THROW';
+		} catch (e) {
+			return String((e as Error)?.message ?? e);
+		}
+	}
+	const hardforkRefusals: Record<string, string> = {};
+	for (const hardfork of Object.keys(REVM_REFUSED_HARDFORKS)) {
+		hardforkRefusals[hardfork] = await connectOn(hardfork);
+	}
+	out.hardforkRefusals = hardforkRefusals;
+	out.refusedHardforks = Object.keys(REVM_REFUSED_HARDFORKS);
+	// ...and the fork the node actually runs is still admitted, silently and
+	// without ceremony: the default path must be demonstrably untouched.
+	out.cancunAdmitted = (await connectOn('cancun')) === 'DID_NOT_THROW';
+
+	// ---------- what the node hands the engine, judged BY the engine ----------
+	// `eth_estimateGas` is not decoration: viem uses the number as the gas LIMIT of
+	// the real transaction. So the estimate for a calldata-heavy, computation-light
+	// call is fed back to revm AS a gas limit, on every spec the table admits, and
+	// revm's own transaction validation gets to judge it. A rejection here is the
+	// user-visible failure ("out of gas" in their face) caught one layer earlier.
+	const heavyDataHex = ('0x' + 'ff'.repeat(1000)) as `0x${string}`;
+	const heavyData = hexToBytes(heavyDataHex);
+	const heavyCall = {
+		from: account.address,
+		to: CALLDATA_SINK_ADDR,
+		data: heavyDataHex,
+	};
+	const heavyEstimates: Record<string, string> = {};
+	for (const [label, ctx] of [
+		['default', def],
+		['revm', revm],
+	] as const) {
+		heavyEstimates[label] = String(
+			await ctx.node.request({method: 'eth_estimateGas', params: [heavyCall]}),
+		);
+	}
+	out.heavyEstimates = heavyEstimates;
+	out.heavyEstimatesMatch = heavyEstimates.default === heavyEstimates.revm;
+
+	// A SECOND revm instance, on its own empty state, because what is under test is
+	// revm's TRANSACTION VALIDATION (the EIP-7623 floor, the EIP-7825 cap), which
+	// runs before the first opcode and reads only the calldata and the gas limit.
+	// The simulation switches and the budget arithmetic are the engine's own (see
+	// src/revm.ts): the node's read budget reaches revm as `gasLimit + intrinsic`.
+	const judge = await createRevm({
+		wasm: sharedModule,
+		state: new MemoryStore(),
+	});
+	function verdict(spec: SpecName, gasLimit: bigint): string {
+		const o = judge.call({
+			from: hexToBytes(account.address),
+			to: hexToBytes(CALLDATA_SINK_ADDR),
+			data: heavyData,
+			value: 0n,
+			gasLimit,
+			spec,
+			chainId: BigInt(CHAIN_ID),
+			block: {
+				number: 1n,
+				timestamp: SHARED_BLOCK_ENV.timestamp,
+				gasLimit: 30_000_000n,
+				coinbase: hexToBytes(SHARED_BLOCK_ENV.coinbase),
+				baseFeePerGas: SHARED_BASE_FEE,
+				prevRandao: hexToBytes(SHARED_BLOCK_ENV.prevRandao),
+			},
+			disableBaseFee: true,
+			disableBlockGasLimit: true,
+			disableEip3607: true,
+			returnState: false,
+		});
+		// 'accepted' means the transaction RAN to completion within that limit — not
+		// merely that validation let it start, since an out-of-gas halt is exactly
+		// the failure an under-estimate produces.
+		return o.success ? 'accepted' : (o.error ?? o.status);
+	}
+	// The node's DEFAULT read budget, as the engine receives it: `eth_call` with no
+	// `gas` uses 30M, and the engine adds intrinsic gas on top (revm charges
+	// intrinsic out of the transaction limit, `runCall` charges none).
+	const defaultReadBudget = 30_000_000n + intrinsicGas(heavyDataHex, false);
+	const estimateVerdicts: Record<string, string> = {};
+	const budgetVerdicts: Record<string, string> = {};
+	for (const [hardfork, spec] of Object.entries(REVM_SPEC_BY_HARDFORK)) {
+		estimateVerdicts[hardfork] = verdict(spec, BigInt(heavyEstimates.revm));
+		budgetVerdicts[hardfork] = verdict(spec, defaultReadBudget);
+	}
+	out.admittedHardforks = Object.keys(REVM_SPEC_BY_HARDFORK);
+	out.estimateVerdicts = estimateVerdicts;
+	out.budgetVerdicts = budgetVerdicts;
+
+	// And the counter-examples, on the two specs the table refuses, so the refusal
+	// is evidence-backed rather than asserted: the SAME estimate and the SAME
+	// budget are rejected outright there.
+	out.estimateOnPrague = verdict('PRAGUE', BigInt(heavyEstimates.revm));
+	out.budgetOnOsaka = verdict('OSAKA', defaultReadBudget);
 
 	// ---------- one engine, one node ----------
 	// `fromAsset` is already bound to the `revm` node. Re-using it would rebind
