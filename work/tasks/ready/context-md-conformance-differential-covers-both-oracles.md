@@ -19,6 +19,8 @@ So the term now covers two oracles: the trie reference for the receipt/post-stat
 
 Keep it a GLOSSARY edit. Do not restate decision 3 in full; name the distinction and point at the record.
 
+> **Conductor note 2026-08-02 (drive-tasks pre-check): THE POINTER TARGET MOVED, so read the second criterion as "point at the record wherever it now lives".** `work/notes/observations/decisions-revm-wasm-upgrade-honest-block-environment-2026-08-02.md` no longer exists. It was discharged by DELETION in commit `38e0164` once the maintainer ratified it, per `WORK-CONTRACT.md`: a capture-bucket note leaves its bucket by deletion and git history is the archive. Writing a link to that path would therefore create exactly the unresolvable citation that `harden-and-tidy-the-revm-hardfork-tables` is currently fixing in ADR 0008. **Do NOT recreate the note**, and do not copy decision 3 into `CONTEXT.md` instead. Point at where decision 3's reasoning is now CARRIED, which is what that discharge commit records for this task: the `THE ORACLE IS ...` comment blocks above steps 13 and 14 of `packages/embedded-eth-node/test/helpers/conformance.ts`. Naming the discharged record by commit (`38e0164`) alongside them is fine if it reads naturally in the glossary's voice; a bare dead path is not.
+
 ## Acceptance criteria
 
 - [ ] `CONTEXT.md`'s *conformance differential* entry states that the battery uses the trie-backed `@ethereumjs/vm` reference for the receipt + post-state steps AND a different oracle (the node's own block environment / an absolute statement) for the block-environment and value-bearing steps, with the reason in one clause.
