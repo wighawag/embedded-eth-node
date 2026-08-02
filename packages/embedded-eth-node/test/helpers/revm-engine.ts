@@ -49,10 +49,17 @@
  *      merely one revm agrees with. The node and revm share `intrinsicGas()`'s
  *      answer by construction (the engine subtracts what the node adds), so
  *      their agreement cannot see a term that is wrong at that fork: the
- *      EIP-3860 initcode word cost, charged unconditionally, is measured here
- *      against a THIRD party — `@ethereumjs/common`'s EIP activation table,
- *      which is what the node's own `runTx` path charges. Evidence:
+ *      EIP-3860 initcode word cost is measured here against a THIRD party —
+ *      `@ethereumjs/common`'s EIP activation table, which is what the node's own
+ *      `runTx` path charges. Evidence:
  *      `docs/spikes/intrinsic-gas-charges-eip-3860-on-forks-that-predate-it/`.
+ *  11. A CREATE-shaped `eth_estimateGas` returns the SAME number on BOTH
+ *      engines at EVERY admitted fork, INCLUDING the pre-Shanghai ones — and
+ *      that number is what the protocol charges. This is the one place the fork
+ *      gate in `intrinsic-gas.ts` is visible: the node ADDS its intrinsic gas to
+ *      what an engine reports and the revm engine SUBTRACTS the same number from
+ *      revm's `totalGasSpent`, so an ungated EIP-3860 term moves the default
+ *      engine's estimate and cannot move revm's.
  */
 import {createNode} from '../../src/index.js';
 import {
@@ -62,9 +69,18 @@ import {
 	REVM_SPEC_BY_HARDFORK,
 } from '../../src/revm.js';
 import {SimpleStateManagerStore} from '../../src/revm-state-store.js';
+// The REAL shared formula, not a restatement of it: what this file measures is
+// whether the node's own arithmetic gates EIP-3860 by fork, so a mirror would
+// only measure the mirror. See ../../src/intrinsic-gas.ts.
+import {intrinsicGas} from '../../src/intrinsic-gas.js';
+import {createEthereumjsReadEngine} from '../../src/engine.js';
 import type {ReadEngine} from '../../src/index.js';
 import {Common, Mainnet} from '@ethereumjs/common';
 import {SimpleStateManager} from '@ethereumjs/statemanager';
+import {createEVM} from '@ethereumjs/evm';
+import {createBlock} from '@ethereumjs/block';
+import {createLegacyTx} from '@ethereumjs/tx';
+import {createAddressFromString} from '@ethereumjs/util';
 import {createRevm, MemoryStore, type SpecName} from 'revm-wasm';
 // The BUNDLER-RESOLVED delivery shape: the build resolves the `.wasm` out of the
 // `revm-wasm` package and puts it IN the build (esbuild's `binary` loader here;
@@ -96,16 +112,23 @@ const chain = {
 	rpcUrls: {default: {http: []}},
 } as const;
 
-/** Mirrors the node's own intrinsic-gas formula, so a comparison is meaningful. */
-function intrinsicGas(dataHex: string, isCreate: boolean): bigint {
+/**
+ * Restates the node's intrinsic-gas formula for a CALL, so decomposing an
+ * estimate into execution gas is a real comparison rather than a tautology.
+ *
+ * A CALL ONLY, and deliberately: every fork-dependent term in the shared formula
+ * (today just EIP-3860's initcode word cost) applies to a CREATE, so a call's
+ * intrinsic gas is the same number at every fork this engine admits and needs no
+ * hardfork to compute. The CREATE case is NOT mirrored — it is measured against
+ * the real `intrinsicGas()` further down, because a mirror of a fork-gated
+ * formula tests the mirror.
+ */
+function intrinsicGasForCall(dataHex: string): bigint {
 	const hex = dataHex.startsWith('0x') ? dataHex.slice(2) : dataHex;
 	let gas = 21_000n;
-	let bytes = 0;
 	for (let i = 0; i < hex.length; i += 2) {
-		bytes++;
 		gas += hex.slice(i, i + 2) === '00' ? 4n : 16n;
 	}
-	if (isCreate) gas += 32_000n + BigInt(Math.ceil(bytes / 32)) * 2n;
 	return gas;
 }
 
@@ -243,7 +266,7 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 			);
 			estimates[`${name}.${label}`] = est;
 			executionGas[`${name}.${label}`] = (
-				BigInt(est) - intrinsicGas(data, false)
+				BigInt(est) - intrinsicGasForCall(data)
 			).toString();
 		}
 	}
@@ -680,7 +703,7 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 	// The node's DEFAULT read budget, as the engine receives it: `eth_call` with no
 	// `gas` uses 30M, and the engine adds intrinsic gas on top (revm charges
 	// intrinsic out of the transaction limit, `runCall` charges none).
-	const defaultReadBudget = 30_000_000n + intrinsicGas(heavyDataHex, false);
+	const defaultReadBudget = 30_000_000n + intrinsicGasForCall(heavyDataHex);
 	const estimateVerdicts: Record<string, string> = {};
 	const budgetVerdicts: Record<string, string> = {};
 	for (const [hardfork, spec] of Object.entries(REVM_SPEC_BY_HARDFORK)) {
@@ -701,14 +724,15 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 	// The node and revm agree about intrinsic gas BY CONSTRUCTION: the engine
 	// subtracts `intrinsicGas()` from what revm spent and the node adds the same
 	// number back, so a term that is wrong at a fork is wrong on both sides and
-	// their agreement cannot see it. `intrinsicGas()` charges the EIP-3860 initcode
-	// word cost UNCONDITIONALLY, so admitting a fork that predates EIP-3860 would
-	// be exactly that: measured agreement, protocol-wrong. Two independent readings
-	// per fork, neither of them the node's formula:
+	// their agreement cannot see it. That is why the EIP-3860 initcode word cost is
+	// read THREE independent ways per admitted fork, only one of which is the node:
 	//   - `@ethereumjs/common`'s EIP activation table, which is what the node's own
 	//     transaction path (`@ethereumjs/vm`'s `runTx`) charges;
-	//   - revm itself, by DELTA across an initcode word boundary.
-	// Evidence and the full numbers:
+	//   - revm itself, by DELTA across an initcode word boundary;
+	//   - the node's shared `intrinsicGas()`, by the SAME delta, so the fork gate is
+	//     measured rather than read off the source.
+	// All three must say the same thing at every admitted fork, which is the whole
+	// content of ADR 0008's clause (b). Evidence and the full numbers:
 	// docs/spikes/intrinsic-gas-charges-eip-3860-on-forks-that-predate-it/.
 
 	/** Initcode deploying EMPTY code: `PUSH1 0 / PUSH1 0 / RETURN`, padded to `len`. */
@@ -725,49 +749,188 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 	 * initcode costs to run. 2 is EIP-3860's charge; 0 is the fork before it.
 	 */
 	function initcodeWordCost(spec: SpecName): number {
-		const create = (data: Uint8Array) =>
-			judge.create({
-				from: hexToBytes(account.address),
-				data,
-				value: 0n,
-				gasLimit: 1_000_000n,
-				spec,
-				chainId: BigInt(CHAIN_ID),
-				block: {
-					number: 1n,
-					timestamp: SHARED_BLOCK_ENV.timestamp,
-					gasLimit: 30_000_000n,
-					coinbase: hexToBytes(SHARED_BLOCK_ENV.coinbase),
-					baseFeePerGas: SHARED_BASE_FEE,
-					prevRandao: hexToBytes(SHARED_BLOCK_ENV.prevRandao),
-				},
-				disableBaseFee: true,
-				disableBlockGasLimit: true,
-				disableEip3607: true,
-				returnState: false,
-				commit: false,
-				checkNonce: false,
-			});
-		const oneWord = create(initcodeOfLength(32));
-		const twoWords = create(initcodeOfLength(33));
+		const oneWord = createOn(spec, initcodeOfLength(32));
+		const twoWords = createOn(spec, initcodeOfLength(33));
 		return Number(twoWords.totalGasSpent - oneWord.totalGasSpent - 4n);
+	}
+	/**
+	 * One CREATE on the JUDGE instance, under `spec`, with the engine's own
+	 * simulation switches (see src/revm.ts) — the raw measurement both the word-cost
+	 * delta above and the estimate-as-a-gas-limit verdict below are built from.
+	 */
+	function createOn(spec: SpecName, data: Uint8Array, gasLimit = 1_000_000n) {
+		return judge.create({
+			from: hexToBytes(account.address),
+			data,
+			value: 0n,
+			gasLimit,
+			spec,
+			chainId: BigInt(CHAIN_ID),
+			block: {
+				number: 1n,
+				timestamp: SHARED_BLOCK_ENV.timestamp,
+				gasLimit: 30_000_000n,
+				coinbase: hexToBytes(SHARED_BLOCK_ENV.coinbase),
+				baseFeePerGas: SHARED_BASE_FEE,
+				prevRandao: hexToBytes(SHARED_BLOCK_ENV.prevRandao),
+			},
+			disableBaseFee: true,
+			disableBlockGasLimit: true,
+			disableEip3607: true,
+			returnState: false,
+			commit: false,
+			checkNonce: false,
+		});
+	}
+
+	/**
+	 * What the NODE's shared formula charges per initcode word at `hardfork`,
+	 * measured by the same 32 -> 33 byte delta as {@link initcodeWordCost} so the
+	 * two numbers are directly comparable. Reads the real `intrinsicGas()`, so a
+	 * fork gate that is missing, inverted or applied at the wrong fork shows up
+	 * here as a number that disagrees with revm and with `@ethereumjs/common`.
+	 */
+	function nodeInitcodeWordCost(common: Common): number {
+		const oneWord = intrinsicGas(initcodeOfLength(32), true, common);
+		const twoWords = intrinsicGas(initcodeOfLength(33), true, common);
+		return Number(twoWords - oneWord - 4n);
 	}
 
 	const eip3860Active: Record<string, boolean> = {};
 	const wordCostCharged: Record<string, number> = {};
+	const nodeWordCost: Record<string, number> = {};
 	for (const [hardfork, spec] of Object.entries(REVM_SPEC_BY_HARDFORK)) {
 		eip3860Active[hardfork] = commonOn(hardfork).isActivatedEIP(3860);
 		wordCostCharged[hardfork] = initcodeWordCost(spec);
+		nodeWordCost[hardfork] = nodeInitcodeWordCost(commonOn(hardfork));
 	}
 	out.eip3860Active = eip3860Active;
 	out.initcodeWordCostCharged = wordCostCharged;
-	// The counter-example that makes the pre-Shanghai refusals load-bearing: on
-	// MERGE (the last fork before EIP-3860) revm charges the word cost anyway, so
-	// the node agreeing with it there is agreement on a number the protocol does
-	// not charge. Gating the term in `intrinsic-gas.ts` would not fix that — it
-	// would only move the DEFAULT engine's estimate and split the two.
-	out.eip3860ActiveOnParis = commonOn('paris').isActivatedEIP(3860);
-	out.initcodeWordCostOnMerge = initcodeWordCost('MERGE');
+	out.nodeInitcodeWordCost = nodeWordCost;
+	// The admitted set must SPAN the EIP-3860 boundary for any of the above to be
+	// load-bearing: if every admitted fork charged the word cost, an ungated formula
+	// would satisfy all three readings. These are the admitted forks that PREDATE
+	// EIP-3860, i.e. the ones only the fork gate makes correct.
+	out.admittedPreEip3860 = Object.keys(REVM_SPEC_BY_HARDFORK).filter(
+		(hardfork) => !eip3860Active[hardfork],
+	);
+	// ---------- THE CREATE ESTIMATE, ENGINE AGAINST ENGINE, AT EVERY FORK -------
+	// The one shape the EIP-3860 term reaches, at the one place the fork gate is
+	// user-visible. `eth_estimateGas` is `executionGasUsed + intrinsicGas(...)`, and
+	// the two engines arrive at it from OPPOSITE directions: `runCall` charges no
+	// intrinsic gas so the default engine's estimate MOVES with the node's formula,
+	// while the revm engine SUBTRACTS the same formula from revm's `totalGasSpent`
+	// and the node adds it straight back, so its estimate is revm's number whatever
+	// the node computes. An EIP-3860 term charged at a fork revm does not charge it
+	// at therefore splits the two engines by exactly `2 * ceil(len/32)` gas — which
+	// is the divergence this section exists to catch, and nothing else looks at it.
+	//
+	// It runs BELOW `createNode()` on purpose: the node pins Cancun and exposes no
+	// hardfork, so the only way to reach another fork is to build the two read
+	// engines directly and hand each the SAME `Common`, exactly as a node whose
+	// hardfork had moved would. Both estimates are then assembled with the node's
+	// own line of arithmetic (`r.executionGasUsed + intrinsicGas(data, isCreate,
+	// common)`, from `node.ts`'s `eth_estimateGas` case).
+	const CREATE_INITCODE = initcodeOfLength(64); // 2 initcode words
+
+	/** `eth_estimateGas` for a CREATE of {@link CREATE_INITCODE}, per engine. */
+	async function createEstimatesOn(
+		hardfork: string,
+	): Promise<{default: string; revm: string}> {
+		const common = commonOn(hardfork);
+		// A block this fork can actually carry: `createBlock` fills the fork-dependent
+		// header fields (base fee from London, blob gas from Cancun) from `common`,
+		// so no field has to be guessed per fork here.
+		const block = createBlock(
+			{
+				header: {
+					number: 1n,
+					gasLimit: 30_000_000n,
+					timestamp: SHARED_BLOCK_ENV.timestamp,
+				},
+			},
+			{common},
+		);
+		const request = {
+			from: createAddressFromString(account.address),
+			to: undefined,
+			data: CREATE_INITCODE,
+			value: 0n,
+			gasLimit: 30_000_000n,
+			block,
+		};
+		// Each engine on its OWN empty state, because a CREATE derives its address
+		// from the sender's nonce and neither engine may see the other's deploy.
+		const defaultState = new SimpleStateManager();
+		const defaultEngine = createEthereumjsReadEngine({
+			evm: await createEVM({common, stateManager: defaultState}),
+			stateManager: defaultState,
+		});
+		const revmEngine = await createRevmEngine({wasm: sharedModule});
+		await revmEngine.connect!({
+			stateManager: new SimpleStateManager(),
+			common,
+			getBlockHash: () => undefined,
+			stateMode: 'none',
+		});
+		const estimates: Record<string, string> = {};
+		for (const [label, engine] of [
+			['default', defaultEngine],
+			['revm', revmEngine],
+		] as const) {
+			const r = await engine.call(request);
+			if (r.error !== undefined)
+				throw new Error(`${hardfork}/${label}: ${r.error}`);
+			// Verbatim `node.ts`'s `eth_estimateGas` case.
+			estimates[label] = (
+				r.executionGasUsed + intrinsicGas(CREATE_INITCODE, true, common)
+			).toString();
+		}
+		return {default: estimates.default, revm: estimates.revm};
+	}
+
+	const createEstimates: Record<string, {default: string; revm: string}> = {};
+	// ...and what the PROTOCOL charges for the same CREATE, from the witness that is
+	// neither engine: `@ethereumjs/tx`'s own intrinsic gas, which is the code
+	// `@ethereumjs/vm`'s `runTx` charges a real transaction ON THIS NODE. If the
+	// node's shared formula and this disagree at a fork, the node disagrees with
+	// ITSELF: a deployment estimated on the read path and then mined would pay a
+	// different intrinsic cost.
+	const createIntrinsic: Record<string, {node: string; protocol: string}> = {};
+	// ...and the estimate is fed BACK to revm as the gas limit of the same CREATE,
+	// per admitted spec, exactly as the calldata-heavy CALL above is. viem uses an
+	// estimate as the transaction's gas limit, and a deployment is the shape with
+	// the least slack — an estimate one gas short of what the deployment costs is
+	// an out-of-gas revert in the user's face.
+	const createVerdicts: Record<string, string> = {};
+	for (const [hardfork, spec] of Object.entries(REVM_SPEC_BY_HARDFORK)) {
+		createEstimates[hardfork] = await createEstimatesOn(hardfork);
+		const common = commonOn(hardfork);
+		createIntrinsic[hardfork] = {
+			node: intrinsicGas(CREATE_INITCODE, true, common).toString(),
+			protocol: createLegacyTx(
+				{gasLimit: 1_000_000n, data: CREATE_INITCODE},
+				{common},
+			)
+				.getIntrinsicGas()
+				.toString(),
+		};
+		const o = createOn(
+			spec,
+			CREATE_INITCODE,
+			BigInt(createEstimates[hardfork].revm),
+		);
+		createVerdicts[hardfork] = o.success ? 'accepted' : (o.error ?? o.status);
+	}
+	out.createVerdicts = createVerdicts;
+	out.createEstimates = createEstimates;
+	out.createIntrinsic = createIntrinsic;
+	out.createEstimatesMatch = Object.values(createEstimates).every(
+		(e) => e.default === e.revm,
+	);
+	out.createIntrinsicMatchesProtocol = Object.values(createIntrinsic).every(
+		(i) => i.node === i.protocol,
+	);
 
 	// ---------- one engine, one node ----------
 	// `fromAsset` is already bound to the `revm` node. Re-using it would rebind

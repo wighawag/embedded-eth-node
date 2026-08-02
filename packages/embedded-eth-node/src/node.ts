@@ -86,14 +86,23 @@ function txHashOf(tx: TypedTransaction): string {
 
 /**
  * Intrinsic gas: 21000 base (+32000 create) + calldata (16/non-zero, 4/zero) +
- * EIP-3860 initcode word cost (2 gas per 32-byte word) for creates. runCall's
- * executionGasUsed omits all of this, so we add it back to get the REAL estimate
- * (verified against runTx totalGasSpent — exact, no fudge).
+ * the EIP-3860 initcode word cost (2 gas per 32-byte word) for creates, from
+ * Shanghai on. runCall's executionGasUsed omits all of this, so we add it back to
+ * get the REAL estimate (verified against runTx totalGasSpent — exact, no fudge).
+ *
+ * `common` is threaded rather than captured, and it is THE node's `Common` — the
+ * same instance the read engine is handed at `connect`, so the two callers of the
+ * shared formula cannot name different forks. See ./intrinsic-gas.ts.
  */
-function intrinsicGas(dataHex: string, isCreate: boolean): bigint {
+function intrinsicGas(
+	dataHex: string,
+	isCreate: boolean,
+	common: Common,
+): bigint {
 	return intrinsicGasOf(
 		hexToBytes(dataHex.startsWith('0x') ? dataHex : '0x' + dataHex),
 		isCreate,
+		common,
 	);
 }
 
@@ -732,7 +741,9 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 					throw new RpcError(3, 'execution reverted', hex(r.returnValue));
 				const dataHex: string = p.data ?? p.input ?? '0x';
 				const isCreate = !p.to;
-				return numHex(r.executionGasUsed + intrinsicGas(dataHex, isCreate));
+				return numHex(
+					r.executionGasUsed + intrinsicGas(dataHex, isCreate, common),
+				);
 			}
 
 			case 'eth_fillTransaction': {
@@ -760,7 +771,7 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 					const r = await evmCall(p);
 					if (r.error)
 						throw new RpcError(3, 'execution reverted', hex(r.returnValue));
-					gas = r.executionGasUsed + intrinsicGas(dataHex, isCreate);
+					gas = r.executionGasUsed + intrinsicGas(dataHex, isCreate, common);
 				}
 				// Fee fields: legacy iff caller passed gasPrice (and no 1559 fields),
 				// otherwise EIP-1559 with the node's constant fee market.

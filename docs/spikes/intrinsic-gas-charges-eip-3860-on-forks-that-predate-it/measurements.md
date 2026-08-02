@@ -61,6 +61,8 @@ The divergence is confined to the PRE-EXECUTION intrinsic-gas computation, which
 
 ## 5. What this repo did about it
 
+> **Superseded by §6 and §7 below.** This is what landed against `0.3.0`; the upstream fix reversed it the same day. Kept because it is the reason the fork gate now exists.
+
 `berlin`, `london` and `paris` moved from `REVM_SPEC_BY_HARDFORK` to `REVM_REFUSED_HARDFORKS`, so `embedded-eth-node/revm` admits `shanghai` and `cancun` only, and `src/intrinsic-gas.ts` keeps its unconditional EIP-3860 term — which is now correct at every fork any part of this node can run. Reasoning: `docs/adr/0008-the-revm-engine-admits-only-hardforks-it-can-cost.md` (amended, including the sharpened admission rule) and `work/notes/observations/decisions-intrinsic-gas-charges-eip-3860-on-forks-that-predate-it-2026-08-02.md`.
 
 ## 6. RE-MEASURED against `revm-wasm@0.3.1`, which FIXED it, and thereby inverted the local fix
@@ -101,3 +103,14 @@ Section 3 argued the fork gate was the WRONG fix because it would move only the 
 The EIP-7623 floor is now correctly ACTIVE on Prague and later, which is precisely why the node's floor-less estimate is still rejected there. EIP-7825's cap is untouched by this fix, and EIP-7702 / EIP-2935 remain unchecked against the transaction path.
 
 **`shanghai` and `cancun` are unaffected in every column above**, so upgrading to `^0.3.1` is safe for the currently-admitted set independently of any re-admission.
+
+## 7. What this repo did about THAT (`upgrade-0-3-1-gate-eip-3860-and-readmit-pre-shanghai-forks`)
+
+2026-08-02. Both probes in this folder and `docs/spikes/prague-intrinsic-gas-floor-or-refuse/` were re-run against the installed `revm-wasm@0.3.1` before any code changed, as an entry condition rather than on the strength of §6: the word-boundary delta is **4** on `BERLIN`/`LONDON`/`MERGE` and **6** on `SHANGHAI`/`CANCUN`, and Prague/Osaka reject the node's estimate and read budget exactly as recorded. Then:
+
+- `revm-wasm` moved to `^0.3.1` in `packages/embedded-eth-node` and `packages/benchmarks`;
+- `src/intrinsic-gas.ts` gained a third parameter, the node's `Common`, and charges the EIP-3860 initcode word cost only where `common.isActivatedEIP(3860)` says the protocol does. The parameter is the `Common` ITSELF rather than a hardfork name, because `node.ts` hands the engine that very instance through `ReadEngineContext.common`, so the caller that ADDS the intrinsic gas and the caller that SUBTRACTS it interrogate the same object and cannot name different forks;
+- `berlin`, `london` and `paris` moved back into `REVM_SPEC_BY_HARDFORK`; `prague` and `osaka` stayed refused, verbatim;
+- `test/revm-engine.spec.ts` now asserts the CREATE-shaped `eth_estimateGas` on BOTH engines at every admitted fork (53298 pre-Shanghai, 53302 from Shanghai — the §6 numbers, reproduced in a browser), and the node's intrinsic gas against `@ethereumjs/tx`'s.
+
+Reasoning: the second amendment to `docs/adr/0008-the-revm-engine-admits-only-hardforks-it-can-cost.md`, and `work/notes/observations/decisions-upgrade-0-3-1-gate-eip-3860-and-readmit-pre-shanghai-forks-2026-08-02.md`.

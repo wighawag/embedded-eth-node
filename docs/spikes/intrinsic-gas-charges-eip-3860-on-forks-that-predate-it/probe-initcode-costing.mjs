@@ -28,6 +28,14 @@
  *
  * Measurements taken 2026-08-02 against `revm-wasm@0.3.0` are recorded next to
  * this file in `measurements.md`; re-run it if either package moves.
+ *
+ * NOTE ON THE RUNNING COMMENTARY BELOW, which was written against `0.3.0`:
+ * `revm-wasm@0.3.1` FIXED the artifact's half of this (it now gates EIP-3860 by
+ * spec), which inverted the conclusion in section [4] — the fork gate in
+ * `src/intrinsic-gas.ts` is what makes the two engines AGREE now, and the node
+ * ships it. The probe itself is unchanged and still prints the truth; only the
+ * prose in [4] describes a world that ended. See sections 6 and 7 of
+ * `measurements.md`.
  */
 import {readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
@@ -196,11 +204,15 @@ for (const [hardfork] of SPECS) {
 //     intrinsic from `totalGasSpent` and the node adds it back, so the estimate
 //     is revm's `totalGasSpent` WHATEVER the node's formula says.
 //
-//     Which is why the last column matters: gating the EIP-3860 term in
-//     `intrinsic-gas.ts` moves the DEFAULT engine's estimate and cannot move
-//     revm's, so the gate on its own does not fix a wrong number — it converts
-//     an agreed wrong number into a cross-engine DISAGREEMENT, which is the
-//     failure `packages/benchmarks`' gas gate exists to catch.
+//     Which is why the last column matters. Against `0.3.0` it said: gating the
+//     EIP-3860 term in `intrinsic-gas.ts` moves the DEFAULT engine's estimate and
+//     cannot move revm's, so the gate converts an agreed wrong number into a
+//     cross-engine DISAGREEMENT. Against `0.3.1` the same column says the
+//     opposite — revm gates the term itself, so the ungated node is the one
+//     splitting the engines and the gate is what restores agreement. The node
+//     now gates it (on its `Common`, see `src/intrinsic-gas.ts`), so on a current
+//     checkout the `default` column below is the UNGATED counterfactual, printed
+//     to keep this comparison honest rather than to describe the shipped code.
 // ---------------------------------------------------------------------------
 console.log('\n[4] what eth_estimateGas would return for that CREATE, per engine');
 for (const [hardfork, spec] of SPECS) {
