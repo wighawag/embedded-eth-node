@@ -4,6 +4,7 @@ slug: eth-call-from-a-contract-address-eip-3607
 spec: revm-engine-behind-eth-call
 blockedBy: []
 covers: []
+reason: superseded by revm-wasm-upgrade-honest-block-environment. revm-wasm 0.3.0 shipped `disableEip3607`, so this is no longer a divergence to surface and document but a flag to set, folded into the single upgrade task alongside the base-fee, balance and prevRandao switches. Verified on 0.3.0: with the flag, a call from a contract address returns the same status, gas and data as the same call from an EOA.
 ---
 
 ## What to build
