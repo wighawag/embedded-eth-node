@@ -86,6 +86,11 @@ test('differential conformance with the revm engine installed (stateMode:none)',
 	// TIMESTAMP are gas-independent, so neither the gas gate nor the receipt diff
 	// can). This is the step the zeroed base fee would have failed.
 	expect(labels).toContain('block environment through a contract');
+	// ...and the VALUE-BEARING-READ step, which pins the other half of `eth_call`
+	// semantics: relaxing a transaction's validity rules must not relax the value
+	// TRANSFER, so a read carrying more ether than the sender holds fails on revm
+	// exactly as it does on `@ethereumjs/evm`.
+	expect(labels).toContain('value-bearing read affordability');
 
 	// ...and the OTHER state mode is refused rather than covered here — which is
 	// exactly why `conformance.spec.ts` keeps running it on the default engine.

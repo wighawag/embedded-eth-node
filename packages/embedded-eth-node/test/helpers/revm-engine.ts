@@ -27,6 +27,10 @@
  *      property the zeroed base fee used to buy), and one from an address that
  *      HOLDS CODE works too (EIP-3607 is a transaction rule, not an execution
  *      rule, and the default engine's `runCall` never enforced it).
+ *   5d. A VALUE-BEARING read still obeys the transfer: relaxing a transaction's
+ *      validity rules must not relax the value itself, so a read carrying more
+ *      ether than the sender holds FAILS on both engines and an affordable one
+ *      SUCCEEDS on both.
  *   6. Both wasm delivery shapes work: a bundler-resolved asset and a
  *      runtime-fetched URL, through the same code path.
  *   7. `stateMode:'trie'` is REFUSED at construction, naming the reason, rather
@@ -105,6 +109,10 @@ const SHARED_BLOCK_ENV = {
 const SHARED_BASE_FEE = 7_000_000_000n;
 /** An address holding no ether at all — the EIP-3607-free unfunded caller. */
 const UNFUNDED_CALLER = '0x00000000000000000000000000000000dead0001';
+/** A codeless address to send ether to, for the value-bearing reads. */
+const VALUE_SINK_ADDR = '0x0000000000000000000000000000000000005151';
+/** What the funded caller starts with on both nodes (see {@link nodeWith}). */
+const FUNDED_BALANCE = 10n ** 24n;
 
 async function nodeWith(
 	engine?: ReadEngine,
@@ -113,7 +121,7 @@ async function nodeWith(
 	const node = await createNode({
 		chainId: CHAIN_ID,
 		miningConfig: {type: 'auto'},
-		initialBalances: {[account.address]: 10n ** 24n},
+		initialBalances: {[account.address]: FUNDED_BALANCE},
 		engine,
 		...extra,
 	});
@@ -340,6 +348,76 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 	// what a view function returns.
 	out.callerResultsAgree = Object.keys(callers).every(
 		(who) => callerResults[`${who}.revm`] === callerResults['funded.revm'],
+	);
+
+	// ---------- VALUE-BEARING READS: relaxed VALIDITY, honest TRANSFER ---------
+	// The simulation switches turn off a TRANSACTION's validity rules, which is
+	// what lets a read run from an address holding no ether. They must NOT turn
+	// off the value TRANSFER: geth's `eth_call` skips the fee checks and still
+	// fails an unaffordable value with `ErrInsufficientBalance`, and
+	// `@ethereumjs/evm` agrees (`_reduceSenderBalance` throws
+	// `insufficient balance`). An engine that fabricated the caller's balance
+	// would answer a transfer the chain could never make: the same class of lie
+	// as the zeroed base fee, and just as invisible to the gas bars, because a
+	// rejected read charges no gas on either engine.
+	//
+	// The sender is named EXPLICITLY in every case. The node's default `from` is
+	// the zero address, which is ALSO its default coinbase, so on these two nodes
+	// (which have mined priority-fee-paying transactions by now) it holds ether
+	// and would prove nothing about an unfunded sender. The conformance battery's
+	// own step covers the default sender, on a node that has mined nothing and
+	// with the balance asserted first.
+	const valueCases: {name: string; from: string; value: bigint; ok: boolean}[] =
+		[
+			// The property the zeroed base fee bought, restated with a value of 0.
+			{name: 'unfundedZeroValue', from: UNFUNDED_CALLER, value: 0n, ok: true},
+			{name: 'fundedAffordable', from: account.address, value: 1n, ok: true},
+			// The two a fabricated balance would wrongly answer.
+			{name: 'unfundedOneWei', from: UNFUNDED_CALLER, value: 1n, ok: false},
+			{
+				name: 'fundedAboveBalance',
+				from: account.address,
+				value: FUNDED_BALANCE + 1n,
+				ok: false,
+			},
+		];
+	const valueOutcomes: Record<string, string> = {};
+	const valueExpected: Record<string, string> = {};
+	for (const c of valueCases) {
+		valueExpected[c.name] = c.ok ? 'ok' : 'failed';
+		for (const [label, ctx] of [
+			['default', def],
+			['revm', revm],
+		] as const) {
+			try {
+				await ctx.node.request({
+					method: 'eth_call',
+					params: [
+						{
+							from: c.from,
+							to: VALUE_SINK_ADDR,
+							value: '0x' + c.value.toString(16),
+						},
+					],
+				});
+				valueOutcomes[`${c.name}.${label}`] = 'ok';
+			} catch {
+				valueOutcomes[`${c.name}.${label}`] = 'failed';
+			}
+		}
+	}
+	out.valueOutcomes = valueOutcomes;
+	out.valueExpected = valueExpected;
+	out.valueOutcomesMatch = valueCases.every(
+		({name}) =>
+			valueOutcomes[`${name}.default`] === valueOutcomes[`${name}.revm`],
+	);
+	// ...and both engines match the ABSOLUTE statement, not merely each other:
+	// two engines can agree on an answer neither should have given.
+	out.valueOutcomesCorrect = valueCases.every(
+		({name}) =>
+			valueOutcomes[`${name}.default`] === valueExpected[name] &&
+			valueOutcomes[`${name}.revm`] === valueExpected[name],
 	);
 
 	// ---------- the BLOCK ENVIRONMENT, engine against engine ----------

@@ -175,8 +175,8 @@ export async function createRevmEngine(
 				// THE NODE'S REAL BASE FEE, because a contract can read it. `BASEFEE`
 				// inside a view function must report the block the node actually has;
 				// the validation the real value would otherwise trip is turned off
-				// explicitly below (`disableBaseFee` / `disableBalanceCheck`) rather
-				// than bought with a zeroed base fee, which is a lie the contract sees.
+				// explicitly below (`disableBaseFee`) rather than bought with a zeroed
+				// base fee, which is a lie the contract sees.
 				baseFeePerGas: header.baseFeePerGas ?? 0n,
 				// PREVRANDAO. Post-Merge it IS `mixHash` (the node writes
 				// `NodeOptions.blockEnv.prevRandao` there and pins difficulty to 0), and
@@ -202,11 +202,9 @@ export async function createRevmEngine(
 				// turns the same ones off to serve `eth_call`:
 				//
 				//  disableBaseFee       the read's gas price is 0 and the block's base
-				//                       fee is not (`GasPriceLessThanBasefee`);
-				//  disableBalanceCheck  `eth_call` defaults `from` to the zero address,
-				//                       which holds no ether (`LackOfFundForMaxFee`) —
-				//                       pre-funding the caller instead would invent
-				//                       state a read must not invent;
+				//                       fee is not (`GasPriceLessThanBasefee`). This is
+				//                       ALSO what keeps a read from an unfunded address
+				//                       working, see `disableBalanceCheck` below;
 				//  disableBlockGasLimit the node's default read budget IS the block gas
 				//                       limit, and revm charges intrinsic gas out of the
 				//                       transaction limit while `@ethereumjs/evm`'s
@@ -224,11 +222,32 @@ export async function createRevmEngine(
 				//
 				// They are simulation-only: `revm-wasm` REFUSES to combine any of them
 				// with committing (a committed transaction from a contract address is one
-				// the chain would reject, and `disableBalanceCheck` fabricates the
-				// caller's balance). This engine only ever reads, so that constraint is
-				// structural here — but a future WRITE path must not reach for them.
+				// the chain would reject). This engine only ever reads, so that constraint
+				// is structural here, but a future WRITE path must not reach for them.
+				//
+				// AND THE ONE THAT IS DELIBERATELY NOT SET: `disableBalanceCheck`.
+				// Relaxing a TRANSACTION's validity rules must not relax the VALUE
+				// TRANSFER. geth's `eth_call` skips the fee checks and still fails an
+				// unaffordable value with `ErrInsufficientBalance`, and
+				// `@ethereumjs/evm` agrees (`_reduceSenderBalance` throws
+				// `insufficient balance`). The switch would raise the caller's balance
+				// to at least `value`, so a value-bearing read would succeed here and
+				// fail on the default engine: the same class of lie as the zeroed base
+				// fee, and just as invisible to a gas bar, since a rejected read charges
+				// no gas at all.
+				//
+				// It is not needed for the property it was taken for, and that is
+				// MEASURED, not assumed (probe + numbers:
+				// docs/spikes/revm-wasm-upgrade-honest-block-environment/). A read has no
+				// gas price (`ReadCallRequest` carries none, so it is 0), which reduces
+				// revm's demand from `gasLimit * gasPrice + value` to exactly `value`.
+				// A zero-value read from an address holding no ether (the node defaults
+				// `from` to the zero address) therefore passes the check untouched, and
+				// the only case the switch would change is precisely the one that must
+				// fail. If a gas price is ever plumbed into a read, revisit this: the
+				// answer is then `disableBaseFee`-style relief for the FEE half only,
+				// never a fabricated balance.
 				disableBaseFee: true,
-				disableBalanceCheck: true,
 				disableBlockGasLimit: true,
 				disableEip3607: true,
 				// Logs and the post-state map are not part of a read's answer, and

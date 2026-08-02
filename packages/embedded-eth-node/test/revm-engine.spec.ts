@@ -6,6 +6,9 @@
  *   - an `eth_call` on revm cannot mutate state
  *   - a read from an UNFUNDED address and from an address HOLDING CODE works on
  *     both engines, with the same result and the same gas
+ *   - a VALUE-BEARING read succeeds or fails IDENTICALLY on both engines: the
+ *     simulation switches relax a transaction's validity rules, never the value
+ *     transfer itself
  *   - the BLOCK ENVIRONMENT a contract reads (BASEFEE / PREVRANDAO / COINBASE /
  *     NUMBER / TIMESTAMP / GASLIMIT) is the node's own, and identical on both
  *   - BLOCKHASH answers with the node's real block hashes
@@ -102,6 +105,22 @@ test('revm engine: same results + same gas as @ethereumjs/evm, on the node own s
 	expect(c.callerResultsAgree).toBe(true);
 	// sumTo(4) == 0+1+2+3 == 6, from a caller that holds code.
 	expect(BigInt(c.callerResults['contract.revm'])).toBe(6n);
+
+	// a VALUE-BEARING read is relaxed in its VALIDITY rules, never in its
+	// TRANSFER: an unaffordable value fails on both engines (geth's `eth_call`
+	// fails it too, with ErrInsufficientBalance), an affordable one succeeds on
+	// both, and a zero-value read from an address holding nothing still works.
+	// Both engines are held to the absolute statement, not merely to each other.
+	expect(c.valueOutcomesMatch).toBe(true);
+	expect(c.valueOutcomes).toEqual(
+		Object.fromEntries(
+			Object.entries(c.valueExpected).flatMap(([name, want]) => [
+				[`${name}.default`, want],
+				[`${name}.revm`, want],
+			]),
+		),
+	);
+	expect(c.valueOutcomesCorrect).toBe(true);
 
 	// the BLOCK ENVIRONMENT read through a contract is the node's own, and the
 	// SAME on both engines. Gas cannot see this class of bug: these opcodes are

@@ -11,8 +11,7 @@ fee was the only way to keep a read from an unfunded address (`from` defaults to
 the zero address) from failing revm's transaction validation. `revm-wasm` now
 exposes the switches every real client uses to serve `eth_call`, so the engine
 passes the node's own base fee and `prevRandao` and turns the VALIDITY RULES off
-instead — `disableBaseFee`, `disableBalanceCheck`, `disableBlockGasLimit`,
-`disableEip3607`.
+instead: `disableBaseFee`, `disableBlockGasLimit`, `disableEip3607`.
 
 Observable consequences, all of them removing a divergence between the two
 engines:
@@ -30,7 +29,13 @@ engines:
 - A read from an address holding no ether keeps working, which is what the
   zeroed base fee was buying.
 
-The differential conformance battery grew a block-environment step that reads
-those opcodes THROUGH A CONTRACT and diffs them, in both state modes and on both
-engines: gas is identical either way, so no gas gate could ever have caught this
-class of bug.
+What is relaxed is a transaction's VALIDITY, never the VALUE TRANSFER: revm's
+`disableBalanceCheck` is deliberately left off, so an `eth_call` carrying more
+ether than the sender holds still fails on either engine, as it does on geth
+(`ErrInsufficientBalance`). A read never invents funds it can then report.
+
+The differential conformance battery grew two steps for the two divergences no
+gas bar can see: one that reads the block-environment opcodes THROUGH A CONTRACT
+and diffs them (gas is identical either way), and one that pins whether a
+value-bearing read succeeds or fails per sender (a rejected read charges no gas
+at all). Both run in both state modes and on both engines.

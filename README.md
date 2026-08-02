@@ -303,15 +303,20 @@ await createRevmEngine({wasm: '/assets/revm.wasm'}); // fetched at runtime, so y
 
 **`eth_call` semantics, not transaction semantics.** A read is not a
 transaction, so the engine runs it with revm's simulation switches
-(`disableBaseFee`, `disableBalanceCheck`, `disableBlockGasLimit`,
-`disableEip3607`) — the same validity rules every real client turns off to serve
-`eth_call`. That is what keeps a read from an address holding **no ether**
-(including the zero address, which is what `from` defaults to) working against a
-block with a real base fee, and a read from an address that holds **code**
-(smart accounts, ERC-4337, multicall aggregators) working at all — EIP-3607 is a
-rule about *sending* a transaction, and `@ethereumjs/evm`'s `runCall` never
-enforced it either. The switches belong to reads only: they are never combined
-with committing, which `revm-wasm` refuses outright.
+(`disableBaseFee`, `disableBlockGasLimit`, `disableEip3607`), the same validity
+rules every real client turns off to serve `eth_call`. That is what keeps a read
+from an address holding **no ether** (including the zero address, which is what
+`from` defaults to) working against a block with a real base fee, and a read from
+an address that holds **code** (smart accounts, ERC-4337, multicall aggregators)
+working at all: EIP-3607 is a rule about *sending* a transaction, and
+`@ethereumjs/evm`'s `runCall` never enforced it either. The switches belong to
+reads only: they are never combined with committing, which `revm-wasm` refuses
+outright.
+
+What is relaxed is a transaction's **validity**, never the **value transfer**:
+revm's `disableBalanceCheck` is deliberately left off, so an `eth_call` carrying
+more ether than the sender holds fails on either engine, exactly as it does on
+geth (`ErrInsufficientBalance`). A read never invents funds it can then report.
 
 Caveats, all of them real:
 

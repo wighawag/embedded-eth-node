@@ -74,6 +74,15 @@ const BLOCK_ENV_COINBASE = '0x00000000000000000000000000000000c0173a5e';
 const BLOCK_ENV_PREV_RANDAO =
 	'0x5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed';
 const GENESIS_BALANCE = 10n ** 24n;
+
+/**
+ * The value-bearing-read step's fixtures: a plain codeless address to send to,
+ * and a sender that holds nothing at all on either chain.
+ */
+const VALUE_SINK_ADDR = '0x0000000000000000000000000000000000005151';
+const UNFUNDED_SENDER = '0x00000000000000000000000000000000dead0001';
+/** The node's default `from` when an `eth_call` names no sender. */
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 const account = privateKeyToAccount(PK);
 
 function hx(b: Uint8Array): string {
@@ -909,6 +918,110 @@ async function runBattery(
 			m.push('PREVRANDAO fixture was zero — step proves nothing');
 		steps.push({label: 'block environment through a contract', mismatches: m});
 		await node3.dispose();
+	}
+
+	// 14) A VALUE-BEARING READ IS STILL SUBJECT TO THE VALUE TRANSFER: an
+	//     `eth_call` carrying `value` the sender cannot afford must FAIL, and one
+	//     it can afford must SUCCEED, identically on every engine.
+	//
+	//     WHY THIS STEP EXISTS. `eth_call` semantics relax the TRANSACTION
+	//     validity rules (the gas-fee check, the base-fee check, EIP-3607), and
+	//     that is what lets a read run from an address holding no ether. They do
+	//     NOT relax the transfer itself: geth's `eth_call` still fails an
+	//     unaffordable value with `ErrInsufficientBalance`, and `@ethereumjs/evm`
+	//     agrees (`_reduceSenderBalance` throws `insufficient balance`). An engine
+	//     that fabricates the caller's balance to serve a read would answer a
+	//     transfer that could never happen: the same class of lie as the base fee
+	//     this battery's block-environment step exists to catch, and just as
+	//     invisible to the gas gate, since a validation failure charges no gas at
+	//     all on either engine.
+	//
+	//     THE ORACLE IS ABSOLUTE, not the reference EVM: what is asserted is
+	//     whether the READ succeeded or failed, per sender and per value, so both
+	//     engines are held to the same statement rather than to each other.
+	{
+		const m: string[] = [];
+		const node4 = await createNode({
+			chainId: CHAIN_ID,
+			stateMode,
+			miningConfig: {type: 'manual'},
+			initialBalances: {[account.address]: GENESIS_BALANCE},
+			engine: await makeEngine?.(),
+		});
+		// The zero address is the node's default `from` AND its default coinbase,
+		// so on a node that has mined priority-fee-paying transactions it holds
+		// ether. This node mines nothing, but the fixture is CHECKED rather than
+		// assumed: an accidentally funded default sender would make the two cases
+		// below pass for the wrong reason.
+		const zeroAddressBalance = (await node4.request({
+			method: 'eth_getBalance',
+			params: [ZERO_ADDRESS, 'latest'],
+		})) as string;
+		if (BigInt(zeroAddressBalance) !== 0n)
+			m.push(
+				`default sender (zero address) holds ${zeroAddressBalance}, so its cases prove nothing`,
+			);
+		// A plain value transfer to a CODELESS address, so what is measured is the
+		// transfer and nothing a contract might do with it.
+		const cases: {label: string; from?: string; value: bigint; ok: boolean}[] =
+			[
+				// The property the zeroed base fee used to buy, and the one this step
+				// must not regress: a read from an address holding no ether.
+				{
+					label: 'unfunded sender, value 0',
+					from: UNFUNDED_SENDER,
+					value: 0n,
+					ok: true,
+				},
+				// ...and the node's own default `from`, the zero address.
+				{label: 'default sender (zero address), value 0', value: 0n, ok: true},
+				{
+					label: 'funded sender, affordable value',
+					from: account.address,
+					value: 1n,
+					ok: true,
+				},
+				// The three a fabricated balance would wrongly answer.
+				{
+					label: 'unfunded sender, value 1 wei',
+					from: UNFUNDED_SENDER,
+					value: 1n,
+					ok: false,
+				},
+				{
+					label: 'default sender (zero address), value 1 wei',
+					value: 1n,
+					ok: false,
+				},
+				{
+					label: 'funded sender, value above balance',
+					from: account.address,
+					value: GENESIS_BALANCE + 1n,
+					ok: false,
+				},
+			];
+		for (const c of cases) {
+			let outcome: string;
+			try {
+				await node4.request({
+					method: 'eth_call',
+					params: [
+						{
+							...(c.from ? {from: c.from} : {}),
+							to: VALUE_SINK_ADDR,
+							value: '0x' + c.value.toString(16),
+						},
+						'latest',
+					],
+				});
+				outcome = 'ok';
+			} catch {
+				outcome = 'failed';
+			}
+			cmp(m, `eth_call: ${c.label}`, outcome, c.ok ? 'ok' : 'failed');
+		}
+		steps.push({label: 'value-bearing read affordability', mismatches: m});
+		await node4.dispose();
 	}
 
 	const engineId = node.readEngine.id;

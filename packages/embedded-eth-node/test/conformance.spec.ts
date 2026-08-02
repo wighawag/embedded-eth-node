@@ -75,4 +75,14 @@ test('slim-node differential conformance vs trie-backed @ethereumjs/vm reference
 			'block environment through a contract',
 		);
 	}
+
+	// The VALUE-BEARING-READ step ran too, in both modes, and for the same
+	// reason: an engine that fabricates the caller's balance to serve an
+	// `eth_call` answers a transfer that could never happen, and a validation
+	// failure charges no gas on either engine, so no gas bar can see it.
+	for (const mode of ['none', 'trie'] as const) {
+		expect(c[mode].steps.map((s: any) => s.label)).toContain(
+			'value-bearing read affordability',
+		);
+	}
 });
