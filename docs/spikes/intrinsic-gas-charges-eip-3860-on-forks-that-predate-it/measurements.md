@@ -62,3 +62,42 @@ The divergence is confined to the PRE-EXECUTION intrinsic-gas computation, which
 ## 5. What this repo did about it
 
 `berlin`, `london` and `paris` moved from `REVM_SPEC_BY_HARDFORK` to `REVM_REFUSED_HARDFORKS`, so `embedded-eth-node/revm` admits `shanghai` and `cancun` only, and `src/intrinsic-gas.ts` keeps its unconditional EIP-3860 term — which is now correct at every fork any part of this node can run. Reasoning: `docs/adr/0008-the-revm-engine-admits-only-hardforks-it-can-cost.md` (amended, including the sharpened admission rule) and `work/notes/observations/decisions-intrinsic-gas-charges-eip-3860-on-forks-that-predate-it-2026-08-02.md`.
+
+## 6. RE-MEASURED against `revm-wasm@0.3.1`, which FIXED it, and thereby inverted the local fix
+
+2026-08-02, both probes re-run against `revm-wasm@0.3.1` (upstream `wighawag/revm-wasm#4`, fixed by making `CallExecutor::new` call `set_spec_and_mainnet_gas_params(spec)` rather than assigning `c.spec`, so `GasParams` is rebuilt for the requested spec instead of staying pinned at the `Context::mainnet()` default of OSAKA).
+
+**The upstream fix is confirmed on all three points**, against the shipped artifact rather than the changelog:
+
+| check | result |
+| --- | --- |
+| word-boundary delta, `BERLIN`/`LONDON`/`MERGE` | **4** (was 6): EIP-3860 no longer charged |
+| word-boundary delta, `SHANGHAI`/`CANCUN` | 6: still charged, correctly |
+| `gasUsed` vs `totalGasSpent`, `BERLIN`..`CANCUN` | both 22600: the EIP-7623 floor is gone |
+| `gasUsed`, `PRAGUE`/`OSAKA` | 25000 vs `totalGasSpent` 22600: floor correctly present where it belongs |
+
+**And it inverts the conclusion of section 3.** revm is now right on the three pre-Shanghai forks and the NODE is the one that is wrong, because `intrinsicGas()` still charges EIP-3860 unconditionally:
+
+| 64-byte initcode, 2 words | node's formula | `revm-wasm@0.3.1` | protocol |
+| --- | --- | --- | --- |
+| berlin / london / paris | 53296 | **53292** | 53292 |
+
+So the estimates that AGREED (on a wrong number) now DISAGREE, which is the cross-backend divergence the benchmarks gate exists to catch:
+
+| spec | default engine | revm engine | protocol | if `intrinsic-gas.ts` gated EIP-3860 |
+| --- | --- | --- | --- | --- |
+| BERLIN / LONDON / MERGE | 53302 | 53298 | 53298 | default 53298 vs revm 53298: **agree, and correct** |
+| SHANGHAI / CANCUN | 53302 | 53302 | 53302 | unchanged: agree, and correct |
+
+Section 3 argued the fork gate was the WRONG fix because it would move only the default engine's estimate and could not move revm's. That reasoning was sound against `0.3.0` and is void against `0.3.1`: now that revm gates the term correctly, gating it here is exactly what restores agreement, and leaving it ungated is what breaks it. **Re-admitting `berlin`/`london`/`paris` therefore REQUIRES the fork gate; it is not optional and it is no longer harmful.**
+
+**`prague` and `osaka` are NOT unblocked by this fix**, contrary to the upstream note's suggestion that they be re-evaluated. Their refusal never depended on revm mis-charging anything; it depends on arithmetic this node does not implement, and the re-run confirms both reasons still stand verbatim on `0.3.1`:
+
+| check | `PRAGUE` | `OSAKA` |
+| --- | --- | --- |
+| node's estimate judged as a gas limit | `GasFloorMoreThanGasLimit { gas_floor: 25000, gas_limit: 22600 }` | same |
+| node's default 30M read budget | accepted | `TxGasLimitGreaterThanCap { gas_limit: 30021000, cap: 16777216 }` |
+
+The EIP-7623 floor is now correctly ACTIVE on Prague and later, which is precisely why the node's floor-less estimate is still rejected there. EIP-7825's cap is untouched by this fix, and EIP-7702 / EIP-2935 remain unchecked against the transaction path.
+
+**`shanghai` and `cancun` are unaffected in every column above**, so upgrading to `^0.3.1` is safe for the currently-admitted set independently of any re-admission.

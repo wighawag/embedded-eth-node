@@ -12,7 +12,9 @@ covers: []
 
 **This task is NOT ready to build as written.** It is a marker with its entry conditions written down, and it covers TWO families of refusal whose triggers are completely different. Take whichever family has actually become unblocked; do not treat them as one job.
 
-### Family 1: ABOVE the range (`prague`, `osaka`) is blocked on OUR arithmetic
+### Family 1: ABOVE the range (`prague`, `osaka`) is STILL blocked on OUR arithmetic
+
+> **Checked against `revm-wasm@0.3.1` on 2026-08-02 and still blocked, both reasons verbatim.** The upstream fix note suggested these be re-evaluated for admission on the grounds that the EIP-7623 floor is now correctly present from Prague. That does not unblock them, and re-measuring says so directly: the node's estimate is still rejected with `GasFloorMoreThanGasLimit { gas_floor: 25000, gas_limit: 22600 }` on both, and the node's default 30M read budget is still rejected on Osaka with `TxGasLimitGreaterThanCap { gas_limit: 30021000, cap: 16777216 }`. Their refusal never depended on revm mis-charging anything; it depends on arithmetic this node does not implement, so a correct floor upstream makes the node's floor-less estimate MORE clearly wrong, not less. Do not re-admit these on the strength of the upstream fix.
 
 `src/intrinsic-gas.ts` implements the pre-Prague formula only, while revm enforces more from Prague onwards. Measured in `docs/spikes/prague-intrinsic-gas-floor-or-refuse/`:
 
@@ -22,13 +24,26 @@ covers: []
 
 Entry conditions: the node wants to move its hardfork past Cancun, or a consumer asks for Prague/Osaka reads, or the node gains a hardfork option. Today `createNode()` pins `Hardfork.Cancun` and `NodeOptions` exposes no hardfork at all, which is why implementing the floor now would ship a branch no test going through the public API can execute. That unreachability is the argument that settled implement-vs-refuse the first time; if it still holds, STOP and say so.
 
-### Family 2: BELOW the range (`berlin`, `london`, `paris`) is blocked UPSTREAM
+### Family 2: BELOW the range (`berlin`, `london`, `paris`) is UNBLOCKED as of `revm-wasm@0.3.1`
+
+> **UPDATED 2026-08-02: the upstream fix landed, and it INVERTED the guidance below.** `wighawag/revm-wasm#4` is fixed in `revm-wasm@0.3.1`. Both probes were re-run against the shipped artifact and the results are in section 6 of `docs/spikes/intrinsic-gas-charges-eip-3860-on-forks-that-predate-it/measurements.md`. Read that section before doing anything here. In short: revm now gates EIP-3860 correctly, so **the node is the wrong party**, its estimates now DISAGREE with revm on these three forks (default 53302 vs revm 53298, protocol 53298), and **the local fork gate is now REQUIRED rather than forbidden**. The paragraph below explaining why not to gate locally was correct against `0.3.0` and is void against `0.3.1`; it is kept for the reasoning, not the instruction.
+
+#### The original (pre-0.3.1) statement of the problem
 
 Nothing about the node's own arithmetic is wrong here. `revm-wasm` computes intrinsic gas at a fixed late spec and CHARGES EIP-3860's initcode word cost on all three forks, which predate Shanghai. Both sides then agree on a number the protocol does not charge, over-charging by `2 * ceil(len/32)` gas (3072 for a maximum-size initcode). Measured in `docs/spikes/intrinsic-gas-charges-eip-3860-on-forks-that-predate-it/`; filed as **`wighawag/revm-wasm#4`**; tracked locally by `work/notes/observations/revm-wasm-intrinsic-gas-ignores-the-spec.md`.
 
-**Do not try to fix this family locally.** A fork gate in `src/intrinsic-gas.ts` would move the DEFAULT engine's estimate and could not move revm's (the engine subtracts the node's intrinsic gas from `totalGasSpent` and the node adds it straight back), converting an agreed-wrong number into a real cross-backend gas divergence, which is exactly what the gate in `packages/benchmarks` exists to catch.
+~~**Do not try to fix this family locally.**~~ (VOID as of `0.3.1`, see the banner above.) The reasoning was: a fork gate in `src/intrinsic-gas.ts` would move the DEFAULT engine's estimate and could not move revm's (the engine subtracts the node's intrinsic gas from `totalGasSpent` and the node adds it straight back), converting an agreed-wrong number into a real cross-backend gas divergence. That held only while revm ALSO charged the term. Now that it does not, the same mechanism runs the other way: gating moves the default engine onto revm's (correct) number, and NOT gating leaves the two engines split.
 
-Entry condition: `wighawag/revm-wasm#4` is fixed AND this repo has upgraded to the release carrying the fix. Verify against the shipped artifact rather than the changelog: re-run `docs/spikes/intrinsic-gas-charges-eip-3860-on-forks-that-predate-it/probe-initcode-costing.mjs` and confirm the per-word delta is 4 rather than 6 on those specs.
+Entry condition: **met.** `wighawag/revm-wasm#4` is fixed in `revm-wasm@0.3.1`, and both probes have been re-run against the shipped artifact (per-word delta is 4 on those specs, `gasUsed` equals `totalGasSpent` pre-Prague). What remains is the local work.
+
+#### What family 2 now requires
+
+1. Upgrade `revm-wasm` to `^0.3.1` in `packages/embedded-eth-node` and `packages/benchmarks`, and update the lockfile. This is safe for the currently-admitted set on its own: `shanghai` and `cancun` are unaffected in every measured column.
+2. **Gate the EIP-3860 initcode word cost by fork in `src/intrinsic-gas.ts`**, so it is charged from Shanghai onward and not before. This is the design question the task carries, and it is not free: `intrinsicGas(data, isCreate)` takes no fork today, and its whole value is that its two callers (`node.ts` adds it, `src/revm.ts` subtracts it) share ONE answer. Thread the fork through deliberately, keep the function SHARED and unforked, and record the seam decision.
+3. Move `berlin`, `london`, `paris` from `REVM_REFUSED_HARDFORKS` to `REVM_SPEC_BY_HARDFORK`, and drop the now-obsolete `PRE_EIP_3860` reason string.
+4. Assert the restored agreement against the engine, and keep a still-refused fork as the counter-example so the assertions stay load-bearing.
+
+Note the ORDER matters: upgrading to `0.3.1` WITHOUT gating leaves `berlin`/`london`/`paris` refused (so nothing user-visible breaks), but it does make the ungated term wrong against the engine for those specs. Do not re-admit before gating.
 
 ### Both families
 
