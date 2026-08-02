@@ -337,9 +337,13 @@ Caveats, all of them real:
   refused too until `revm-wasm@0.3.1`, because both this node and revm charged
   EIP-3860's initcode word cost on forks that predate it; the node now charges
   that term only where `@ethereumjs/common` says the protocol does, and the
-  three are back. Measurements:
-  [`docs/spikes/prague-intrinsic-gas-floor-or-refuse/`](docs/spikes/prague-intrinsic-gas-floor-or-refuse/measurements.md)
-  and [`docs/spikes/intrinsic-gas-charges-eip-3860-on-forks-that-predate-it/`](docs/spikes/intrinsic-gas-charges-eip-3860-on-forks-that-predate-it/measurements.md);
+  three are back. The admitted range has an end at the BOTTOM too: the shared
+  formula hardcodes EIP-2028's 16 gas per non-zero calldata byte, which was 68
+  before Istanbul, so nothing below Istanbul is admissible without gating that
+  term as well (anything in neither table is refused outright). Measurements:
+  [`docs/spikes/prague-intrinsic-gas-floor-or-refuse/`](docs/spikes/prague-intrinsic-gas-floor-or-refuse/measurements.md),
+  [`docs/spikes/intrinsic-gas-charges-eip-3860-on-forks-that-predate-it/`](docs/spikes/intrinsic-gas-charges-eip-3860-on-forks-that-predate-it/measurements.md)
+  and [`docs/spikes/clause-b-covers-only-eip-3860-not-the-rest-of-the-formula/`](docs/spikes/clause-b-covers-only-eip-3860-not-the-rest-of-the-formula/measurements.md);
   reasoning: [ADR 0008](docs/adr/0008-the-revm-engine-admits-only-hardforks-it-can-cost.md).
   `REVM_SPEC_BY_HARDFORK` and `REVM_REFUSED_HARDFORKS` are exported if you want
   to ask in code.

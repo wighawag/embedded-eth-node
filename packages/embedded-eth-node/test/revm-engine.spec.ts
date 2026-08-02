@@ -22,7 +22,9 @@
  *   - on every hardfork the engine DOES admit, what the node hands it is
  *     accepted: the estimate for a calldata-heavy call and the default read
  *     budget both survive revm's own transaction validation, AND the node
- *     charges the EIP-3860 initcode word cost exactly where the protocol does
+ *     charges EVERY term of the shared intrinsic-gas formula exactly what the
+ *     protocol charges there — with the formula's LOWER bound (EIP-2028,
+ *     Istanbul) measured from both sides, since no admitted fork spans it
  *   - a CREATE-shaped `eth_estimateGas` returns the SAME number on both engines
  *     at every admitted fork, pre-Shanghai ones included, and that number is
  *     what the protocol charges
@@ -225,28 +227,94 @@ test('revm engine: same results + same gas as @ethereumjs/evm, on the node own s
 	// AND THE PROTOCOL GETS A VOTE, because the node and revm agree about
 	// intrinsic gas by construction (the engine subtracts what the node adds), so
 	// a term that is wrong AT A FORK is wrong on both sides and their agreement
-	// cannot see it. `intrinsicGas()` gates the EIP-3860 initcode word cost on the
-	// fork, so at every admitted fork three independent readings must agree about
-	// whether it is charged: `@ethereumjs/common`'s activation table (what the
-	// node's own `runTx` path charges), revm's MEASURED per-word charge, and the
-	// node's own formula MEASURED the same way.
+	// cannot see it. This is ADR 0008's clause (b), and it covers EVERY term the
+	// shared formula bakes in — not only the fork-gated one: each term is isolated
+	// by a delta between two probe transactions and read three ways at every
+	// admitted fork (the protocol, via the `@ethereumjs/tx` arithmetic this node's
+	// own `runTx` charges; revm, MEASURED; the node's `intrinsicGas()`, measured
+	// the same way). The list is asserted too, so a term cannot quietly leave it.
+	expect(c.intrinsicTermNames).toEqual([
+		'transaction base',
+		'non-zero calldata byte (EIP-2028)',
+		'zero calldata byte',
+		'creation base (EIP-2)',
+		'initcode word (EIP-3860)',
+	]);
+	expect(c.intrinsicTermDisagreements).toEqual([]);
+	// ...and against the ABSOLUTE numbers at both ends of the admitted range, not
+	// merely against each other: three parties agreeing is what the pre-0.3.1 world
+	// looked like while two of them were wrong.
+	expect(c.intrinsicTermReadings.berlin).toEqual({
+		'transaction base': {revm: '21000', protocol: '21000', node: '21000'},
+		'non-zero calldata byte (EIP-2028)': {
+			revm: '16',
+			protocol: '16',
+			node: '16',
+		},
+		'zero calldata byte': {revm: '4', protocol: '4', node: '4'},
+		'creation base (EIP-2)': {revm: '32000', protocol: '32000', node: '32000'},
+		'initcode word (EIP-3860)': {revm: '0', protocol: '0', node: '0'},
+	});
+	expect(c.intrinsicTermReadings.cancun).toEqual({
+		'transaction base': {revm: '21000', protocol: '21000', node: '21000'},
+		'non-zero calldata byte (EIP-2028)': {
+			revm: '16',
+			protocol: '16',
+			node: '16',
+		},
+		'zero calldata byte': {revm: '4', protocol: '4', node: '4'},
+		'creation base (EIP-2)': {revm: '32000', protocol: '32000', node: '32000'},
+		'initcode word (EIP-3860)': {revm: '2', protocol: '2', node: '2'},
+	});
+	// ...and the fork-gated term is additionally read off `@ethereumjs/common`'s
+	// ACTIVATION table, which is the form the gate itself is written in
+	// (`common.isActivatedEIP(3860)` in src/intrinsic-gas.ts).
 	for (const hardfork of c.admittedHardforks as string[]) {
-		const want = c.eip3860Active[hardfork] ? 2 : 0;
+		const want = c.eip3860Active[hardfork] ? '2' : '0';
+		const r = c.intrinsicTermReadings[hardfork]['initcode word (EIP-3860)'];
 		expect(
 			`${hardfork}: EIP-3860 ${c.eip3860Active[hardfork]}, ` +
-				`revm ${c.initcodeWordCostCharged[hardfork]}/word, ` +
-				`node ${c.nodeInitcodeWordCost[hardfork]}/word`,
+				`revm ${r.revm}/word, protocol ${r.protocol}/word, node ${r.node}/word`,
 		).toBe(
 			`${hardfork}: EIP-3860 ${c.eip3860Active[hardfork]}, ` +
-				`revm ${want}/word, node ${want}/word`,
+				`revm ${want}/word, protocol ${want}/word, node ${want}/word`,
 		);
 	}
-	// ...and the readings above are only load-bearing because the admitted set SPANS
-	// the EIP-3860 boundary: an ungated formula would satisfy all three if every
-	// admitted fork charged the term. These three are the forks the fork gate exists
-	// for. Measurements:
+	// ...and that term's readings are only load-bearing because the admitted set
+	// SPANS the EIP-3860 boundary: an ungated formula would satisfy all of them if
+	// every admitted fork charged the term. These three are the forks the fork gate
+	// exists for. Measurements:
 	// docs/spikes/intrinsic-gas-charges-eip-3860-on-forks-that-predate-it/ (§6).
 	expect(c.admittedPreEip3860).toEqual(['berlin', 'london', 'paris']);
+
+	// THE OTHER BOUNDARY, which no admitted fork can span: EIP-2028 (Istanbul) set
+	// the 16-gas non-zero calldata byte, and every admitted fork is at or above
+	// Istanbul, so the per-fork readings above would ALSO pass with a formula that
+	// simply hardcodes 16 — which is exactly what `intrinsicGas()` does. What makes
+	// that term's check load-bearing rather than decorative is measuring the
+	// boundary itself from BOTH sides, on specs the engine does not admit: at
+	// `istanbul` (the floor of the range the formula is true for) all three parties
+	// agree, and one fork BELOW it they part company, with the node under-charging
+	// by 52 gas per non-zero byte. An under-estimate is what reaches a user as "out
+	// of gas", because a client uses an estimate as the transaction's gas limit.
+	expect(c.lowerBoundDisagreements.istanbul).toEqual([]);
+	expect(c.lowerBoundDisagreements.petersburg).toEqual([
+		'petersburg/non-zero calldata byte (EIP-2028): ' +
+			'revm 68, protocol 68, node 16',
+	]);
+	expect(
+		c.lowerBoundReadings.petersburg['non-zero calldata byte (EIP-2028)'],
+	).toEqual({revm: '68', protocol: '68', node: '16'});
+	// ...and neither of those two forks can be reached by accident: they are in
+	// NEITHER table, so the engine refuses them at construction. Re-admitting one
+	// means moving it INTO the admitted table, which puts it into the per-fork loop
+	// above and turns the disagreement just measured into a failing build.
+	expect(c.belowAdmittedRefusals.petersburg).toContain(
+		"no revm spec is known for hardfork 'petersburg'",
+	);
+	expect(c.belowAdmittedRefusals.istanbul).toContain(
+		"no revm spec is known for hardfork 'istanbul'",
+	);
 
 	// THE DIVERGENCE THIS CHANGE CLOSED, asserted where it lives: a CREATE-shaped
 	// `eth_estimateGas`, engine against engine, at every admitted fork. The default

@@ -90,7 +90,18 @@ export interface RevmEngineOptions {
  * this node and `revm-wasm@0.3.0` charged EIP-3860's initcode word cost there,
  * and EIP-3860 arrived in Shanghai. `revm-wasm@0.3.1` fixed its half, and
  * ./intrinsic-gas.ts now gates the term on the node's `Common`, so all three are
- * back. See {@link REVM_REFUSED_HARDFORKS} and
+ * back.
+ *
+ * ADDING A FORK BELOW BERLIN COSTS MORE THAN A LINE HERE. ./intrinsic-gas.ts is
+ * protocol-correct over Istanbul..Cancun only: it hardcodes EIP-2028's 16 gas per
+ * non-zero calldata byte, which was 68 before Istanbul, so a pre-Istanbul entry in
+ * this table would make `eth_estimateGas` UNDER-estimate by 52 gas per non-zero
+ * byte — and a client uses an estimate as the transaction's gas limit. Anything
+ * in NEITHER table is refused by the unknown-fork guard in `connect` below, which
+ * is what keeps that unreachable today. Gate the term the way EIP-3860's is gated
+ * first, then move the entry; the clause-(b) assertions in
+ * `test/revm-engine.spec.ts` measure that boundary from both sides and will fail
+ * the build otherwise. See {@link REVM_REFUSED_HARDFORKS} and
  * `docs/adr/0008-the-revm-engine-admits-only-hardforks-it-can-cost.md`.
  * Anything not in either table is refused by name.
  */
