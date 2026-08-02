@@ -15,8 +15,9 @@ rejected, and what it touches. Ratify or reverse.
 
 > **SUPERSEDED 2026-08-02** by `revm-wasm-upgrade-honest-block-environment`.
 > `revm-wasm@0.3.0` carries the flags this entry says do not exist, so the engine
-> now passes the node's REAL base fee with `disableBaseFee` +
-> `disableBalanceCheck` instead. `BASEFEE` no longer reads 0 on revm, and the
+> now passes the node's REAL base fee with `disableBaseFee` instead (and NOT
+> `disableBalanceCheck`, which fabricates the caller's balance: see decision 6 of
+> that record). `BASEFEE` no longer reads 0 on revm, and the
 > conformance battery grew a block-environment step that would catch it if it
 > did. See `decisions-revm-wasm-upgrade-honest-block-environment-2026-08-02.md`.
 

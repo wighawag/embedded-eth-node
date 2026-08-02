@@ -284,7 +284,8 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 	// ---------- CALLERS A SIMULATION MUST SERVE: unfunded, and holding code ----
 	// The zeroed base fee existed to keep an `eth_call` from an address holding no
 	// ether working (the node defaults `from` to the zero address). Replacing it
-	// with `disableBaseFee` + `disableBalanceCheck` has to keep exactly that, so
+	// with `disableBaseFee` (and NOT `disableBalanceCheck`, which would fabricate
+	// the caller's balance) has to keep exactly that, so
 	// the same read is made from a FUNDED address, from an UNFUNDED one, and from
 	// an address that HOLDS CODE — the last being EIP-3607, which revm enforces on
 	// a transaction and `@ethereumjs/evm`'s `runCall` never enforced at all.
