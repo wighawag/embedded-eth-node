@@ -18,12 +18,27 @@ name: release
 # WHY THIS WORKFLOW DOES NOT RUN THE TEST SUITE, deliberately: `release:ci` runs
 # `format:check` + `build` only. The full matrix (Playwright on Chromium AND
 # WebKit, the differential conformance battery, and the cross-backend gas gate)
-# lives in `ci.yml`, which runs on `pull_request` and on `push` to main. The
-# commit this workflow publishes is therefore always one CI has already judged:
-# the Version Packages PR gets the full matrix before it can be merged, and the
-# merge itself triggers it again. Duplicating a ~2.5-min-per-engine browser
-# matrix here would slow every release without adding a bar. If you ever publish
-# from a commit that did NOT go through a PR, that reasoning no longer holds.
+# lives in `ci.yml`, which runs on `pull_request` and on `push` to main.
+#
+# CORRECTED 2026-08-02, having watched two releases: an earlier version of this
+# comment claimed the Version Packages PR "gets the full matrix before it can be
+# merged". It does NOT, automatically. That PR is opened by the changesets action
+# using GITHUB_TOKEN, and GitHub parks workflow runs triggered that way in
+# `action_required` pending manual approval, so the PR's CI sits queued and never
+# runs unless a human approves it (`gh api -X POST
+# repos/<owner>/<repo>/actions/runs/<id>/approve`). The 0.1.0 release was
+# published with no CI run on its version PR at all.
+#
+# The reasoning survives, but the load-bearing part is different from what was
+# written: the Version Packages PR changes ONLY the package version, CHANGELOG.md
+# and the consumed `.changeset/*.md` files. It touches NO source, so the tree it
+# publishes is, source-wise, exactly the commit on main that the full matrix
+# already passed on `push`. That is what makes skipping the matrix here safe, not
+# the PR's own (usually unrun) checks. Approving the PR run is still worth doing
+# for a release you care about, since it re-proves the lockfile and the build.
+#
+# The reasoning fails if a version PR ever carries a source change, or if you
+# publish from a commit that never landed on main.
 on:
   push:
     branches: [main]
