@@ -36,10 +36,13 @@
  * ONLY, and refuses `'trie'` at construction rather than at the first opcode.
  *
  * AND WHICH FORKS. It serves the hardforks whose transaction costing the node's
- * own arithmetic reproduces (`REVM_SPEC_BY_HARDFORK`), and refuses the rest BY
- * NAME at construction (`REVM_REFUSED_HARDFORKS`) — Prague and Osaka today,
- * because `./intrinsic-gas.ts` does not compute the EIP-7623 calldata floor that
- * revm enforces. See ADR 0008.
+ * own arithmetic reproduces AND the PROTOCOL agrees with
+ * (`REVM_SPEC_BY_HARDFORK` — Shanghai and Cancun today), and refuses the rest BY
+ * NAME at construction (`REVM_REFUSED_HARDFORKS`): Prague and Osaka ABOVE that
+ * range, because `./intrinsic-gas.ts` does not compute the EIP-7623 calldata
+ * floor that revm enforces; Berlin, London and Paris BELOW it, because both this
+ * node and revm charge EIP-3860's initcode word cost there and EIP-3860 did not
+ * exist until Shanghai. See ADR 0008.
  */
 import type {SimpleStateManager} from '@ethereumjs/statemanager';
 import {createRevm, type SpecName, type WasmSource} from 'revm-wasm';
@@ -73,40 +76,85 @@ export interface RevmEngineOptions {
  * that silently kept running Cancun rules would charge different gas from the
  * default engine and nothing would say so.
  *
- * WHAT MAKES A FORK ADMISSIBLE is not that revm has a spec for it. It is that
- * everything the node computes ABOUT a transaction — today that is the shared
- * intrinsic-gas arithmetic in ./intrinsic-gas.ts, and the read budget assembled
- * in `call` below — still agrees with what revm ENFORCES under that spec. Prague
- * and Osaka are deliberately absent for exactly that reason; see
- * {@link REVM_REFUSED_HARDFORKS} and
+ * WHAT MAKES A FORK ADMISSIBLE is not that revm has a spec for it, and it is not
+ * that the node and revm AGREE about it either. Agreement is necessary and not
+ * sufficient: everything the node computes ABOUT a transaction — today the
+ * shared intrinsic-gas arithmetic in ./intrinsic-gas.ts, and the read budget
+ * assembled in `call` below — must (a) still agree with what revm ENFORCES under
+ * that spec, and (b) be what the PROTOCOL charges at that fork, judged by
+ * something that is neither of the two. Clause (b) is not decoration: the engine
+ * SUBTRACTS `intrinsicGas()` from what revm spent and the node adds the same
+ * number back, so the two sides agree about intrinsic gas by construction and a
+ * term that is wrong at a fork is wrong on both sides at once.
+ *
+ * Prague and Osaka fail (a); Berlin, London and Paris failed (b), which is why
+ * they are no longer here. See {@link REVM_REFUSED_HARDFORKS} and
  * `docs/adr/0008-the-revm-engine-admits-only-hardforks-it-can-cost.md`.
  * Anything not in either table is refused by name.
  */
 export const REVM_SPEC_BY_HARDFORK: Readonly<Record<string, SpecName>> = {
-	berlin: 'BERLIN',
-	london: 'LONDON',
-	paris: 'MERGE',
 	shanghai: 'SHANGHAI',
 	cancun: 'CANCUN',
 };
 
 /**
+ * The one reason Berlin, London and Paris are refused, shared because it IS one
+ * reason: they all predate EIP-3860.
+ *
+ * The subtle part, and the reason this is a refusal rather than a fork gate in
+ * ./intrinsic-gas.ts: gating the term would move the DEFAULT engine's estimate
+ * and could not move revm's (the engine subtracts the node's intrinsic gas from
+ * `totalGasSpent` and the node adds it straight back), so the gate on its own
+ * converts an agreed wrong number into a cross-engine gas DIVERGENCE. The node
+ * cannot make these forks correct while running on this artifact, by any change
+ * to its own arithmetic — which is what makes refusing them the honest answer
+ * rather than the lazy one.
+ */
+const PRE_EIP_3860 =
+	`it predates EIP-3860 (Shanghai) and both sides charge it there anyway: ` +
+	`this node's shared intrinsic-gas arithmetic (src/intrinsic-gas.ts) adds the ` +
+	`initcode word cost of ceil(len/32) * 2 to every CREATE with no hardfork gate, ` +
+	`and revm-wasm charges the same cost under this spec — so the two AGREE on a ` +
+	`number the protocol does not charge, and eth_estimateGas for a deployment ` +
+	`over-charges by 2 gas per initcode word (3072 gas for a maximum-size ` +
+	`initcode) against what this node's own transaction path would spend. Gating ` +
+	`the term would not fix it, only split the two engines: revm charges it either ` +
+	`way. Measured in ` +
+	`docs/spikes/intrinsic-gas-charges-eip-3860-on-forks-that-predate-it/`;
+
+/**
  * Hardforks revm HAS a spec for and this engine still refuses, each with the
  * reason quoted verbatim in the refusal.
  *
- * These are the silent-wrong-answer cases: revm would run happily and charge
- * rules the node's own arithmetic does not implement, so the node's
- * `eth_estimateGas` could return a number the engine that produced it would
- * REJECT — and viem uses that number as the transaction's gas limit. A loud
- * refusal at construction is the honest edge (ADR 0004); a plausible estimate
- * that runs out of gas in a user's face is not.
+ * These are the silent-wrong-answer cases, and they come in two shapes.
  *
- * To admit one of these, implement the missing rule in ./intrinsic-gas.ts (and
- * the read budget here), prove it against the engine, and move the entry to
- * {@link REVM_SPEC_BY_HARDFORK}. The measurements behind each line are in
- * `docs/spikes/prague-intrinsic-gas-floor-or-refuse/`.
+ * ABOVE the admitted range (Prague, Osaka), revm ENFORCES rules the node's own
+ * arithmetic does not implement, so `eth_estimateGas` could return a number the
+ * engine that produced it would REJECT — and viem uses that number as the
+ * transaction's gas limit.
+ *
+ * BELOW it (Berlin, London, Paris), the node and revm agree perfectly and are
+ * both wrong about the PROTOCOL: they charge EIP-3860's initcode word cost on
+ * forks that predate EIP-3860. Nothing is rejected and no invariant between the
+ * two engines trips — which is precisely why the fork has to be refused rather
+ * than watched, because there is no later point at which anything would notice.
+ *
+ * Either way a loud refusal at construction is the honest edge (ADR 0004); a
+ * plausible estimate is not.
+ *
+ * To admit one of these, make the node's arithmetic BOTH agree with revm under
+ * that spec AND match the protocol at that fork — for the forks above, implement
+ * the missing rule in ./intrinsic-gas.ts and in the read budget here; for the
+ * forks below, note that no change to this node alone can do it — then prove it
+ * against the engine and move the entry to {@link REVM_SPEC_BY_HARDFORK}. The
+ * measurements behind each line are in
+ * `docs/spikes/prague-intrinsic-gas-floor-or-refuse/` and
+ * `docs/spikes/intrinsic-gas-charges-eip-3860-on-forks-that-predate-it/`.
  */
 export const REVM_REFUSED_HARDFORKS: Readonly<Record<string, string>> = {
+	berlin: PRE_EIP_3860,
+	london: PRE_EIP_3860,
+	paris: PRE_EIP_3860,
 	prague:
 		`revm enforces the EIP-7623 calldata floor (a transaction pays at least ` +
 		`21000 + 10 gas per calldata token, tokens being 1 per zero byte and 4 per ` +
@@ -241,7 +289,9 @@ export async function createRevmEngine(
 				// PREVRANDAO. Post-Merge it IS `mixHash` (the node writes
 				// `NodeOptions.blockEnv.prevRandao` there and pins difficulty to 0), and
 				// `mixHash` is read rather than the `prevRandao` getter because that
-				// getter throws on a pre-Merge fork, which SPEC_BY_HARDFORK still maps.
+				// getter throws on a pre-Merge fork. Every admitted fork is post-Merge
+				// today, so that is belt and braces — but it costs nothing and the
+				// admitted set has moved twice already.
 				prevRandao: header.mixHash,
 				...(header.excessBlobGas !== undefined
 					? {excessBlobGas: header.excessBlobGas}

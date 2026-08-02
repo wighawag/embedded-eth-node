@@ -45,6 +45,14 @@
  *      NOT true are refused BY NAME at construction — and the same numbers are
  *      shown being rejected on them, so the refusal is visibly protecting
  *      something real rather than being decoration.
+ *  10. Every hardfork the engine admits is one the PROTOCOL agrees with, not
+ *      merely one revm agrees with. The node and revm share `intrinsicGas()`'s
+ *      answer by construction (the engine subtracts what the node adds), so
+ *      their agreement cannot see a term that is wrong at that fork: the
+ *      EIP-3860 initcode word cost, charged unconditionally, is measured here
+ *      against a THIRD party — `@ethereumjs/common`'s EIP activation table,
+ *      which is what the node's own `runTx` path charges. Evidence:
+ *      `docs/spikes/intrinsic-gas-charges-eip-3860-on-forks-that-predate-it/`.
  */
 import {createNode} from '../../src/index.js';
 import {
@@ -579,15 +587,17 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 	// the one place the guard is reachable: `connect` is handed a `Common` on each
 	// fork directly, exactly as a node whose hardfork had moved would hand it.
 	const sharedModule = await WebAssembly.compile(bundlerResolvedWasm);
+	const commonOn = (hardfork: string) =>
+		new Common({
+			chain: {...Mainnet, chainId: CHAIN_ID, name: 'embedded-eth-node'},
+			hardfork,
+		});
 	async function connectOn(hardfork: string): Promise<string> {
 		const engine = await createRevmEngine({wasm: sharedModule});
 		try {
 			await engine.connect!({
 				stateManager: new SimpleStateManager(),
-				common: new Common({
-					chain: {...Mainnet, chainId: CHAIN_ID, name: 'embedded-eth-node'},
-					hardfork,
-				}),
+				common: commonOn(hardfork),
 				getBlockHash: () => undefined,
 				stateMode: 'none',
 			});
@@ -686,6 +696,78 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 	// budget are rejected outright there.
 	out.estimateOnPrague = verdict('PRAGUE', BigInt(heavyEstimates.revm));
 	out.budgetOnOsaka = verdict('OSAKA', defaultReadBudget);
+
+	// ---------- ...and judged by the PROTOCOL, not just by revm ----------
+	// The node and revm agree about intrinsic gas BY CONSTRUCTION: the engine
+	// subtracts `intrinsicGas()` from what revm spent and the node adds the same
+	// number back, so a term that is wrong at a fork is wrong on both sides and
+	// their agreement cannot see it. `intrinsicGas()` charges the EIP-3860 initcode
+	// word cost UNCONDITIONALLY, so admitting a fork that predates EIP-3860 would
+	// be exactly that: measured agreement, protocol-wrong. Two independent readings
+	// per fork, neither of them the node's formula:
+	//   - `@ethereumjs/common`'s EIP activation table, which is what the node's own
+	//     transaction path (`@ethereumjs/vm`'s `runTx`) charges;
+	//   - revm itself, by DELTA across an initcode word boundary.
+	// Evidence and the full numbers:
+	// docs/spikes/intrinsic-gas-charges-eip-3860-on-forks-that-predate-it/.
+
+	/** Initcode deploying EMPTY code: `PUSH1 0 / PUSH1 0 / RETURN`, padded to `len`. */
+	function initcodeOfLength(len: number): Uint8Array {
+		const code = new Uint8Array(len);
+		code.set([0x60, 0x00, 0x60, 0x00, 0xf3]);
+		return code;
+	}
+	/**
+	 * What revm charges PER INITCODE WORD under `spec`, measured rather than read
+	 * off a table: 32 bytes is one word and 33 is two, and the extra byte is a zero
+	 * calldata byte worth 4 gas, so the delta is `4 + wordCost`. Execution gas is
+	 * identical on both sides and cancels, so this assumes nothing about what the
+	 * initcode costs to run. 2 is EIP-3860's charge; 0 is the fork before it.
+	 */
+	function initcodeWordCost(spec: SpecName): number {
+		const create = (data: Uint8Array) =>
+			judge.create({
+				from: hexToBytes(account.address),
+				data,
+				value: 0n,
+				gasLimit: 1_000_000n,
+				spec,
+				chainId: BigInt(CHAIN_ID),
+				block: {
+					number: 1n,
+					timestamp: SHARED_BLOCK_ENV.timestamp,
+					gasLimit: 30_000_000n,
+					coinbase: hexToBytes(SHARED_BLOCK_ENV.coinbase),
+					baseFeePerGas: SHARED_BASE_FEE,
+					prevRandao: hexToBytes(SHARED_BLOCK_ENV.prevRandao),
+				},
+				disableBaseFee: true,
+				disableBlockGasLimit: true,
+				disableEip3607: true,
+				returnState: false,
+				commit: false,
+				checkNonce: false,
+			});
+		const oneWord = create(initcodeOfLength(32));
+		const twoWords = create(initcodeOfLength(33));
+		return Number(twoWords.totalGasSpent - oneWord.totalGasSpent - 4n);
+	}
+
+	const eip3860Active: Record<string, boolean> = {};
+	const wordCostCharged: Record<string, number> = {};
+	for (const [hardfork, spec] of Object.entries(REVM_SPEC_BY_HARDFORK)) {
+		eip3860Active[hardfork] = commonOn(hardfork).isActivatedEIP(3860);
+		wordCostCharged[hardfork] = initcodeWordCost(spec);
+	}
+	out.eip3860Active = eip3860Active;
+	out.initcodeWordCostCharged = wordCostCharged;
+	// The counter-example that makes the pre-Shanghai refusals load-bearing: on
+	// MERGE (the last fork before EIP-3860) revm charges the word cost anyway, so
+	// the node agreeing with it there is agreement on a number the protocol does
+	// not charge. Gating the term in `intrinsic-gas.ts` would not fix that — it
+	// would only move the DEFAULT engine's estimate and split the two.
+	out.eip3860ActiveOnParis = commonOn('paris').isActivatedEIP(3860);
+	out.initcodeWordCostOnMerge = initcodeWordCost('MERGE');
 
 	// ---------- one engine, one node ----------
 	// `fromAsset` is already bound to the `revm` node. Re-using it would rebind

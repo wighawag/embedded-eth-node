@@ -14,11 +14,13 @@
  *   - BLOCKHASH answers with the node's real block hashes
  *   - both wasm delivery shapes (bundler-resolved asset, runtime-fetched URL)
  *   - `stateMode:'trie'` is refused at construction, naming the reason
- *   - a hardfork whose rules the node's intrinsic-gas arithmetic does not
- *     implement is refused at construction, naming the EIP and where to look
+ *   - a hardfork the node cannot cost CORRECTLY is refused at construction,
+ *     naming the EIP and where to look — whether revm enforces a rule the node
+ *     does not implement, or the two implement one the protocol does not have
  *   - on every hardfork the engine DOES admit, what the node hands it is
  *     accepted: the estimate for a calldata-heavy call and the default read
- *     budget both survive revm's own transaction validation
+ *     budget both survive revm's own transaction validation, AND the protocol
+ *     charges the EIP-3860 initcode word cost the node charges unconditionally
  *   - one engine instance serves one node (a second `createNode()` is refused)
  */
 import {test, expect} from '@playwright/test';
@@ -156,8 +158,21 @@ test('revm engine: same results + same gas as @ethereumjs/evm, on the node own s
 	// a HARDFORK the engine cannot cost is refused the same way. The node runs
 	// Cancun, so this guard is unreachable through `createNode()` — which is the
 	// point: it fires the day the node's hardfork moves, instead of the node
-	// quietly charging pre-Prague intrinsic gas against post-Prague enforcement.
-	expect(c.refusedHardforks).toEqual(['prague', 'osaka']);
+	// quietly charging pre-Prague intrinsic gas against post-Prague enforcement
+	// (above the admitted range) or post-Shanghai intrinsic gas on a pre-Shanghai
+	// fork (below it).
+	expect(c.refusedHardforks).toEqual([
+		'berlin',
+		'london',
+		'paris',
+		'prague',
+		'osaka',
+	]);
+	for (const hardfork of ['berlin', 'london', 'paris']) {
+		expect(c.hardforkRefusals[hardfork]).not.toBe('DID_NOT_THROW');
+		expect(c.hardforkRefusals[hardfork]).toContain('EIP-3860');
+		expect(c.hardforkRefusals[hardfork]).toContain('intrinsic-gas.ts');
+	}
 	expect(c.hardforkRefusals.prague).not.toBe('DID_NOT_THROW');
 	expect(c.hardforkRefusals.prague).toContain('EIP-7623');
 	expect(c.hardforkRefusals.prague).toContain('intrinsic-gas.ts');
@@ -169,13 +184,7 @@ test('revm engine: same results + same gas as @ethereumjs/evm, on the node own s
 	}
 	// ...and the fork the node actually runs is untouched
 	expect(c.cancunAdmitted).toBe(true);
-	expect(c.admittedHardforks).toEqual([
-		'berlin',
-		'london',
-		'paris',
-		'shanghai',
-		'cancun',
-	]);
+	expect(c.admittedHardforks).toEqual(['shanghai', 'cancun']);
 
 	// THE INVARIANT, asserted against the engine itself: on every hardfork the
 	// table admits, the number `eth_estimateGas` returned for a calldata-heavy
@@ -196,6 +205,29 @@ test('revm engine: same results + same gas as @ethereumjs/evm, on the node own s
 	// specs the table does not admit.
 	expect(c.estimateOnPrague).toContain('GasFloorMoreThanGasLimit');
 	expect(c.budgetOnOsaka).toContain('TxGasLimitGreaterThanCap');
+
+	// AND THE PROTOCOL GETS A VOTE, because the node and revm agree about
+	// intrinsic gas by construction (the engine subtracts what the node adds), so
+	// a term that is wrong AT A FORK is wrong on both sides and their agreement
+	// cannot see it. `intrinsicGas()` charges the EIP-3860 initcode word cost with
+	// no fork gate, so every admitted fork must be one where the protocol charges
+	// it too — judged by `@ethereumjs/common`'s activation table (what the node's
+	// own `runTx` path charges) and by revm's measured per-word charge.
+	for (const hardfork of c.admittedHardforks as string[]) {
+		expect(`${hardfork}: EIP-3860 active ${c.eip3860Active[hardfork]}`).toBe(
+			`${hardfork}: EIP-3860 active true`,
+		);
+		expect(
+			`${hardfork}: revm charges ${c.initcodeWordCostCharged[hardfork]}/word`,
+		).toBe(`${hardfork}: revm charges 2/word`);
+	}
+	// ...and the counter-example that makes the pre-Shanghai refusals load-bearing:
+	// on MERGE, the last fork before EIP-3860, revm charges the word cost the
+	// protocol does not, so admitting it would have been agreement on a wrong
+	// number. Measurements:
+	// docs/spikes/intrinsic-gas-charges-eip-3860-on-forks-that-predate-it/.
+	expect(c.eip3860ActiveOnParis).toBe(false);
+	expect(c.initcodeWordCostOnMerge).toBe(2);
 
 	// one engine, one node: re-using a connected engine is refused rather than
 	// silently re-pointing the first node's reads at the second node's state

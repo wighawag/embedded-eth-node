@@ -326,15 +326,20 @@ Caveats, all of them real:
   depth ([ADR 0005](docs/adr/0005-revm-reads-the-nodes-state-through-simplestatemanagers-stacks.md)).
   `createNode({stateMode:'trie', engine: revm})` **throws at construction**,
   naming the reason.
-- **Only the hardforks it can COST.** The engine serves `berlin`, `london`,
-  `paris`, `shanghai` and `cancun` (the node runs Cancun), and refuses `prague`
-  and `osaka` at construction, naming the EIP. revm enforces EIP-7623's calldata
-  floor from Prague on, and the node's shared intrinsic-gas arithmetic does not
-  compute it, so `eth_estimateGas` could hand you a gas limit revm itself would
-  reject (`GasFloorMoreThanGasLimit`) — and a client uses an estimate as the
-  transaction's gas limit. Osaka additionally caps a transaction's gas limit
-  (EIP-7825) below this node's default read budget. Measurements:
-  [`docs/spikes/prague-intrinsic-gas-floor-or-refuse/`](docs/spikes/prague-intrinsic-gas-floor-or-refuse/measurements.md);
+- **Only the hardforks it can COST.** The engine serves `shanghai` and `cancun`
+  (the node runs Cancun) and refuses every other fork at construction, naming
+  the EIP. Above that range, revm enforces EIP-7623's calldata floor from Prague
+  on and the node's shared intrinsic-gas arithmetic does not compute it, so
+  `eth_estimateGas` could hand you a gas limit revm itself would reject
+  (`GasFloorMoreThanGasLimit`) — and a client uses an estimate as the
+  transaction's gas limit; Osaka additionally caps a transaction's gas limit
+  (EIP-7825) below this node's default read budget. Below it, `berlin`, `london`
+  and `paris` predate EIP-3860 while both this node and revm charge its initcode
+  word cost anyway, so a deployment estimate there over-charges the protocol by
+  2 gas per initcode word — the two engines agreeing is not the same as either
+  being right. Measurements:
+  [`docs/spikes/prague-intrinsic-gas-floor-or-refuse/`](docs/spikes/prague-intrinsic-gas-floor-or-refuse/measurements.md)
+  and [`docs/spikes/intrinsic-gas-charges-eip-3860-on-forks-that-predate-it/`](docs/spikes/intrinsic-gas-charges-eip-3860-on-forks-that-predate-it/measurements.md);
   reasoning: [ADR 0008](docs/adr/0008-the-revm-engine-admits-only-hardforks-it-can-cost.md).
   `REVM_SPEC_BY_HARDFORK` and `REVM_REFUSED_HARDFORKS` are exported if you want
   to ask in code.

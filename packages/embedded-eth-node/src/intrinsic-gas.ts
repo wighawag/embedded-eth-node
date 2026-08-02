@@ -12,14 +12,31 @@
  * charges none. Two copies of this formula would drift and the drift would show
  * up as an `eth_estimateGas` that differs by engine.
  *
- * WHAT IS DELIBERATELY NOT HERE: EIP-7623's calldata floor (post-Prague, a
- * transaction pays at least `21000 + 10` gas per calldata token). It is not a
- * term of this formula — it is a floor on the transaction's TOTAL gas, so it
- * cannot be added here without both callers also learning about it. Rather than
- * cost a fork half-correctly, `embedded-eth-node/revm` REFUSES Prague and Osaka
- * (`REVM_REFUSED_HARDFORKS` in ./revm.ts), and the node runs Cancun. Anyone
- * moving the node's hardfork forward has to do this arithmetic first; see
- * `docs/adr/0008-the-revm-engine-admits-only-hardforks-it-can-cost.md`.
+ * THE FORK RANGE THIS FORMULA IS TRUE FOR IS SHANGHAI..CANCUN, and it has an
+ * end at BOTH sides. The node runs Cancun; `embedded-eth-node/revm` admits
+ * Shanghai and Cancun and refuses everything else BY NAME
+ * (`REVM_REFUSED_HARDFORKS` in ./revm.ts). Move the node's hardfork outside that
+ * range and this file is wrong before anything else is, in one of two ways:
+ *
+ * ABOVE it, EIP-7623's calldata floor (Prague onwards: a transaction pays at
+ * least `21000 + 10` gas per calldata token) is missing and is DELIBERATELY not
+ * here — it is not a term of this formula but a floor on the transaction's TOTAL
+ * gas, so it cannot be added without both callers also learning about it. Rather
+ * than cost a fork half-correctly, the engine refuses Prague and Osaka.
+ *
+ * BELOW it, the EIP-3860 initcode word cost below is charged UNCONDITIONALLY,
+ * and EIP-3860 arrived in Shanghai. That is not an oversight and it is not a
+ * latent bug to be gated: it was measured
+ * (`docs/spikes/intrinsic-gas-charges-eip-3860-on-forks-that-predate-it/`), and
+ * on Berlin, London and Paris `revm-wasm` charges it too, so gating the term
+ * here would leave revm's number unchanged (the engine subtracts this intrinsic
+ * and the node adds it straight back) while moving the default engine's — an
+ * agreed wrong number turned into a cross-engine divergence. The engine refuses
+ * those three forks instead, which is what keeps the term below TRUE for every
+ * fork any part of this node can run.
+ *
+ * Either way: anyone moving the node's hardfork has to do this arithmetic first;
+ * see `docs/adr/0008-the-revm-engine-admits-only-hardforks-it-can-cost.md`.
  */
 export function intrinsicGas(data: Uint8Array, isCreate: boolean): bigint {
 	let gas = 21_000n;
