@@ -40,4 +40,4 @@ Note this matters more than it did when first written: the admitted set is now j
 >
 > The second is small and factual: the ADR cites `probe.mjs` when the file is `probe-hardfork-costing.mjs`. Keep the surrounding text intact; only the name is wrong.
 >
-> Do NOT re-open which forks are admitted, and do not change any refusal message's content. This task hardens and tidies; re-admission is `readmit-prague-and-osaka-once-the-node-can-cost-them`.
+> Do NOT re-open which forks are admitted, and do not change any refusal message's content. This task hardens and tidies; re-admission is `readmit-refused-hardforks-once-the-node-can-cost-them`.
