@@ -38,4 +38,5 @@ The differential conformance battery grew two steps for the two divergences no
 gas bar can see: one that reads the block-environment opcodes THROUGH A CONTRACT
 and diffs them (gas is identical either way), and one that pins whether a
 value-bearing read succeeds or fails per sender (a rejected read charges no gas
-at all). Both run in both state modes and on both engines.
+at all). Both run on both engines: in both state modes on the default engine, and
+in `stateMode:'none'` on revm, which refuses `'trie'` at construction.
