@@ -16,6 +16,10 @@
  *   - BLOCKHASH answers with the node's real block hashes
  *   - both wasm delivery shapes (bundler-resolved asset, runtime-fetched URL)
  *   - `stateMode:'trie'` is refused at construction, naming the reason
+ *   - an engine asked for a read BEFORE a node bound it refuses, rather than
+ *     costing that read at a fork the caller never chose
+ *   - the two exported hardfork tables cannot be EDITED by a consumer, so the
+ *     construction guard cannot be assigned away from outside
  *   - a hardfork the node cannot cost CORRECTLY is refused at construction,
  *     naming the EIP and where to look — whether revm enforces a rule the node
  *     does not implement, or the two implement one the protocol does not have
@@ -178,6 +182,16 @@ test('revm engine: same results + same gas as @ethereumjs/evm, on the node own s
 	expect(c.trieRefusal).toContain('trie');
 	expect(c.trieRefusal).toMatch(/revm/i);
 
+	// ...and an engine asked to READ before a node bound it refuses too, naming
+	// what is missing and what to do. `createNode()` always connects first, so this
+	// edge is reachable only by hand-driving a `ReadEngine` — which is why nothing
+	// but this assertion keeps it alive through a refactor. Guessing a fork here
+	// would answer with an estimate computed under rules the caller never chose.
+	expect(c.unboundCallRefusal).not.toBe('DID_NOT_THROW');
+	expect(c.unboundCallRefusal).toContain('connect()');
+	expect(c.unboundCallRefusal).toContain('intrinsic gas');
+	expect(c.unboundCallRefusal).toMatch(/createNode/i);
+
 	// a HARDFORK the engine cannot cost is refused the same way. The node runs
 	// Cancun, so this guard is unreachable through `createNode()` — which is the
 	// point: it fires the day the node's hardfork moves, instead of the node
@@ -203,6 +217,25 @@ test('revm engine: same results + same gas as @ethereumjs/evm, on the node own s
 		'shanghai',
 		'cancun',
 	]);
+
+	// ...AND THAT GUARD CANNOT BE ASSIGNED AWAY. The tables are public so "which
+	// forks does this engine serve" is answerable without provoking a throw, and
+	// `Readonly` is erased at runtime, so before `Object.freeze` one assignment from
+	// outside re-admitted a fork whose estimate revm itself rejects. Measured as a
+	// runtime property (a type cannot be measured): both tables report frozen, the
+	// two edits a re-admitter would make leave them exactly as they were, and the
+	// construction guard still refuses `prague` afterwards in the same words.
+	expect(c.tablesFrozen).toBe(true);
+	expect(c.admittedAfterEditAttempt).toEqual([
+		'berlin',
+		'london',
+		'paris',
+		'shanghai',
+		'cancun',
+	]);
+	expect(c.refusedAfterEditAttempt).toEqual(['prague', 'osaka']);
+	expect(c.pragueRefusalAfterEditAttempt).toBe(c.hardforkRefusals.prague);
+	expect(c.pragueRefusalAfterEditAttempt).toContain('EIP-7623');
 
 	// THE INVARIANT, asserted against the engine itself: on every hardfork the
 	// table admits, the number `eth_estimateGas` returned for a calldata-heavy

@@ -39,9 +39,17 @@
  *      runtime-fetched URL, through the same code path.
  *   7. `stateMode:'trie'` is REFUSED at construction, naming the reason, rather
  *      than constructing and failing at the first opcode.
+ *   7b. An engine asked for a READ before a node bound it refuses, rather than
+ *      guessing a fork and costing the read under rules the caller never chose.
+ *      `createNode()` connects first, so only a consumer hand-driving a
+ *      `ReadEngine` reaches it, and only this assertion keeps it alive.
  *   8. One engine instance serves ONE node: handing the same engine to a second
  *      `createNode()` is refused, rather than silently re-pointing the first
  *      node's reads at the second node's state.
+ *   8b. The two exported hardfork tables are FROZEN: the edits a consumer would
+ *      make to re-admit a refused fork do not take, and the construction guard
+ *      still refuses that fork afterwards. `Readonly` is a compile-time claim
+ *      and is erased at runtime, so this is the only place the claim is true.
  *   9. Every hardfork the engine ADMITS accepts what the node hands it: the
  *      `eth_estimateGas` for a calldata-heavy call is a gas limit revm will run
  *      (never `GasFloorMoreThanGasLimit`), and so is the node's default read
@@ -803,6 +811,40 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 		out.trieRefusal = String((e as Error)?.message ?? e);
 	}
 
+	// ---------- an engine asked to READ before a node bound it ----------
+	// `call()` needs the node's `Common` to compute the intrinsic gas it SUBTRACTS
+	// from revm's `totalGasSpent`, and `connect()` is what binds it. The seam always
+	// connects first, so this is unreachable through `createNode()` and only a
+	// consumer hand-driving a `ReadEngine` reaches it — which is exactly why it is
+	// asserted rather than merely written: a refusal nothing measures is one
+	// refactor away from becoming a read costed at a fork the caller never chose.
+	// Same shape as the store's own unbound guard (../../src/revm-state-store.ts),
+	// whose write methods are checked above.
+	const unconnected = await createRevmEngine({wasm: bundlerResolvedWasm});
+	try {
+		await unconnected.call({
+			from: createAddressFromString(account.address),
+			to: createAddressFromString(CALLDATA_SINK_ADDR),
+			data: new Uint8Array(),
+			value: 0n,
+			gasLimit: 30_000_000n,
+			block: createBlock(
+				{
+					header: {
+						number: 1n,
+						gasLimit: 30_000_000n,
+						timestamp: SHARED_BLOCK_ENV.timestamp,
+						baseFeePerGas: SHARED_BASE_FEE,
+					},
+				},
+				{common: seamCommon},
+			),
+		});
+		out.unboundCallRefusal = 'DID_NOT_THROW';
+	} catch (e) {
+		out.unboundCallRefusal = String((e as Error)?.message ?? e);
+	}
+
 	// ---------- the hardforks this engine ADMITS, and the ones it REFUSES ----------
 	// The node runs Cancun and nothing a consumer can pass changes that, so this is
 	// the one place the guard is reachable: `connect` is handed a `Common` on each
@@ -836,6 +878,58 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 	// ...and the fork the node actually runs is still admitted, silently and
 	// without ceremony: the default path must be demonstrably untouched.
 	out.cancunAdmitted = (await connectOn('cancun')) === 'DID_NOT_THROW';
+
+	// ---------- and the tables cannot be EDITED from outside ----------
+	// `Readonly<Record<...>>` is a compile-time claim that is erased at runtime, so
+	// without `Object.freeze` the guard above could be removed by one assignment
+	// through the exported object — and a consumer who re-admitted `prague` that way
+	// would get an `eth_estimateGas` revm itself rejects. What is measured is the
+	// RUNTIME property, not the type: both tables report frozen, the two edits a
+	// re-admitter would make do not take, and the guard STILL refuses the fork
+	// afterwards, with the same words.
+	const pragueRefusalText = REVM_REFUSED_HARDFORKS.prague;
+	const tableEditOutcomes: Record<string, string> = {};
+	for (const [what, edit] of [
+		[
+			'admit prague',
+			() => {
+				(REVM_SPEC_BY_HARDFORK as Record<string, SpecName>).prague = 'PRAGUE';
+			},
+		],
+		[
+			'drop the prague refusal',
+			() => {
+				delete (REVM_REFUSED_HARDFORKS as Record<string, string>).prague;
+			},
+		],
+	] as const) {
+		try {
+			edit();
+			// A frozen object under sloppy mode DROPS the write silently; under strict
+			// mode it throws. Both leave the table intact, which is the property under
+			// test, so the outcome is RECORDED and the readings below are what judge it.
+			tableEditOutcomes[what] = 'no error';
+		} catch (e) {
+			tableEditOutcomes[what] = `threw: ${String((e as Error)?.message ?? e)}`;
+		}
+	}
+	out.tableEditOutcomes = tableEditOutcomes;
+	out.tablesFrozen =
+		Object.isFrozen(REVM_SPEC_BY_HARDFORK) &&
+		Object.isFrozen(REVM_REFUSED_HARDFORKS);
+	out.admittedAfterEditAttempt = Object.keys(REVM_SPEC_BY_HARDFORK);
+	out.refusedAfterEditAttempt = Object.keys(REVM_REFUSED_HARDFORKS);
+	out.pragueRefusalAfterEditAttempt = await connectOn('prague');
+	// If either edit actually TOOK (i.e. the freeze regressed), put the tables back,
+	// so the rest of this run still measures the real ones and the regression is
+	// reported by the four readings above rather than as noise in every later
+	// assertion. On frozen tables both statements are no-ops (or throw, in strict
+	// mode) and nothing is restored because nothing moved.
+	try {
+		delete (REVM_SPEC_BY_HARDFORK as Record<string, SpecName>).prague;
+		(REVM_REFUSED_HARDFORKS as Record<string, string>).prague =
+			pragueRefusalText;
+	} catch {}
 
 	// ---------- what the node hands the engine, judged BY the engine ----------
 	// `eth_estimateGas` is not decoration: viem uses the number as the gas LIMIT of

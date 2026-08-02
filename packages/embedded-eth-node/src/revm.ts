@@ -104,14 +104,40 @@ export interface RevmEngineOptions {
  * the build otherwise. See {@link REVM_REFUSED_HARDFORKS} and
  * `docs/adr/0008-the-revm-engine-admits-only-hardforks-it-can-cost.md`.
  * Anything not in either table is refused by name.
+ *
+ * FROZEN, AND NOT MERELY `Readonly`. The type annotation is erased at runtime, so
+ * until this was frozen a consumer could re-admit a refused fork with a single
+ * assignment through the export (`REVM_SPEC_BY_HARDFORK.prague = 'PRAGUE'`) and
+ * `connect` below would wave it through — an `eth_estimateGas` revm itself then
+ * rejects (`GasFloorMoreThanGasLimit`). A guard a stray assignment removes is
+ * weaker than it reads, and these tables are PUBLIC precisely so the admitted set
+ * can be read without provoking a throw, which is a reading surface, not an
+ * editing one. The freeze is shallow and that is total here: every value is a
+ * string. Asserted in `test/revm-engine.spec.ts` as a RUNTIME property (both
+ * tables frozen, a re-admitting edit leaves them unchanged, and the guard still
+ * refuses the fork afterwards), because a type cannot be measured.
+ *
+ * THE DECISION UNDER THAT, since the alternative was live: freezing is enough,
+ * and `connect` deliberately keeps reading these objects rather than a snapshot
+ * taken at module load. A snapshot would make the GUARD robust while leaving the
+ * EXPORT a lie — a consumer who assigned `prague` would read a table saying
+ * `prague` is served while every read of it was refused, i.e. two answers to the
+ * one question these exports exist to answer. It would also fork the truth in
+ * two: the table a reader inspects and the table the guard consults, kept in step
+ * by nothing. Freezing removes the divergence at its source instead of tolerating
+ * it, and it fails at the CONSUMER's own line (a `TypeError` under strict mode,
+ * a dropped write under sloppy mode) rather than silently somewhere else. If a
+ * later table ever has to be built at runtime rather than written literally here,
+ * freeze it at the end of construction; do not reach for the snapshot.
  */
-export const REVM_SPEC_BY_HARDFORK: Readonly<Record<string, SpecName>> = {
-	berlin: 'BERLIN',
-	london: 'LONDON',
-	paris: 'MERGE',
-	shanghai: 'SHANGHAI',
-	cancun: 'CANCUN',
-};
+export const REVM_SPEC_BY_HARDFORK: Readonly<Record<string, SpecName>> =
+	Object.freeze({
+		berlin: 'BERLIN',
+		london: 'LONDON',
+		paris: 'MERGE',
+		shanghai: 'SHANGHAI',
+		cancun: 'CANCUN',
+	});
 
 /**
  * Hardforks revm HAS a spec for and this engine still refuses, each with the
@@ -134,22 +160,28 @@ export const REVM_SPEC_BY_HARDFORK: Readonly<Record<string, SpecName>> = {
  * `docs/spikes/prague-intrinsic-gas-floor-or-refuse/` and
  * `docs/spikes/intrinsic-gas-charges-eip-3860-on-forks-that-predate-it/` (§6 for
  * the re-measurement on `revm-wasm@0.3.1`, which left both of these standing).
+ *
+ * FROZEN for the same reason as {@link REVM_SPEC_BY_HARDFORK}, where the freeze
+ * decision (and why the guard reads these objects rather than a load-time
+ * snapshot) is recorded: deleting an entry here is the other half of the
+ * one-assignment re-admission the freeze exists to refuse.
  */
-export const REVM_REFUSED_HARDFORKS: Readonly<Record<string, string>> = {
-	prague:
-		`revm enforces the EIP-7623 calldata floor (a transaction pays at least ` +
-		`21000 + 10 gas per calldata token, tokens being 1 per zero byte and 4 per ` +
-		`non-zero byte) and this node's shared intrinsic-gas arithmetic ` +
-		`(src/intrinsic-gas.ts) computes only the pre-Prague formula, so ` +
-		`eth_estimateGas would return a gas limit revm itself rejects with ` +
-		`GasFloorMoreThanGasLimit for a calldata-heavy call — and a client uses an ` +
-		`estimate as the transaction's gas limit`,
-	osaka:
-		`it inherits Prague's EIP-7623 calldata floor, which src/intrinsic-gas.ts ` +
-		`does not compute, and adds the EIP-7825 transaction gas limit cap of ` +
-		`16777216, which is below the node's default read budget of 30000000 — so ` +
-		`an ordinary eth_call would be rejected outright with TxGasLimitGreaterThanCap`,
-};
+export const REVM_REFUSED_HARDFORKS: Readonly<Record<string, string>> =
+	Object.freeze({
+		prague:
+			`revm enforces the EIP-7623 calldata floor (a transaction pays at least ` +
+			`21000 + 10 gas per calldata token, tokens being 1 per zero byte and 4 per ` +
+			`non-zero byte) and this node's shared intrinsic-gas arithmetic ` +
+			`(src/intrinsic-gas.ts) computes only the pre-Prague formula, so ` +
+			`eth_estimateGas would return a gas limit revm itself rejects with ` +
+			`GasFloorMoreThanGasLimit for a calldata-heavy call — and a client uses an ` +
+			`estimate as the transaction's gas limit`,
+		osaka:
+			`it inherits Prague's EIP-7623 calldata floor, which src/intrinsic-gas.ts ` +
+			`does not compute, and adds the EIP-7825 transaction gas limit cap of ` +
+			`16777216, which is below the node's default read budget of 30000000 — so ` +
+			`an ordinary eth_call would be rejected outright with TxGasLimitGreaterThanCap`,
+	});
 
 /**
  * Build a revm-backed read engine.

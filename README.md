@@ -346,7 +346,9 @@ Caveats, all of them real:
   and [`docs/spikes/clause-b-covers-only-eip-3860-not-the-rest-of-the-formula/`](docs/spikes/clause-b-covers-only-eip-3860-not-the-rest-of-the-formula/measurements.md);
   reasoning: [ADR 0008](docs/adr/0008-the-revm-engine-admits-only-hardforks-it-can-cost.md).
   `REVM_SPEC_BY_HARDFORK` and `REVM_REFUSED_HARDFORKS` are exported if you want
-  to ask in code.
+  to ask in code. They are frozen: a reading surface, not an editing one, so
+  re-admitting a fork by assigning to one of them fails at your assignment
+  rather than quietly removing the guard.
 - **One engine instance serves one node.** `connect` binds it; handing a
   connected engine to a second `createNode()` throws (it would otherwise
   re-point the FIRST node's reads at the second node's state). Call

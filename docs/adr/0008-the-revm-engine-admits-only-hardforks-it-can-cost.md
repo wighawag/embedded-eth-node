@@ -10,7 +10,7 @@
 
 ## The measurements this rests on
 
-All numbers from `docs/spikes/prague-intrinsic-gas-floor-or-refuse/` (`probe.mjs`, run against the same `revm-wasm@0.3.0` artifact the engine ships), for a call carrying 100 non-zero calldata bytes:
+All numbers from `docs/spikes/prague-intrinsic-gas-floor-or-refuse/` (`probe-hardfork-costing.mjs`, run against the same `revm-wasm@0.3.0` artifact the engine ships), for a call carrying 100 non-zero calldata bytes:
 
 | spec | node's arithmetic (`21000 + 16/byte`) | revm's verdict at that gas limit |
 | --- | --- | --- |
@@ -53,7 +53,9 @@ The scope was measured too, because "this artifact ignores the spec" would have 
 
 Clause (b) is now enforced where clause (a) already was, in `test/revm-engine.spec.ts`: for every admitted fork, `@ethereumjs/common` must say EIP-3860 is active (the table the node's own `runTx` consults) and revm's per-word charge is MEASURED by delta across an initcode word boundary. Re-admitting a pre-Shanghai fork fails the build, with `paris` asserted as the standing counter-example. What clause (b) needs in general is a witness independent of both parties; `@ethereumjs/common` is the one this repo already trusts, and it is free.
 
-Decisions taken while amending this: `work/notes/observations/decisions-intrinsic-gas-charges-eip-3860-on-forks-that-predate-it-2026-08-02.md`.
+> *Correction 2026-08-02, to that one sentence only:* `paris` stopped being the standing counter-example within hours, when the second amendment below re-admitted it along with `berlin` and `london`. The standing counter-examples are now the still-refused `prague` and `osaka` for clause (a), and `petersburg` / `istanbul` measured from both sides for the EIP-2028 boundary under clause (b) (third amendment). What the sentence claims about the CHECK is unchanged: re-admitting a fork this node mis-costs still fails the build.
+
+Decisions taken while amending this were recorded in a capture-bucket note, ratified by the maintainer, and discharged by deletion in commit `38e0164` (`work/protocol/WORK-CONTRACT.md`: a note leaves its bucket by deletion, and git history is the archive). That commit names where each decision's reasoning now lives; for this amendment it is the refusal strings in `src/revm.ts`, the fork-range comment in `src/intrinsic-gas.ts`, and the re-runnable probes in `docs/spikes/prague-intrinsic-gas-floor-or-refuse/` and `docs/spikes/intrinsic-gas-charges-eip-3860-on-forks-that-predate-it/`.
 
 > **Superseded in its remedy, not in its rule, by the second amendment below.** Everything above about WHY those three forks were mis-costed stands and is the reason the fork gate exists. The paragraph headed "Why the fix is a refusal and not a fork gate in the shared formula" was true against `revm-wasm@0.3.0` ONLY, and is void against `0.3.1`.
 
@@ -80,7 +82,7 @@ So `src/intrinsic-gas.ts` now takes the node's `Common` and charges the initcode
 
 **What the assertions became.** Clause (b) used to read "EIP-3860 must be active at every admitted fork", which an ungated formula satisfied by construction. It now reads "the node charges the EIP-3860 term exactly where the protocol does", measured three independent ways per admitted fork: `@ethereumjs/common`'s activation table, revm's per-word charge by delta across an initcode word boundary, and the node's own `intrinsicGas()` by the SAME delta. Those readings are only load-bearing because the admitted set now SPANS the EIP-3860 boundary, so the test asserts that too. Added alongside them: a CREATE-shaped `eth_estimateGas` computed on BOTH engines at every admitted fork, which is the divergence this amendment closes and which nothing previously looked at.
 
-Decisions taken while amending this: `work/notes/observations/decisions-upgrade-0-3-1-gate-eip-3860-and-readmit-pre-shanghai-forks-2026-08-02.md`.
+Decisions taken while amending this were likewise ratified and discharged by deletion, in commit `40e0c73`; their reasoning is carried by this section, by the `Common`-not-a-hardfork-name rationale in `src/intrinsic-gas.ts`, and by the per-fork assertions in `test/revm-engine.spec.ts`.
 
 > **Its account of what clause (b) enforces is completed by the third amendment below.** The three readings described here are real and unchanged; they cover the EIP-3860 term, which is one of the five terms the formula bakes in.
 
