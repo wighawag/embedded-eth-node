@@ -8,7 +8,9 @@
  *     both engines, with the same result and the same gas
  *   - a VALUE-BEARING read succeeds or fails IDENTICALLY on both engines: the
  *     simulation switches relax a transaction's validity rules, never the value
- *     transfer itself
+ *     transfer itself — and the failure is checked for its SHAPE (it starts at
+ *     exactly `balance + 1`, returns no callee answer, and names a shortfall of
+ *     funds in each engine's own words), never merely for having happened
  *   - the BLOCK ENVIRONMENT a contract reads (BASEFEE / PREVRANDAO / COINBASE /
  *     NUMBER / TIMESTAMP / GASLIMIT) is the node's own, and identical on both
  *   - BLOCKHASH answers with the node's real block hashes
@@ -131,6 +133,22 @@ test('revm engine: same results + same gas as @ethereumjs/evm, on the node own s
 		),
 	);
 	expect(c.valueOutcomesCorrect).toBe(true);
+	// ...and the rejection is an AFFORDABILITY rejection, read at the engine seam
+	// (the node flattens every engine failure into one `execution reverted`, so
+	// the words only exist below it). Both engines are held to the same sentence:
+	// value == balance succeeds, value == balance + 1 fails, names a lack of
+	// funds, carries no callee answer. A `catch`-anything bar would pass with any
+	// of those four clauses false.
+	expect(c.valueSeamOutcomes.default).toBe(c.valueSeamExpected);
+	expect(c.valueSeamOutcomes.revm).toBe(c.valueSeamExpected);
+	// The two engines say it in their OWN words, which is why the predicate above
+	// is a vocabulary rather than a string: neither message may be asserted on the
+	// other engine.
+	expect(c.valueFailureShapes.default).toMatch(/insufficient balance/i);
+	expect(c.valueFailureShapes.revm).toMatch(/LackOfFundForMaxFee/);
+	// ...and that vocabulary REFUSES every other failure this read path produces,
+	// so an unrelated error cannot be mistaken for an unaffordable transfer.
+	expect(c.lackOfFundsVocabularyRejects).toBe(true);
 
 	// the BLOCK ENVIRONMENT read through a contract is the node's own, and the
 	// SAME on both engines. Gas cannot see this class of bug: these opcodes are

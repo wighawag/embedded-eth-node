@@ -59,6 +59,7 @@ import {
 	blockEnvProbeAbi,
 	blockEnvProbeRuntimeBytecode,
 } from './block-env-probe.js';
+import {classifyValueRead, OK, REJECTED} from './affordability.js';
 
 const PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const CHAIN_ID = 31337;
@@ -81,6 +82,15 @@ const GENESIS_BALANCE = 10n ** 24n;
  */
 const VALUE_SINK_ADDR = '0x0000000000000000000000000000000000005151';
 const UNFUNDED_SENDER = '0x00000000000000000000000000000000dead0001';
+/**
+ * The value-bearing step's NEGATIVE CONTROL callee: runtime code that reverts
+ * WITH one byte of return data (`PUSH1 ff, PUSH0, MSTORE8, PUSH1 01, PUSH0,
+ * REVERT`). It fails the same call the same way a refused transfer does — an
+ * engine failure, JSON-RPC code 3 — and is told apart by the CALLEE ANSWER in
+ * its return data, which a refused transfer never produces.
+ */
+const REVERT_WITH_REASON_ADDR = '0x000000000000000000000000000000000bad0bad';
+const REVERT_WITH_REASON_CODE = '0x60ff5f5360015ffd';
 /** The node's default `from` when an `eth_call` names no sender. */
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 const account = privateKeyToAccount(PK);
@@ -939,6 +949,28 @@ async function runBattery(
 	//     THE ORACLE IS ABSOLUTE, not the reference EVM: what is asserted is
 	//     whether the READ succeeded or failed, per sender and per value, so both
 	//     engines are held to the same statement rather than to each other.
+	//
+	//     AND A FAILURE IS NOT ACCEPTED ON THE STRENGTH OF HAVING FAILED. Each
+	//     negative case must fail in the SHAPE of a refused transfer (an engine
+	//     rejection, JSON-RPC code 3, carrying no CALLEE answer), and the
+	//     rejection must track the sender's balance TO THE WEI: `value == balance`
+	//     succeeds and `value == balance + 1` fails, same sender, same call site.
+	//     Nothing but a balance check draws that line, so an unrelated failure (a
+	//     param refusal, a construction error, a callee that reverted with a
+	//     reason) turns this step RED instead of passing as "it did not succeed".
+	//     Two such failures are ISSUED below as negative controls, so the step's
+	//     ability to go red for the right reason is demonstrated rather than
+	//     asserted.
+	//
+	//     What is NOT checkable here is the engine's own words for it
+	//     (`insufficient balance` / `LackOfFundForMaxFee`): the node flattens
+	//     every engine error into one `execution reverted`, so those are asserted
+	//     one layer down, at the seam, in ./revm-engine.ts. The one trace that
+	//     does survive is revm echoing its message as the error's `data` where
+	//     `@ethereumjs/evm` returns `0x` — a divergence ./affordability.ts admits
+	//     deliberately and
+	//     work/notes/observations/revm-validation-errors-surface-their-message-as-eth-call-return-data.md
+	//     records. See ./affordability.ts for the whole classification.
 	{
 		const m: string[] = [];
 		const node4 = await createNode({
@@ -961,6 +993,20 @@ async function runBattery(
 			m.push(
 				`default sender (zero address) holds ${zeroAddressBalance}, so its cases prove nothing`,
 			);
+		// The funded sender's balance is READ rather than assumed, because the
+		// boundary cases below are stated in terms of it: the rejection must begin
+		// at exactly `balance + 1`, which is only a statement about affordability if
+		// `balance` is the node's own number.
+		const fundedBalance = BigInt(
+			(await node4.request({
+				method: 'eth_getBalance',
+				params: [account.address, 'latest'],
+			})) as string,
+		);
+		if (fundedBalance !== GENESIS_BALANCE)
+			m.push(
+				`funded sender holds ${fundedBalance}, expected the genesis balance ${GENESIS_BALANCE}`,
+			);
 		// A plain value transfer to a CODELESS address, so what is measured is the
 		// transfer and nothing a contract might do with it.
 		const cases: {label: string; from?: string; value: bigint; ok: boolean}[] =
@@ -981,6 +1027,15 @@ async function runBattery(
 					value: 1n,
 					ok: true,
 				},
+				// The WHOLE balance, to the wei: the last value the sender can afford,
+				// and the case that makes the rejection below a statement about
+				// affordability rather than about value-bearing reads in general.
+				{
+					label: 'funded sender, value == balance',
+					from: account.address,
+					value: fundedBalance,
+					ok: true,
+				},
 				// The three a fabricated balance would wrongly answer.
 				{
 					label: 'unfunded sender, value 1 wei',
@@ -993,32 +1048,63 @@ async function runBattery(
 					value: 1n,
 					ok: false,
 				},
+				// ...and the other side of the wei-exact boundary: one wei more than
+				// the sender holds, same sender, same call site.
 				{
-					label: 'funded sender, value above balance',
+					label: 'funded sender, value == balance + 1',
 					from: account.address,
-					value: GENESIS_BALANCE + 1n,
+					value: fundedBalance + 1n,
 					ok: false,
 				},
 			];
+		/** One `eth_call` at this step's call site, classified (./affordability.ts). */
+		const readWith = (p: Record<string, unknown>) =>
+			classifyValueRead(() =>
+				node4.request({method: 'eth_call', params: [p, 'latest']}),
+			);
 		for (const c of cases) {
-			let outcome: string;
-			try {
-				await node4.request({
-					method: 'eth_call',
-					params: [
-						{
-							...(c.from ? {from: c.from} : {}),
-							to: VALUE_SINK_ADDR,
-							value: '0x' + c.value.toString(16),
-						},
-						'latest',
-					],
-				});
-				outcome = 'ok';
-			} catch {
-				outcome = 'failed';
-			}
-			cmp(m, `eth_call: ${c.label}`, outcome, c.ok ? 'ok' : 'failed');
+			const outcome = await readWith({
+				...(c.from ? {from: c.from} : {}),
+				to: VALUE_SINK_ADDR,
+				value: '0x' + c.value.toString(16),
+			});
+			cmp(m, `eth_call: ${c.label}`, outcome, c.ok ? OK : REJECTED);
+		}
+		// ---- NEGATIVE CONTROLS: the step must be able to go RED ----
+		// Two REAL failures at the SAME call site, neither of them a refused
+		// transfer. Under the bare `catch` this step used to have, both classified
+		// as "failed" and would have satisfied any negative case above. Each must
+		// now classify as ITSELF — neither `ok` nor a rejection — or this step is
+		// back to proving only that something threw.
+		await node4.request({
+			method: 'evm_setCode',
+			params: [REVERT_WITH_REASON_ADDR, REVERT_WITH_REASON_CODE],
+		});
+		const controls: {label: string; params: Record<string, unknown>}[] = [
+			{
+				// A malformed sender: the node refuses to parse it, long before any
+				// engine sees a transfer.
+				label: 'malformed sender address',
+				params: {from: '0xnotanaddress', to: VALUE_SINK_ADDR, value: '0x1'},
+			},
+			{
+				// A callee that REVERTS WITH A REASON, from a sender who can afford
+				// the value: an engine failure (code 3) like the real rejection, told
+				// apart by the return data a refused transfer never produces.
+				label: 'callee reverts with return data',
+				params: {
+					from: account.address,
+					to: REVERT_WITH_REASON_ADDR,
+					value: '0x1',
+				},
+			},
+		];
+		for (const control of controls) {
+			const outcome = await readWith(control.params);
+			if (outcome === OK || outcome === REJECTED)
+				m.push(
+					`negative control '${control.label}' classified as '${outcome}', so an unrelated failure would pass this step`,
+				);
 		}
 		steps.push({label: 'value-bearing read affordability', mismatches: m});
 		await node4.dispose();

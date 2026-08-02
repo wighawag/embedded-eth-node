@@ -30,7 +30,11 @@
  *   5d. A VALUE-BEARING read still obeys the transfer: relaxing a transaction's
  *      validity rules must not relax the value itself, so a read carrying more
  *      ether than the sender holds FAILS on both engines and an affordable one
- *      SUCCEEDS on both.
+ *      SUCCEEDS on both. The rejection is checked for its SHAPE, not merely for
+ *      having happened: it starts at exactly `balance + 1`, carries no CALLEE
+ *      answer, and NAMES a shortfall of funds in each engine's own words
+ *      (`insufficient balance` / `LackOfFundForMaxFee`), read at the engine
+ *      seam because the node flattens both into `execution reverted`.
  *   6. Both wasm delivery shapes work: a bundler-resolved asset and a
  *      runtime-fetched URL, through the same code path.
  *   7. `stateMode:'trie'` is REFUSED at construction, naming the reason, rather
@@ -80,7 +84,7 @@ import {SimpleStateManager} from '@ethereumjs/statemanager';
 import {createEVM} from '@ethereumjs/evm';
 import {createBlock} from '@ethereumjs/block';
 import {createLegacyTx} from '@ethereumjs/tx';
-import {createAddressFromString} from '@ethereumjs/util';
+import {Account, createAddressFromString} from '@ethereumjs/util';
 import {createRevm, MemoryStore, type SpecName} from 'revm-wasm';
 // The BUNDLER-RESOLVED delivery shape: the build resolves the `.wasm` out of the
 // `revm-wasm` package and puts it IN the build (esbuild's `binary` loader here;
@@ -101,6 +105,13 @@ import {
 	blockEnvProbeAbi,
 	blockEnvProbeRuntimeBytecode,
 } from './block-env-probe.js';
+import {
+	classifyValueRead,
+	isCalleeAnswer,
+	namesLackOfFunds,
+	OK,
+	REJECTED,
+} from './affordability.js';
 
 const PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const CHAIN_ID = 31337;
@@ -421,43 +432,102 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 	// and would prove nothing about an unfunded sender. The conformance battery's
 	// own step covers the default sender, on a node that has mined nothing and
 	// with the balance asserted first.
-	const valueCases: {name: string; from: string; value: bigint; ok: boolean}[] =
-		[
-			// The property the zeroed base fee bought, restated with a value of 0.
-			{name: 'unfundedZeroValue', from: UNFUNDED_CALLER, value: 0n, ok: true},
-			{name: 'fundedAffordable', from: account.address, value: 1n, ok: true},
-			// The two a fabricated balance would wrongly answer.
-			{name: 'unfundedOneWei', from: UNFUNDED_CALLER, value: 1n, ok: false},
-			{
-				name: 'fundedAboveBalance',
-				from: account.address,
-				value: FUNDED_BALANCE + 1n,
-				ok: false,
-			},
-		];
+	//
+	// A FAILURE IS NOT ACCEPTED ON THE STRENGTH OF HAVING FAILED. Each outcome is
+	// classified (./affordability.ts): a negative case must fail as an ENGINE
+	// rejection carrying no CALLEE answer, and the rejection must begin at exactly
+	// `balance + 1` on each node's own balance. The engines' own words for it are
+	// asserted one layer down, at the seam, in the section after this one.
+	const fundedBalance: Record<string, bigint> = {};
+	for (const [label, ctx] of [
+		['default', def],
+		['revm', revm],
+	] as const) {
+		// READ, not assumed: both nodes have mined priority-fee-paying transactions
+		// by now (the revm node one more than the default node), so neither holds
+		// `FUNDED_BALANCE` any more — and a boundary stated against a stale number
+		// would be a boundary about nothing.
+		fundedBalance[label] = BigInt(
+			(await ctx.node.request({
+				method: 'eth_getBalance',
+				params: [account.address, 'latest'],
+			})) as string,
+		);
+	}
+	out.fundedBalances = {
+		default: fundedBalance.default.toString(),
+		revm: fundedBalance.revm.toString(),
+	};
+	const valueCases: {
+		name: string;
+		from: string;
+		/** The value to send, given the SENDER's balance on the node under test. */
+		value: (balance: bigint) => bigint;
+		ok: boolean;
+	}[] = [
+		// The property the zeroed base fee bought, restated with a value of 0.
+		{
+			name: 'unfundedZeroValue',
+			from: UNFUNDED_CALLER,
+			value: () => 0n,
+			ok: true,
+		},
+		{
+			name: 'fundedAffordable',
+			from: account.address,
+			value: () => 1n,
+			ok: true,
+		},
+		// The WHOLE balance, to the wei: the last value the sender can afford.
+		{
+			name: 'fundedWholeBalance',
+			from: account.address,
+			value: (balance) => balance,
+			ok: true,
+		},
+		// The three a fabricated balance would wrongly answer.
+		{
+			name: 'unfundedOneWei',
+			from: UNFUNDED_CALLER,
+			value: () => 1n,
+			ok: false,
+		},
+		{
+			name: 'fundedAboveBalance',
+			from: account.address,
+			value: () => FUNDED_BALANCE + 1n,
+			ok: false,
+		},
+		// ...and the other side of the wei-exact boundary: one wei more than the
+		// sender holds, same sender, same call site as `fundedWholeBalance`. Only a
+		// balance check draws a line THERE.
+		{
+			name: 'fundedBalancePlusOne',
+			from: account.address,
+			value: (balance) => balance + 1n,
+			ok: false,
+		},
+	];
 	const valueOutcomes: Record<string, string> = {};
 	const valueExpected: Record<string, string> = {};
 	for (const c of valueCases) {
-		valueExpected[c.name] = c.ok ? 'ok' : 'failed';
+		valueExpected[c.name] = c.ok ? OK : REJECTED;
 		for (const [label, ctx] of [
 			['default', def],
 			['revm', revm],
 		] as const) {
-			try {
-				await ctx.node.request({
+			valueOutcomes[`${c.name}.${label}`] = await classifyValueRead(() =>
+				ctx.node.request({
 					method: 'eth_call',
 					params: [
 						{
 							from: c.from,
 							to: VALUE_SINK_ADDR,
-							value: '0x' + c.value.toString(16),
+							value: '0x' + c.value(fundedBalance[label]).toString(16),
 						},
 					],
-				});
-				valueOutcomes[`${c.name}.${label}`] = 'ok';
-			} catch {
-				valueOutcomes[`${c.name}.${label}`] = 'failed';
-			}
+				}),
+			);
 		}
 	}
 	out.valueOutcomes = valueOutcomes;
@@ -473,6 +543,129 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 			valueOutcomes[`${name}.default`] === valueExpected[name] &&
 			valueOutcomes[`${name}.revm`] === valueExpected[name],
 	);
+
+	// ---------- WHAT THE REJECTION SAYS, at the seam where it still says it ----
+	// Above the seam the two engines are indistinguishable BY DESIGN: the node
+	// flattens every engine failure into one `RpcError(3, 'execution reverted')`,
+	// so the section above can check the SHAPE of a rejection but never its
+	// words. The words exist one layer down, on `ReadEngine.call`'s result, and
+	// the two engines are meant to differ there:
+	//
+	//   `@ethereumjs/evm` : `insufficient balance` (EVMError, thrown by
+	//                       `_reduceSenderBalance`)
+	//   revm             : `Transaction(LackOfFundForMaxFee { fee, balance })`
+	//
+	// So the engines are driven DIRECTLY here, each on its own state carrying one
+	// funded account, and both are held to the same predicate: the failure must
+	// NAME a shortfall of funds ({@link namesLackOfFunds} — a vocabulary, never
+	// one engine's string asserted on the other), must carry no CALLEE answer in
+	// its return data (revm puts its own message there, which ./affordability.ts
+	// tells apart from a contract's), and must start at exactly `balance + 1`.
+	// That is the difference between "this call did not succeed" and "the sender
+	// could not afford this transfer".
+	const seamCommon = new Common({
+		chain: {...Mainnet, chainId: CHAIN_ID, name: 'embedded-eth-node'},
+		// The fork the node pins, so the seam probe fails the way the node would.
+		hardfork: 'cancun',
+	});
+	const SEAM_BALANCE = 10n ** 18n;
+	/**
+	 * One value-bearing read made STRAIGHT to an engine, on a state where the
+	 * sender holds exactly {@link SEAM_BALANCE} — the same request shape
+	 * `node.ts`'s `evmCall` builds, minus the node's error flattening.
+	 */
+	async function valueReadAtSeam(
+		engineKind: 'default' | 'revm',
+		value: bigint,
+	): Promise<{failed: boolean; error: string; calleeAnswer: boolean}> {
+		const stateManager = new SimpleStateManager();
+		await stateManager.putAccount(
+			createAddressFromString(account.address),
+			new Account(0n, SEAM_BALANCE),
+		);
+		let engine: ReadEngine;
+		if (engineKind === 'default') {
+			engine = createEthereumjsReadEngine({
+				evm: await createEVM({common: seamCommon, stateManager}),
+				stateManager,
+			});
+		} else {
+			engine = await createRevmEngine({wasm: bundlerResolvedWasm});
+			await engine.connect!({
+				stateManager,
+				common: seamCommon,
+				getBlockHash: () => undefined,
+				stateMode: 'none',
+			});
+		}
+		const r = await engine.call({
+			from: createAddressFromString(account.address),
+			to: createAddressFromString(VALUE_SINK_ADDR),
+			data: new Uint8Array(),
+			value,
+			gasLimit: 30_000_000n,
+			block: createBlock(
+				{
+					header: {
+						number: 1n,
+						gasLimit: 30_000_000n,
+						timestamp: SHARED_BLOCK_ENV.timestamp,
+						baseFeePerGas: SHARED_BASE_FEE,
+					},
+				},
+				{common: seamCommon},
+			),
+		});
+		return {
+			failed: r.error !== undefined,
+			error: String(r.error ?? ''),
+			calleeAnswer: isCalleeAnswer(r.returnValue),
+		};
+	}
+	const valueFailureShapes: Record<string, string> = {};
+	const valueSeamOutcomes: Record<string, string> = {};
+	for (const kind of ['default', 'revm'] as const) {
+		const overBalance = await valueReadAtSeam(kind, SEAM_BALANCE + 1n);
+		const wholeBalance = await valueReadAtSeam(kind, SEAM_BALANCE);
+		// Recorded verbatim, so the report shows what each engine actually said
+		// rather than only whether a predicate liked it.
+		valueFailureShapes[kind] = overBalance.error;
+		valueSeamOutcomes[kind] = [
+			`balance+1: ${overBalance.failed ? 'failed' : 'SUCCEEDED'}`,
+			namesLackOfFunds(overBalance.error)
+				? 'names a lack of funds'
+				: 'does NOT name a lack of funds',
+			overBalance.calleeAnswer
+				? 'CARRIES a callee answer'
+				: 'no callee return data',
+			`balance: ${wholeBalance.failed ? 'FAILED' : 'succeeded'}`,
+		].join(', ');
+	}
+	out.valueFailureShapes = valueFailureShapes;
+	out.valueSeamOutcomes = valueSeamOutcomes;
+	out.valueSeamExpected =
+		'balance+1: failed, names a lack of funds, no callee return data, balance: succeeded';
+	// ...and the predicate is only worth anything if it REFUSES the failures this
+	// read path can produce for other reasons. These are the real strings (revm's
+	// from `docs/spikes/revm-wasm-upgrade-honest-block-environment/measurements.md`,
+	// the rest from the node and `@ethereumjs/evm`), and none of them may pass as
+	// an affordability rejection.
+	out.lackOfFundsVocabularyRejects = [
+		'execution reverted',
+		'revert',
+		'out of gas',
+		'Transaction(GasPriceLessThanBasefee)',
+		'Transaction(CallerGasLimitMoreThanBlock)',
+		'Transaction(RejectCallerWithCode)',
+		'Invalid address input=0xnotanaddress',
+		'invalid opcode',
+		// ...and the two near-misses, which is where a vocabulary would rot: a
+		// CONTRACT's revert reason naming a balance (a token's, not the sender's
+		// ether) and one naming a shortfall of something else. Each keeps one half
+		// of the predicate load-bearing.
+		'ERC20: transfer amount exceeds balance',
+		'ERC20: insufficient allowance',
+	].every((message) => !namesLackOfFunds(message));
 
 	// ---------- the BLOCK ENVIRONMENT, engine against engine ----------
 	// Two nodes given the SAME block environment verbatim, so any difference in
