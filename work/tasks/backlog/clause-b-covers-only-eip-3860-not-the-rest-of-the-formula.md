@@ -12,7 +12,15 @@ ADR 0008's amendment added clause (b) to the admission rule: what the node compu
 
 But `intrinsicGas()` hardcodes more than the initcode term. It charges 16 gas per non-zero calldata byte and 4 per zero byte (EIP-2028, **Istanbul**), and the 21000 / 32000 bases. So a fork admitted BELOW Istanbul would satisfy every clause-(b) assertion the test makes while being mis-costed on calldata, which is the same hole the amendment was written to close, one term further down. The general claim in the ADR is therefore wider than the check behind it.
 
-Impact today is low, and that is why this is a follow-up rather than a fix in the original change: the admitted set is `shanghai` + `cancun`, re-admission requires a deliberate edit to the table, and any fork present in NEITHER table is already refused by the "no revm spec is known" guard. So nothing is currently wrong; what is wrong is that the ADR promises a general guarantee the test does not deliver, and the next person to re-admit a fork is the one who pays for the gap. (Raised by the Gate-2 review of `intrinsic-gas-charges-eip-3860-on-forks-that-predate-it`.)
+Impact today is low, and that is why this is a follow-up rather than a fix in the original change: re-admission requires a deliberate edit to the table, and any fork present in NEITHER table is already refused by the "no revm spec is known" guard. So nothing is currently mis-costed; what is wrong is that the ADR promises a general guarantee the test does not deliver, and the next person to re-admit a fork is the one who pays for the gap. (Raised by the Gate-2 review of `intrinsic-gas-charges-eip-3860-on-forks-that-predate-it`.)
+
+> **UPDATED 2026-08-02**, after `upgrade-0-3-1-gate-eip-3860-and-readmit-pre-shanghai-forks`. Three things this task said have moved:
+>
+> - The admitted set is now `berlin`, `london`, `paris`, `shanghai`, `cancun` (not `shanghai` + `cancun`), and `paris` is no longer available as a counter-example: it is admitted. A widened check needs a counter-example from the still-refused set (`prague`, `osaka`) or a genuinely pre-Istanbul spec.
+> - Clause (b) is now enforced more strongly than when this was written: for the EIP-3860 term the test measures three independent readings per admitted fork (`@ethereumjs/common`'s activation table, revm's measured per-word charge, and the node's own formula measured the same way), and asserts the admitted set SPANS the EIP-3860 boundary so those readings cannot pass vacuously. That is the shape to copy for the remaining terms; it is not a reason to consider the gap closed.
+> - **This task got MORE urgent, not less.** The fork gate makes re-admission look cheap and routine, and `intrinsicGas()`'s header used to warn that its true-for range "has an end at BOTH sides". That lower bound was dropped when the gate landed, so the file no longer tells the next author that the 16/4 calldata costs are EIP-2028 (Istanbul) and fork-dependent too. **Restoring that clause to the header is now part of this task**, whichever resolution is chosen.
+
+
 
 Two honest resolutions, and this task picks one:
 
@@ -26,8 +34,9 @@ Prefer widening if the assertions stay cheap and readable, since a check that ru
 
 - [ ] Either every EIP hardcoded in `src/intrinsic-gas.ts` is covered by a clause-(b) assertion for each admitted fork, or ADR 0008 states exactly which terms the automated check covers and lists the ones left to a re-admitter.
 - [ ] Whichever is chosen, ADR 0008's wording and the test agree: no general claim survives that the test does not back.
-- [ ] If widening: the assertions follow the existing shape (`@ethereumjs/common` for activation, a measured delta for what revm charges) rather than restating constants the formula already contains, and a pre-Istanbul fork is asserted as a counter-example the way `paris` is for EIP-3860.
-- [ ] The admitted set is unchanged (`shanghai`, `cancun`); this task does not re-open which forks are served.
+- [ ] If widening: the assertions follow the existing shape (`@ethereumjs/common` for activation, a measured value for what revm charges) rather than restating constants the formula already contains, and a counter-example is asserted from the still-refused set or a pre-Istanbul spec, the way the EIP-3860 check spans its own boundary.
+- [ ] `src/intrinsic-gas.ts`'s header again states the LOWER bound of the range its formula is true for (the 16/4 calldata costs are EIP-2028, Istanbul), which was lost when the EIP-3860 gate landed.
+- [ ] The admitted set is unchanged (`berlin`, `london`, `paris`, `shanghai`, `cancun`); this task does not re-open which forks are served.
 - [ ] Reference gas is unchanged: `number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 returning `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`.
 
 ## Blocked by
@@ -40,9 +49,9 @@ Prefer widening if the assertions stay cheap and readable, since a check that ru
 >
 > Read the amendment section of `docs/adr/0008-the-revm-engine-admits-only-hardforks-it-can-cost.md`, the clause-(b) assertions in `packages/embedded-eth-node/test/revm-engine.spec.ts` and their helper in `test/helpers/revm-engine.ts`, and `src/intrinsic-gas.ts` for the full list of terms the formula bakes in.
 >
-> THE POINT IS THE MISMATCH, not a live bug. Nothing is mis-costed today: the admitted set is shanghai + cancun and both satisfy every term. What is wrong is that the ADR states clause (b) generally while one EIP is enforced, so a future re-admission below Istanbul would sail through a check that looks general and is not. Fix the mismatch in whichever direction you can defend, and make the ADR and the test say the SAME thing.
+> THE POINT IS THE MISMATCH, not a live bug. Nothing is mis-costed today: every admitted fork (berlin, london, paris, shanghai, cancun) is at or above Istanbul, so the calldata term is correct for all of them. What is wrong is that the ADR states clause (b) generally while one EIP is enforced, so a future re-admission below Istanbul would sail through a check that looks general and is not. Fix the mismatch in whichever direction you can defend, and make the ADR and the test say the SAME thing.
 >
-> If you widen the check, keep its existing virtue: it asks `@ethereumjs/common` for activation and MEASURES what revm charges, so it tests reality instead of restating the constant it is meant to guard. Add a counter-example below Istanbul, the way `paris` serves as the counter-example for EIP-3860, so the widened check is load-bearing rather than decorative.
+> If you widen the check, keep its existing virtue: it asks `@ethereumjs/common` for activation and MEASURES what revm charges, so it tests reality instead of restating the constant it is meant to guard. Make it load-bearing rather than decorative the way the EIP-3860 check is: that one asserts the admitted set SPANS the boundary, so the readings cannot all pass simply because every admitted fork happens to charge the term.
 >
 > Do NOT change which forks are admitted, and do not re-open the refusals.
 >

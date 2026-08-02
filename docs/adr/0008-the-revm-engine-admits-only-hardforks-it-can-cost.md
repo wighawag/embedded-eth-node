@@ -1,4 +1,4 @@
-# The revm engine admits only the hardforks the node can COST, so every fork outside Shanghai..Cancun is refused rather than half-supported
+# The revm engine admits only the hardforks the node can COST, so a fork it cannot cost is refused rather than half-supported
 
 > **Amended 2026-08-02** (`intrinsic-gas-charges-eip-3860-on-forks-that-predate-it`): the admission rule below was necessary but not sufficient, and `berlin`, `london` and `paris` were refused too. See [the first amendment](#amendment-agreement-with-revm-is-necessary-and-not-sufficient).
 >
@@ -60,6 +60,8 @@ Decisions taken while amending this: `work/notes/observations/decisions-intrinsi
 2026-08-02, the same day. `revm-wasm@0.3.1` fixed the artifact's half of the mis-costing (`wighawag/revm-wasm#4`: `CallExecutor::new` now calls `set_spec_and_mainnet_gas_params(spec)` instead of assigning `c.spec`, so the gas-parameter table is rebuilt for the requested spec rather than staying pinned at `Context::mainnet()`'s OSAKA default). **The admission rule is unchanged. What moved is the evidence under clause (b), and with it the remedy.**
 
 Re-measured against the shipped `0.3.1` artifact by the same probe (`docs/spikes/intrinsic-gas-charges-eip-3860-on-forks-that-predate-it/probe-initcode-costing.mjs`, numbers in §6 of `measurements.md`), for the same 64-byte initcode CREATE:
+
+INTRINSIC GAS ONLY, execution excluded (the same basis as the first amendment's table). The full-estimate figures quoted in the paragraph below are these plus the 6 gas this CREATE costs to execute, which is why two number families appear in this section:
 
 | 64-byte initcode, 2 words | node, ungated | node, GATED | `revm-wasm@0.3.1` | protocol |
 | --- | --- | --- | --- | --- |

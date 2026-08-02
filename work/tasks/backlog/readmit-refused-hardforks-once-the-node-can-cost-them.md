@@ -10,7 +10,7 @@ covers: []
 
 `embedded-eth-node/revm` admits `shanghai` and `cancun` and refuses everything else by name at construction (`REVM_REFUSED_HARDFORKS`, `docs/adr/0008-the-revm-engine-admits-only-hardforks-it-can-cost.md` and its amendment). Both refusals were the honest call, and the ADR says the door is not meant to stay shut: "nothing in this ADR argues Prague should stay unsupported forever", and it names `work/tasks/backlog/` as where the costing work belongs. This task is that placeholder, cut so a deliberate deferral does not quietly become permanent by neglect (raised by the Gate-2 reviews of `prague-intrinsic-gas-floor-or-refuse` and `intrinsic-gas-charges-eip-3860-on-forks-that-predate-it`).
 
-**This task is NOT ready to build as written.** It is a marker with its entry conditions written down, and it covers TWO families of refusal whose triggers are completely different. Take whichever family has actually become unblocked; do not treat them as one job.
+**This task is NOT ready to build as written.** It is a marker with its entry conditions written down. It originally covered TWO families of refusal with different triggers; **family 2 was delivered on 2026-08-02, so only family 1 (`prague`, `osaka`) remains open.** Family 2 is retained below as history because it documents the inversion that makes ADR 0008's body misleading if read alone.
 
 ### Family 1: ABOVE the range (`prague`, `osaka`) is STILL blocked on OUR arithmetic
 
@@ -24,9 +24,11 @@ covers: []
 
 Entry conditions: the node wants to move its hardfork past Cancun, or a consumer asks for Prague/Osaka reads, or the node gains a hardfork option. Today `createNode()` pins `Hardfork.Cancun` and `NodeOptions` exposes no hardfork at all, which is why implementing the floor now would ship a branch no test going through the public API can execute. That unreachability is the argument that settled implement-vs-refuse the first time; if it still holds, STOP and say so.
 
-### Family 2: BELOW the range (`berlin`, `london`, `paris`) is UNBLOCKED as of `revm-wasm@0.3.1`
+### Family 2: BELOW the range (`berlin`, `london`, `paris`) is DONE
 
-> **UPDATED 2026-08-02: the upstream fix landed, and it INVERTED the guidance below.** `wighawag/revm-wasm#4` is fixed in `revm-wasm@0.3.1`. Both probes were re-run against the shipped artifact and the results are in section 6 of `docs/spikes/intrinsic-gas-charges-eip-3860-on-forks-that-predate-it/measurements.md`. Read that section before doing anything here. In short: revm now gates EIP-3860 correctly, so **the node is the wrong party**, its estimates now DISAGREE with revm on these three forks (default 53302 vs revm 53298, protocol 53298), and **the local fork gate is now REQUIRED rather than forbidden**. The paragraph below explaining why not to gate locally was correct against `0.3.0` and is void against `0.3.1`; it is kept for the reasoning, not the instruction.
+> **DELIVERED 2026-08-02 by `upgrade-0-3-1-gate-eip-3860-and-readmit-pre-shanghai-forks`** (`work/tasks/done/`). The repo is on `revm-wasm@^0.3.1`, `src/intrinsic-gas.ts` gates the EIP-3860 term on the node's `Common`, and all three forks are admitted again. ADR 0008's second amendment records it. **Nothing in this family is outstanding**; the section is kept because the reasoning below is the clearest statement of how a fork gets refused and un-refused, and because the inversion it documents is the trap a future reader of ADR 0008's body will otherwise fall into. Everything from here to the end of family 2 is HISTORY, not instructions.
+
+> **The upstream fix landed, and it INVERTED the guidance below.** `wighawag/revm-wasm#4` is fixed in `revm-wasm@0.3.1`. Both probes were re-run against the shipped artifact and the results are in section 6 of `docs/spikes/intrinsic-gas-charges-eip-3860-on-forks-that-predate-it/measurements.md`. Read that section before doing anything here. In short: revm now gates EIP-3860 correctly, so **the node is the wrong party**, its estimates now DISAGREE with revm on these three forks (default 53302 vs revm 53298, protocol 53298), and **the local fork gate is now REQUIRED rather than forbidden**. The paragraph below explaining why not to gate locally was correct against `0.3.0` and is void against `0.3.1`; it is kept for the reasoning, not the instruction.
 
 #### The original (pre-0.3.1) statement of the problem
 
