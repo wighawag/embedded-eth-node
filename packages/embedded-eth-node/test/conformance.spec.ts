@@ -63,4 +63,16 @@ test('slim-node differential conformance vs trie-backed @ethereumjs/vm reference
 	// multi-log/revert/estimate/back-to-back + post-state reads).
 	expect(c.none.steps.length).toBeGreaterThanOrEqual(15);
 	expect(c.trie.steps.length).toBeGreaterThanOrEqual(15);
+
+	// The BLOCK-ENVIRONMENT step ran, in both modes. Named explicitly because it
+	// is the only step whose class of bug is invisible to every other bar in the
+	// repo: BASEFEE / PREVRANDAO / COINBASE / NUMBER / TIMESTAMP are
+	// gas-independent, so an engine reading them wrong charges identical gas and
+	// produces identical receipts. If it silently stopped running, nothing else
+	// would go red.
+	for (const mode of ['none', 'trie'] as const) {
+		expect(c[mode].steps.map((s: any) => s.label)).toContain(
+			'block environment through a contract',
+		);
+	}
 });

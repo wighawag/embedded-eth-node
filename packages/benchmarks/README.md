@@ -31,7 +31,7 @@ configuration worth measuring: omitting precompiles **changes gas** (an omitted
 address stops being pre-warmed, costing +2500 per cold access), and `opt-level="z"`
 costs **~5x on keccak**.
 
-The dependency is an ordinary `^0.1.0` range rather than an exact pin: gas equality
+The dependency is an ordinary `^0.3.0` range rather than an exact pin: gas equality
 is asserted here on every run, so a `revm-wasm` release that changed what revm
 charges turns this suite red instead of passing quietly. That is the gate doing its
 job, and pinning would only hide it until someone bumped the pin.

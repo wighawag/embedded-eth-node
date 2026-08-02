@@ -258,7 +258,13 @@ not ([ADR 0006](docs/adr/0006-the-engine-is-an-injected-object-not-a-named-strin
   **byte-identical gas**
   ([ADR 0003](docs/adr/0003-revm-wasm-is-the-engine-direction.md)). It reads the
   node's own authoritative state — a value written by a transaction is visible to
-  the next `eth_call` with no sync step.
+  the next `eth_call` with no sync step — and runs it against the node's own
+  **real block environment**: a contract reading `block.basefee`,
+  `block.prevrandao`, `block.coinbase`, `block.number` or `block.timestamp`
+  inside an `eth_call` gets the same answer from either engine. The differential
+  conformance battery diffs exactly that, through a contract, because gas cannot
+  see it: those opcodes are fee-independent, so an engine running your read
+  against a block your node never had would still charge byte-identical gas.
 
 **Measured, on the node — not on the raw engines.** The `frame` row is 100 small
 view reads back to back against the 16.6 ms 60fps budget, median of 7 repeats,
@@ -295,6 +301,18 @@ await createRevmEngine({wasm: '/assets/revm.wasm'}); // fetched at runtime, so y
                                                      // can paint UI first
 ```
 
+**`eth_call` semantics, not transaction semantics.** A read is not a
+transaction, so the engine runs it with revm's simulation switches
+(`disableBaseFee`, `disableBalanceCheck`, `disableBlockGasLimit`,
+`disableEip3607`) — the same validity rules every real client turns off to serve
+`eth_call`. That is what keeps a read from an address holding **no ether**
+(including the zero address, which is what `from` defaults to) working against a
+block with a real base fee, and a read from an address that holds **code**
+(smart accounts, ERC-4337, multicall aggregators) working at all — EIP-3607 is a
+rule about *sending* a transaction, and `@ethereumjs/evm`'s `runCall` never
+enforced it either. The switches belong to reads only: they are never combined
+with committing, which `revm-wasm` refuses outright.
+
 Caveats, all of them real:
 
 - **`stateMode:'none'` only.** revm reads the node's state SYNCHRONOUSLY (an
@@ -308,11 +326,6 @@ Caveats, all of them real:
   re-point the FIRST node's reads at the second node's state). Call
   `createRevmEngine()` per node, passing the same compiled `WebAssembly.Module`
   to skip recompiling.
-- **`BASEFEE` reads 0 inside a revm read** (and `PREVRANDAO` cannot be set):
-  `revm-wasm@0.1.0` exposes no disable-base-fee/balance-check flag, so a zero
-  base fee is how an `eth_call` from an unfunded address stays possible. Gas is
-  unaffected; a contract that *reads* `block.basefee` in a view function sees 0
-  on revm and the block's real value on `@ethereumjs/evm`.
 - **Not on the Worker path.** `createWorkerNode({engine})` is refused with a real
   error (an engine is a function-bearing object; comlink structured-clones the
   options, which would otherwise give you an opaque `DataCloneError`). To run

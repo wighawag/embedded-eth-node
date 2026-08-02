@@ -13,6 +13,13 @@ rejected, and what it touches. Ratify or reverse.
 
 ## 1. A revm read runs with a ZERO base fee, so `BASEFEE` reads 0 there
 
+> **SUPERSEDED 2026-08-02** by `revm-wasm-upgrade-honest-block-environment`.
+> `revm-wasm@0.3.0` carries the flags this entry says do not exist, so the engine
+> now passes the node's REAL base fee with `disableBaseFee` +
+> `disableBalanceCheck` instead. `BASEFEE` no longer reads 0 on revm, and the
+> conformance battery grew a block-environment step that would catch it if it
+> did. See `decisions-revm-wasm-upgrade-honest-block-environment-2026-08-02.md`.
+
 **Chosen:** `packages/embedded-eth-node/src/revm.ts` passes `baseFeePerGas: 0n`
 in the block environment of every read, while passing the node's real `number`,
 `timestamp`, `gasLimit`, `coinbase` and `excessBlobGas` through.
@@ -40,12 +47,22 @@ an upstream request to `revm-wasm` for the `disable_base_fee` /
 
 ## 2. Known block-environment gaps in `revm-wasm@0.1.0`: PREVRANDAO
 
+> **SUPERSEDED 2026-08-02** by `revm-wasm-upgrade-honest-block-environment`.
+> `BlockEnv.prevRandao` exists as of `revm-wasm@0.2.0` and the engine now wires
+> the node's `mixHash` through, so `PREVRANDAO` agrees across both engines.
+
 Its `BlockEnv` has no `prevrandao`/`difficulty` field, so `PREVRANDAO` inside a
 revm read cannot be given the node's value (`NodeOptions.blockEnv.prevRandao`).
 Same shape as (1): not fixable from this side, no gas effect, recorded rather
 than hidden.
 
 ## 3. The gas-limit mapping is `request.gasLimit + intrinsic`, capped at the block limit
+
+> **PARTLY SUPERSEDED 2026-08-02** by
+> `revm-wasm-upgrade-honest-block-environment`. The mapping is still
+> `request.gasLimit + intrinsic`; the CAP is gone, because
+> `disableBlockGasLimit` removes the check that forced it, and with it the
+> divergence window this entry recorded.
 
 `@ethereumjs/evm`'s `runCall` charges no intrinsic gas, so the node's
 `ReadCallRequest.gasLimit` is entirely available to EXECUTION; revm charges

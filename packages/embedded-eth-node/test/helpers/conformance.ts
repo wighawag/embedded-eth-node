@@ -45,7 +45,7 @@ import {
 	type PrefixedHexString,
 } from '@ethereumjs/util';
 import {keccak_256} from '@noble/hashes/sha3.js';
-import {encodeFunctionData, encodeDeployData} from 'viem';
+import {encodeFunctionData, encodeDeployData, decodeFunctionResult} from 'viem';
 import {privateKeyToAccount} from 'viem/accounts';
 import {
 	createNode,
@@ -55,10 +55,24 @@ import {
 } from '../../src/index.js';
 import {counterAbi, counterBytecode} from './counter.js';
 import {probeAbi, probeBytecode} from './probe.js';
+import {
+	blockEnvProbeAbi,
+	blockEnvProbeRuntimeBytecode,
+} from './block-env-probe.js';
 
 const PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const CHAIN_ID = 31337;
 const BASE_FEE = 1_000_000_000n;
+
+/**
+ * The block-environment step's fixtures: a coinbase and a prevRandao no engine
+ * could produce by accident, so "it read zero" and "it read the node's value"
+ * are never the same answer.
+ */
+const BLOCK_ENV_PROBE_ADDR = '0x00000000000000000000000000000000b10ce7ee';
+const BLOCK_ENV_COINBASE = '0x00000000000000000000000000000000c0173a5e';
+const BLOCK_ENV_PREV_RANDAO =
+	'0x5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed';
 const GENESIS_BALANCE = 10n ** 24n;
 const account = privateKeyToAccount(PK);
 
@@ -806,6 +820,95 @@ async function runBattery(
 		});
 		await node2.dispose();
 		ctx.nonce += 0; // node2 is independent; ctx.nonce unchanged
+	}
+
+	// 13) BLOCK ENVIRONMENT read THROUGH A CONTRACT: BASEFEE / PREVRANDAO /
+	//     COINBASE / NUMBER / TIMESTAMP / GASLIMIT.
+	//
+	//     WHY THIS STEP EXISTS AND NOTHING ELSE COVERS IT. Every one of these
+	//     opcodes is fee- and gas-independent: an engine can hand a contract a
+	//     completely different block environment while charging byte-identical gas
+	//     and returning identical receipts. So the cross-backend gas gate cannot
+	//     see it, the receipt diff above cannot see it, and the only instrument
+	//     that can is a contract that READS them inside an `eth_call`. (The revm
+	//     engine used to zero the base fee to buy `eth_call`-from-an-unfunded-
+	//     address, which this step would have caught the day it landed.)
+	//
+	//     THE ORACLE IS THE NODE'S OWN BLOCK, not the reference EVM: the reference
+	//     is a separate chain built by hand with its own timestamps and its own
+	//     zero coinbase, so diffing block-environment reads against it would
+	//     measure that difference rather than the engine's honesty. What is
+	//     diffed is "what the engine told the contract" against "what the node
+	//     says the block is" — and because this battery runs on the default engine
+	//     (conformance.spec.ts) AND on revm (revm-conformance.spec.ts), holding
+	//     both to the same block is exactly a cross-engine diff.
+	{
+		const m: string[] = [];
+		// Its OWN node, so the block environment can carry a distinctive coinbase
+		// and prevRandao without perturbing the receipt battery above (and its OWN
+		// engine: one engine instance serves one node).
+		const node3 = await createNode({
+			chainId: CHAIN_ID,
+			stateMode,
+			miningConfig: {type: 'manual'},
+			blockEnv: {
+				coinbase: BLOCK_ENV_COINBASE,
+				prevRandao: BLOCK_ENV_PREV_RANDAO,
+			},
+			engine: await makeEngine?.(),
+		});
+		// The code is PLACED rather than deployed: the read is the whole point, and
+		// placing it keeps this step independent of the nonce/receipt sequence above.
+		await node3.request({
+			method: 'evm_setCode',
+			params: [BLOCK_ENV_PROBE_ADDR, blockEnvProbeRuntimeBytecode],
+		});
+		// One mined block, so the read runs against a block carrying the configured
+		// environment (genesis carries neither).
+		await node3.mine();
+		const head = (await node3.request({
+			method: 'eth_getBlockByNumber',
+			params: ['latest', false],
+		})) as any;
+		// No `from`: the default zero address, which holds no ether — the case the
+		// zeroed base fee used to buy, now bought by the simulation switches.
+		const ret = (await node3.request({
+			method: 'eth_call',
+			params: [
+				{
+					to: BLOCK_ENV_PROBE_ADDR,
+					data: encodeFunctionData({
+						abi: blockEnvProbeAbi,
+						functionName: 'env',
+					}),
+				},
+				'latest',
+			],
+		})) as `0x${string}`;
+		const [basefee, prevrandao, coinbase, number, timestamp, gaslimit] =
+			decodeFunctionResult({
+				abi: blockEnvProbeAbi,
+				functionName: 'env',
+				data: ret,
+			});
+		cmp(m, 'BASEFEE', basefee, BigInt(head.baseFeePerGas));
+		cmp(m, 'NUMBER', number, BigInt(head.number));
+		cmp(m, 'TIMESTAMP', timestamp, BigInt(head.timestamp));
+		cmp(m, 'GASLIMIT', gaslimit, BigInt(head.gasLimit));
+		// COINBASE and PREVRANDAO are diffed against what the node was CONFIGURED
+		// with: `eth_getBlockByNumber` reports neither (its `miner` is a constant
+		// zero and it carries no `mixHash`), so the configuration is the only
+		// statement of what the block actually is.
+		cmp(m, 'COINBASE', coinbase.toLowerCase(), BLOCK_ENV_COINBASE);
+		cmp(m, 'PREVRANDAO', prevrandao, BigInt(BLOCK_ENV_PREV_RANDAO));
+		// ...and the fixtures really are non-zero, so "reads zero" can never pass
+		// this step by coincidence.
+		if (basefee === 0n)
+			m.push('BASEFEE fixture was zero — step proves nothing');
+		if (prevrandao === 0n)
+			m.push('PREVRANDAO fixture was zero — step proves nothing');
+		steps.push({label: 'block environment through a contract', mismatches: m});
+		await node3.dispose();
 	}
 
 	const engineId = node.readEngine.id;

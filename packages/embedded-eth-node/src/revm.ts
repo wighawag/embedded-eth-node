@@ -159,32 +159,30 @@ export async function createRevmEngine(
 			// top of what the engine reports), and `@ethereumjs/evm`'s `runCall` gives
 			// all of it to execution because it charges no intrinsic gas. revm charges
 			// intrinsic out of the TRANSACTION gas limit, so the equivalent budget is
-			// `request.gasLimit + intrinsic` — capped at the block gas limit, because
-			// revm rejects a transaction whose gas limit exceeds the block's
-			// (`CallerGasLimitMoreThanBlock`) and the node's default read budget is
-			// exactly the block gas limit. The cap only bites for a call that needs
-			// within `intrinsic` gas of the whole block limit.
+			// `request.gasLimit + intrinsic`, passed WHOLE: `disableBlockGasLimit`
+			// below removes the block-limit check that used to force a cap here
+			// (`CallerGasLimitMoreThanBlock`), and with it the divergence window where
+			// a call needing within `intrinsic` gas of the entire block gas limit ran
+			// out of gas on revm and completed on the default engine.
 			const blockGasLimit = header.gasLimit;
-			const gasLimit =
-				request.gasLimit + intrinsic > blockGasLimit
-					? blockGasLimit
-					: request.gasLimit + intrinsic;
+			const gasLimit = request.gasLimit + intrinsic;
 
 			const block = {
 				number: header.number,
 				timestamp: header.timestamp,
 				gasLimit: blockGasLimit,
 				coinbase: header.coinbase.bytes,
-				// BASE FEE IS ZERO FOR A READ, deliberately. revm validates the
-				// transaction's gas price against the block's base fee and the caller's
-				// balance against `gasLimit * gasPrice`, and an `eth_call` from an
-				// unfunded address (the node defaults `from` to the zero address) must
-				// still work. Every real client disables those checks for `eth_call`;
-				// `revm-wasm@0.1.0` exposes no such flag, so a zero base fee with a zero
-				// gas price is the way to get the same effect. The visible consequence is
-				// that the BASEFEE opcode reads 0 inside a revm read, where the default
-				// engine reports the block's real base fee.
-				baseFeePerGas: 0n,
+				// THE NODE'S REAL BASE FEE, because a contract can read it. `BASEFEE`
+				// inside a view function must report the block the node actually has;
+				// the validation the real value would otherwise trip is turned off
+				// explicitly below (`disableBaseFee` / `disableBalanceCheck`) rather
+				// than bought with a zeroed base fee, which is a lie the contract sees.
+				baseFeePerGas: header.baseFeePerGas ?? 0n,
+				// PREVRANDAO. Post-Merge it IS `mixHash` (the node writes
+				// `NodeOptions.blockEnv.prevRandao` there and pins difficulty to 0), and
+				// `mixHash` is read rather than the `prevRandao` getter because that
+				// getter throws on a pre-Merge fork, which SPEC_BY_HARDFORK still maps.
+				prevRandao: header.mixHash,
 				...(header.excessBlobGas !== undefined
 					? {excessBlobGas: header.excessBlobGas}
 					: {}),
@@ -198,6 +196,41 @@ export async function createRevmEngine(
 				spec,
 				chainId,
 				block,
+				// THE SIMULATION SWITCHES, and they are the whole reason this engine can
+				// pass an honest block environment. Each one turns off a TRANSACTION
+				// validity rule that a READ is not subject to, and every real client
+				// turns the same ones off to serve `eth_call`:
+				//
+				//  disableBaseFee       the read's gas price is 0 and the block's base
+				//                       fee is not (`GasPriceLessThanBasefee`);
+				//  disableBalanceCheck  `eth_call` defaults `from` to the zero address,
+				//                       which holds no ether (`LackOfFundForMaxFee`) —
+				//                       pre-funding the caller instead would invent
+				//                       state a read must not invent;
+				//  disableBlockGasLimit the node's default read budget IS the block gas
+				//                       limit, and revm charges intrinsic gas out of the
+				//                       transaction limit while `@ethereumjs/evm`'s
+				//                       `runCall` charges none, so the equivalent budget
+				//                       is `gasLimit + intrinsic` — which is over the
+				//                       block limit by exactly `intrinsic`
+				//                       (`CallerGasLimitMoreThanBlock`);
+				//  disableEip3607       EIP-3607 rejects a caller that holds code, which
+				//                       is a rule about SENDING a transaction. Simulating
+				//                       from a contract address is ordinary practice
+				//                       (smart accounts, ERC-4337, multicall
+				//                       aggregators), and `@ethereumjs/evm`'s `runCall`
+				//                       never enforced it, so without this the two
+				//                       engines disagree about whether the call runs.
+				//
+				// They are simulation-only: `revm-wasm` REFUSES to combine any of them
+				// with committing (a committed transaction from a contract address is one
+				// the chain would reject, and `disableBalanceCheck` fabricates the
+				// caller's balance). This engine only ever reads, so that constraint is
+				// structural here — but a future WRITE path must not reach for them.
+				disableBaseFee: true,
+				disableBalanceCheck: true,
+				disableBlockGasLimit: true,
+				disableEip3607: true,
 				// Logs and the post-state map are not part of a read's answer, and
 				// building them costs ~0.9 microseconds per call.
 				returnState: false,

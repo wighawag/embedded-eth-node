@@ -81,6 +81,11 @@ test('differential conformance with the revm engine installed (stateMode:none)',
 	expect(labels).toContain('1559-call(increment) view number()');
 	expect(labels).toContain('estimateGas exactness (increment)');
 	expect(labels).toContain('estimateGas CREATE incl. EIP-3860 initcode');
+	// ...including the BLOCK-ENVIRONMENT step, the one bar that can see an engine
+	// lying about the block it runs in (BASEFEE / PREVRANDAO / COINBASE / NUMBER /
+	// TIMESTAMP are gas-independent, so neither the gas gate nor the receipt diff
+	// can). This is the step the zeroed base fee would have failed.
+	expect(labels).toContain('block environment through a contract');
 
 	// ...and the OTHER state mode is refused rather than covered here — which is
 	// exactly why `conformance.spec.ts` keeps running it on the default engine.

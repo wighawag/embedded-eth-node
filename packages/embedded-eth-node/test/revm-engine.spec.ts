@@ -4,6 +4,10 @@
  *   - results and gas are IDENTICAL to the default `@ethereumjs/evm` engine
  *   - revm reads the node's own state (a mined tx is visible with no sync step)
  *   - an `eth_call` on revm cannot mutate state
+ *   - a read from an UNFUNDED address and from an address HOLDING CODE works on
+ *     both engines, with the same result and the same gas
+ *   - the BLOCK ENVIRONMENT a contract reads (BASEFEE / PREVRANDAO / COINBASE /
+ *     NUMBER / TIMESTAMP / GASLIMIT) is the node's own, and identical on both
  *   - BLOCKHASH answers with the node's real block hashes
  *   - both wasm delivery shapes (bundler-resolved asset, runtime-fetched URL)
  *   - `stateMode:'trie'` is refused at construction, naming the reason
@@ -87,6 +91,27 @@ test('revm engine: same results + same gas as @ethereumjs/evm, on the node own s
 	expect(c.callDidNotMutateState).toBe(true);
 	expect(BigInt(c.storageAfterCall)).toBe(1n);
 	expect(c.writeMethodsThrow).toBe(true);
+
+	// every caller a SIMULATION must serve works, on both engines: funded,
+	// unfunded (what the zeroed base fee used to buy), and holding code (EIP-3607,
+	// which the default engine's runCall never enforced). A refusal on either
+	// engine is a divergence.
+	expect(c.callerErrors).toEqual({});
+	expect(c.callerResultsMatch).toBe(true);
+	expect(c.callerGasMatches).toBe(true);
+	expect(c.callerResultsAgree).toBe(true);
+	// sumTo(4) == 0+1+2+3 == 6, from a caller that holds code.
+	expect(BigInt(c.callerResults['contract.revm'])).toBe(6n);
+
+	// the BLOCK ENVIRONMENT read through a contract is the node's own, and the
+	// SAME on both engines. Gas cannot see this class of bug: these opcodes are
+	// fee-independent, so an engine running the read against a block the node
+	// never had still charges byte-identical gas.
+	expect(c.blockEnvMatches).toBe(true);
+	expect(c.blockEnvOnRevm).toEqual(c.blockEnvExpected);
+	// ...and specifically NOT the zeroed base fee the engine used to force.
+	expect(BigInt(c.blockEnvOnRevm.basefee)).toBe(7_000_000_000n);
+	expect(BigInt(c.blockEnvOnRevm.prevrandao)).not.toBe(0n);
 
 	// BLOCKHASH is wired to the node's OWN blocks (an unwired one answers zero,
 	// silently). Each node is its own chain, so each is checked against itself.
