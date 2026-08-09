@@ -71,3 +71,15 @@ Read these first; they are the reason this spike exists and they are not in disp
 > DO NOT re-open state ownership. It is decided: the node keeps owning state, because that is what lets both engines run against identical state, keeps the JS-only fallback alive, and preserves the route to a state root. Measure the layout under that decision, and if the numbers contradict it, report that as the headline rather than quietly re-deciding.
 >
 > Scope fence: nothing under `packages/embedded-eth-node/src/`, no dependency changes, no lockfile churn. The prototype is spike code and stays in `docs/spikes/`.
+
+## Requeue 2026-08-09
+
+RECOVERY HANDOFF, 2026-08-09 (conductor). The previous run's process tree was KILLED during the build phase, after the agent had finished writing the deliverable and before anything was committed, gated or reviewed. Suspected memory pressure (the probes hold 100,000-slot maps and copy them repeatedly; the machine was at 18G used with 9G swap), not a fault in the work.
+
+THE WORK IS NOT LOST AND YOU MUST NOT REDO IT. The conductor rescued it onto this branch as a single wip commit (24d5a1d): docs/spikes/spike-storage-layout-cost-for-the-revm-write-half/ with measurements.md, three standalone probes and four layout prototypes. Read it FIRST. Your job is to finish the lifecycle, not to re-measure: verify it against the acceptance criteria, fix what is actually missing, and let the gate and Gate 2 judge it.
+
+BE CAREFUL WITH MEMORY. Do not re-run the 100,000-slot probe rows unless you must, and never in parallel with anything else; that is the most likely thing that killed the last run. Re-running the smaller sizes to confirm the probes still execute is cheap and worth doing.
+
+The wip commit is the conductor's, nothing builds on it, and its subject says wip. Rewrite or fold it into your own commit if that reads better; do not leave a wip subject on main.
+
+Two findings in the deliverable that the reviewer should look at hardest, because they are the load-bearing ones: that a checkpoint copies ALL of state and costs frames+1 per transaction, and that ADR 0005's claim that the layout can change behind one accessor is refuted by a running demonstration. If either is not actually demonstrated by a committed probe, that is a real gap.
