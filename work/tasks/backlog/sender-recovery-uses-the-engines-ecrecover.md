@@ -8,11 +8,11 @@ covers: [14]
 
 ## What to build
 
-`senderMode:'recover'` derives a transaction's sender with ecrecover, as a real node does, and that recovery is a fixed cost paid on every transaction. When a revm engine is installed the module already contains a secp256k1 precompile, and the binding exposes signature recovery directly, so the node can use it for roughly a 4x saving on the recovery half at ZERO additional bytes. When no such engine is installed, recovery falls back to the current implementation.
+`senderMode:'recover'` derives a transaction's sender with ecrecover, as a real node does, and that recovery is a fixed cost paid on every transaction. When a revm engine is installed the module already contains a secp256k1 precompile, and the binding exposes signature recovery directly, so the node can use it at ZERO additional bytes. The saving quoted by the spec (roughly 4.2x, narrowing the recover-versus-trusted gap from about 13x to about 3x) was measured on the ENGINE side and by an earlier version of this node, so treat both figures as claims to re-measure here rather than as facts to restate. When no such engine is installed, recovery falls back to the current implementation.
 
 Both `senderMode` values keep their meanings: `'recover'` is still authenticated recovery, `'trusted'` still skips recovery entirely on the `evm_*As` cheat paths. What changes is only the implementation of the recovery itself.
 
-Note the consequence, because it changes how the modes should be described rather than what they do: this NARROWS the gap between the two modes, from roughly 13x to roughly 3x on the isolated transaction path, because the expensive half of `'recover'` gets much cheaper. `'trusted'` remains worth having and stops being the dominant lever. Wherever the repo currently quotes that 13x to justify `'trusted'`, the number must move with this change rather than be left standing.
+Note the consequence, because it changes how the modes should be described rather than what they do: this NARROWS the gap between the two modes on the isolated transaction path, because the expensive half of `'recover'` gets much cheaper. `'trusted'` remains worth having and stops being the dominant lever. Wherever the repo currently quotes that 13x to justify `'trusted'`, the number must move with this change rather than be left standing.
 
 The correctness bar is not the speed. Recovery decides WHO signed a transaction, so the two implementations must agree on every case, including the ones that should FAIL: a malformed signature, an `s` value in the upper half of the curve order (EIP-2), a wrong recovery id. A recovery that silently returns a plausible wrong address is the worst outcome available here, and it would authenticate a transaction as the wrong sender.
 
@@ -33,6 +33,8 @@ The correctness bar is not the speed. Recovery decides WHO signed a transaction,
 ## Prompt
 
 > Goal: use the secp256k1 implementation already sitting in the wasm module for sender recovery, and prove it authenticates identically to the one it replaces.
+>
+> FIRST, check this task against current reality: it was written on 2026-08-09 and may have DRIFTED. Confirm the binding still exposes signature recovery, and re-derive the recover-versus-trusted ratio on the CURRENT node before quoting any number, because the transaction path has changed underneath the figures this task inherited.
 >
 > Read the node's sender-recovery path and the `senderMode` documentation, the trusted-sender cheat methods and their refusal, and the binding's signature-recovery API.
 >

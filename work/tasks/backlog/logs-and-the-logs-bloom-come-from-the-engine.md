@@ -8,7 +8,7 @@ covers: [6]
 
 ## What to build
 
-Receipts carry logs and a 256-byte bloom, and both are fields the conformance differential diffs. Take the bloom FROM THE ENGINE rather than computing it in JS. The reason is single implementation, not speed: a second bloom implementation in JS is the same drift the fee arithmetic just had removed. The speed difference is real and is the tiebreaker, not the case (roughly 0.4 microseconds per keccak against roughly 6.4, so about 24 microseconds on a typical ERC-20 receipt).
+Receipts carry logs and a 256-byte bloom, and both are fields the conformance differential diffs. Take the bloom FROM THE ENGINE rather than computing it in JS. The reason is single implementation, not speed: a second bloom implementation in JS is the same drift the fee arithmetic just had removed. The speed difference is the tiebreaker, not the case, and the figures inherited from the spec (roughly 0.4 microseconds per keccak against roughly 6.4, so about 24 microseconds on a typical ERC-20 receipt) were measured on the ENGINE side rather than in this repo. Do not restate them as this repo's own measurement: either leave the speed out of the justification entirely, which costs nothing because it was never the argument, or measure it here.
 
 The case that must be right and is easy to get wrong: **a log emitted inside a sub-call that later REVERTS does not appear** in the receipt, and does not contribute to the bloom. Cover a transaction with a nested call that emits and then reverts, alongside one that emits and succeeds, and diff the whole receipt against `@ethereumjs/vm`.
 
@@ -33,6 +33,8 @@ One decoding detail the binding documents and hand-rolled readers get wrong: the
 ## Prompt
 
 > Goal: one bloom implementation, and a receipt whose logs are right including the ones that must be absent.
+>
+> FIRST, check this task against current reality: it was written on 2026-08-09 and may have DRIFTED. Confirm the node still computes a bloom in JS and that the seam's transaction result carries one; if an earlier task already moved it, narrow this task to the log cases.
 >
 > Read where the node assembles logs and the bloom into a receipt today, the engine seam's transaction result, and the binding's outcome documentation (its bloom is CONDITIONAL on a non-zero log count, which is the detail that desynchronises a hand-rolled decoder on exactly the calls that are easiest to test with).
 >

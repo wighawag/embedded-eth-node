@@ -33,6 +33,8 @@ Mind the term. `CONTEXT.md` defines *conformance differential* and its entry now
 
 > Goal: make the repo's strongest correctness bar judge revm-executed TRANSACTIONS, so a divergence fails the build.
 >
+> FIRST, check this task against current reality: it was written on 2026-08-09 and may have DRIFTED. Confirm which of this spec's behaviour tasks actually landed and what they already assert, so the cases you add are the ones still missing rather than a second copy of coverage that now exists.
+>
 > Read `test/helpers/conformance.ts` (the battery, its steps and its two oracles), both conformance specs, and `CONTEXT.md`'s *conformance differential* entry.
 >
 > THE FAILURE MODE IS A VACUOUS PASS. If transactions quietly keep running on `@ethereumjs/vm` while the battery reports "revm", every assertion passes and proves nothing. Make the battery state which engine actually executed its transactions and assert it, the same way the suite already asserts a step ran by label.

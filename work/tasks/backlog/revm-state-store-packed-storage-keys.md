@@ -2,7 +2,7 @@
 title: Adopt revm-wasm's packed key encoding in the revm state store, now that the node owns the storage representation
 slug: revm-state-store-packed-storage-keys
 spec: revm-engine-behind-runtx
-blockedBy: []
+blockedBy: [revm-write-callbacks-reproduce-the-post-state]
 covers: []
 ---
 
@@ -40,7 +40,7 @@ Watch the two places the format escapes the pair:
 
 ## Blocked by
 
-- None. `re-layer-storage-as-per-account-maps-with-per-frame-diffs` is in `work/tasks/done/`.
+- `revm-write-callbacks-reproduce-the-post-state`. Its precondition (`re-layer-storage-as-per-account-maps-with-per-frame-diffs`) is already in `work/tasks/done/`, so this is a SERIALISATION rather than a logical dependency: that task fills in the state store's write half, this one changes the key encoding the whole store uses, and doing them in the other order means re-applying the encoding to methods that did not exist yet. Land the write half first, then change the encoding once, on the finished file.
 
 ## Prompt
 

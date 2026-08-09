@@ -16,6 +16,22 @@ The seam becomes ONE interface with two operations: execute a read-only call, an
 
 `CONTEXT.md`'s glossary already anticipated this and wrote down the condition: its *engine* entry says not to re-widen the term to mean "the EVM behind the node" **until a spec actually moves transactions onto it**. That spec is `revm-engine-behind-runtx`, so the condition is met and the entry is updated to say so rather than being quietly rewritten.
 
+**THE BLAST RADIUS, COUNTED RATHER THAN ASSUMED.** `readEngine` / `ReadEngine` / `ReadCallRequest` / `ReadCallResult` occur **139 times across 28 files** outside `work/`. Re-run the count before you start (it is one grep) and treat this list as the scope fence, because a rename that stops at the source tree leaves the repo not compiling and the documentation lying:
+
+- **Source, six modules:** the seam and its refusals, the types module, the node, the revm engine, the worker client, the package entry point. Plus one mention each in the state store and the intrinsic-gas header.
+- **The OTHER package:** `packages/benchmarks` reads it in its slim-node backend and in the bundle-size spec. It is in the same workspace and its build is part of the gate, so a rename that ignores it is a red gate, not a follow-up.
+- **Tests, nine helpers and five specs**, including the engine-seam, slim-node-checks, worker-roundtrip, conformance and revm-engine helpers.
+- **Documents:** `README.md` (which currently tells a consumer to say `node.readEngine` and not `node.engine`, and will be actively wrong the moment this lands), `CONTEXT.md`'s glossary, and `docs/adr/0006-the-engine-is-an-injected-object-not-a-named-string.md`.
+
+Two exclusions, both deliberate:
+
+- **`packages/embedded-eth-node/CHANGELOG.md` is HISTORY and is NOT rewritten.** It records what shipped under the name that shipped. Editing it would falsify a release record to make a grep come out clean.
+- **ADR 0006 is amended, not edited.** It recorded a decision that stands (the engine is an injected object, never a named string); what changed is the seam's scope. Add a dated amendment in the style ADR 0008 uses, rather than rewriting the original text.
+
+These are TYPE names read at many call sites, so a hard swap is a hard compile break everywhere at once. That is survivable HERE, in one batch, precisely because the whole surface is inside this one repo and this task owns all of it. Do not split it into a chain of partial renames: a half-migrated batch cannot compile, which is the case `work/protocol/TASKING-PROTOCOL.md` section 3a warns about. If, having counted, you judge the surface too wide for one green batch, STOP and say so rather than landing something red.
+
+**DECIDE WHERE THE TWO SKIP FLAGS LIVE; do not drop them.** The node calls `runTx` today with `skipBlockGasLimitValidation: true` and `skipHardForkValidation: true`. They are load-bearing: without them a mined transaction is validated differently, and this task's whole bar is that nothing changes. They are also ethereumjs-specific concepts, so passing them verbatim across an engine-neutral seam would be importing one engine's vocabulary into the shared type. Choose, and record the reasoning at the code site: keep them INSIDE the default engine (which is where they mean something, and the revm engine simply has no equivalent), or express what they buy as a neutral request field. Do not leave them implicit. Note the conformance battery's own reference `runTx` passes the same two flags, so an omission here will NOT show up as a battery failure.
+
 **The result type is the interesting part, and it is where the value of this task is.** Mapping `runTx`'s result into a neutral, engine-independent shape (status, gas used, logs in emission order, the bloom, any created address, the effective gas price) is what makes two engines COMPARABLE field by field. Design that shape for what a receipt needs, not for what ethereumjs happens to return, because the next task fills it from a completely different source. Keep block-level concerns (block construction, `cumulativeGasUsed`, the RPC layer, transaction parsing and signature recovery) OUT of the seam: they stay the node's, exactly as they are today.
 
 Keep the read operation's existing guarantees intact: it still cannot commit, it still carries the simulation switches, and the engine still refuses `stateMode:'trie'` and a second `connect`.
@@ -27,6 +43,8 @@ Keep the read operation's existing guarantees intact: it still cannot commit, it
 - [ ] The transaction result crossing the seam is engine-independent (status, gas used, logs in emission order, logs bloom, created address, effective gas price) and carries no ethereumjs-shaped types.
 - [ ] Block construction, `cumulativeGasUsed`, receipt assembly, the RPC layer, transaction parsing and sender recovery are unchanged and remain the node's.
 - [ ] The node reports the engine behind it under the widened name, and the old read-only name is gone rather than aliased.
+- [ ] The rename is COMPLETE across the counted surface: both packages build, every test helper and spec is migrated, and `README.md`, `CONTEXT.md` and ADR 0006 no longer describe a read-only seam. `CHANGELOG.md` is untouched, and ADR 0006 carries a dated amendment rather than a rewrite.
+- [ ] The disposition of `skipBlockGasLimitValidation` / `skipHardForkValidation` is decided explicitly and the reasoning recorded at the code site; transaction validation behaviour is demonstrably identical to today.
 - [ ] `CONTEXT.md`'s *engine* glossary entry is re-widened, and says that the condition it set for re-widening (a spec that moves transactions onto the engine) was met by this one.
 - [ ] The engine's existing refusals are untouched: `stateMode:'trie'` at construction, a second `connect`, a non-engine object, an engine whose `connect` throws, and the hardfork refusals.
 - [ ] NO behaviour change anywhere: the full conformance differential, the state tests, the trusted-sender, persistence, worker and viem-surface suites all pass unchanged, and the reference gas is identical (`number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 returning `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`).
@@ -40,6 +58,8 @@ Keep the read operation's existing guarantees intact: it still cannot commit, it
 ## Prompt
 
 > Goal: give the node ONE engine seam that covers reads AND transactions, with the default engine implementing both, and change no behaviour whatsoever. Every later task in this spec builds on the shape you choose here.
+>
+> FIRST, check this task against current reality: it was written on 2026-08-09 and may have DRIFTED. Re-run the rename count, confirm the node still calls `runTx` directly on its mining path, and confirm nothing has already widened the seam. If a premise has moved, say so rather than building on it.
 >
 > Read `CONTEXT.md`'s *engine* and *read engine* vocabulary first (its glossary entry names the exact condition under which the term should be re-widened, and this spec is that condition), then the engine seam and its refusals, the node's mining path where `runTx` is called, and `docs/adr/0006-the-engine-is-an-injected-object-not-a-named-string.md`.
 >

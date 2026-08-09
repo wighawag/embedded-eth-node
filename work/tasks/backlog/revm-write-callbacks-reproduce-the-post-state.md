@@ -3,7 +3,7 @@ title: The write callbacks reproduce ethereumjs's post-state exactly, including 
 slug: revm-write-callbacks-reproduce-the-post-state
 spec: revm-engine-behind-runtx
 blockedBy: [revm-executes-the-first-transaction-with-commit]
-covers: [2, 16]
+covers: [2]
 ---
 
 ## What to build
@@ -35,6 +35,8 @@ Expect the coinbase to VANISH from post-state when the priority fee is zero: it 
 ## Prompt
 
 > Goal: prove that a chain built on revm is the SAME chain as one built on `@ethereumjs/vm`, by diffing post-state rather than gas.
+>
+> FIRST, check this task against current reality: it was written on 2026-08-09 and may have DRIFTED. Confirm which write callbacks the previous task already implemented and which still throw, and confirm the storage layout is still per-account with per-checkpoint overlays. Complete what is there rather than restarting it.
 >
 > Read the binding's documentation of its write callbacks and of the account-change section of its outcome, `docs/adr/0009-...` for what storage is now (per-account maps with per-checkpoint overlays; clearing an account is O(1)), and the state store's write methods as the previous task left them.
 >

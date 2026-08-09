@@ -39,6 +39,8 @@ The repo already has the instrument: the benchmark suite's existing rows and the
 
 > Goal: answer story 8 with a number, produced by a script someone else can re-run, against the CURRENT baseline.
 >
+> FIRST, check this task against current reality: it was written on 2026-08-09 and may have DRIFTED. Re-read the measurements document it points at and confirm nothing has moved the baseline again since; if something has, measure against THAT, and say which commit the baseline came from.
+>
 > Read `docs/spikes/re-layer-storage-as-per-account-maps-with-per-frame-diffs/measurements.md` for what a transaction costs today and how that document is structured, the benchmark suite's existing rows and frame budget, and the state-ownership ADR for why a boundary crossing is paid once per COLD state access.
 >
 > DO NOT QUOTE THE SPEC'S OWN NUMBERS. Its "interpreter is only ~6% of a transaction" was measured before the state manager stopped copying all of storage per message frame; that copying dominated, and removing it changed the denominator. Re-measure.

@@ -35,6 +35,8 @@ Measured on the engine side, so a wrong answer is recognisable rather than merel
 
 > Goal: exactly one implementation of fee arithmetic per engine, and none in the node. Then prove the money is right by diffing balances, not receipts.
 >
+> FIRST, check this task against current reality: it was written on 2026-08-09 and may have DRIFTED. Confirm where the node still computes a fee, and confirm the engine seam's transaction result carries an effective gas price at all. If an earlier task already moved the arithmetic, narrow this one rather than redoing it.
+>
 > Read where the node currently computes `effectiveGasPrice` for receipts, the engine seam's transaction result, and the binding's outcome (its last field is the effective gas price it used).
 >
 > DELETE, DO NOT DUPLICATE. If after this task the node can still compute a fee itself, the task failed: the whole point of story 4 is that the number has one source, so a fee bug shows up as a diff between engines rather than as two subtly different right-looking answers.

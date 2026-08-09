@@ -34,6 +34,8 @@ Two interactions deserve their own cases because they are where "state is still 
 
 > Goal: prove that adopting revm costs a consumer nothing they already had, by running the tests that already exist and changing none of them.
 >
+> FIRST, check this task against current reality: it was written on 2026-08-09 and may have DRIFTED. Confirm those suites still exist under the names this task assumes and that an earlier task in this spec has not already edited them; an edit that already happened is itself the finding.
+>
 > Read the persistence-reload, genesis-cheats and dump/load suites, and the state-ownership ADR written earlier in this spec (the node owns state; the engine reads and writes it through host callbacks).
 >
 > AN EDIT TO THOSE SUITES IS A FAILURE SIGNAL. They encode today's behaviour, and today's behaviour is what story 13 promises. If one fails, the interesting question is which implementation assumption it caught, not how to make it green.

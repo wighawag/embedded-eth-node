@@ -33,6 +33,8 @@ Keep it small. This task is independent of every other task in this spec and can
 
 > Goal: make a consumer who reaches for a blob transaction find a stated limitation rather than a quietly incomplete receipt.
 >
+> FIRST, check this task against current reality: it was written on 2026-08-09 against `revm-wasm@0.3.1` and may have DRIFTED. Re-read the binding's outcome format at the version the repo actually depends on: if it now surfaces the blob gas fields, the gap is CLOSED and this task becomes closing it rather than documenting it, which is a better outcome and should be said plainly.
+>
 > Read the binding's outcome format documentation (it lists every field the result carries; there are no blob gas fields), the node's receipt assembly, and the repo's honest-edge convention plus the refusals that already follow it, so this one matches their voice.
 >
 > DECIDE, do not hedge. Refuse the transaction, or accept it and document the two absent fields. A middle state where a receipt is returned that looks complete is the one outcome this task exists to prevent.

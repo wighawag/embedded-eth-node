@@ -31,6 +31,8 @@ Cover an access list that names addresses only, one that names storage keys, and
 
 > Goal: honour EIP-2930 access lists on the revm transaction path, and prove they are actually doing something.
 >
+> FIRST, check this task against current reality: it was written on 2026-08-09 and may have DRIFTED. Confirm the conformance battery still sends a type-1 transaction with a real access list (it did at tasking time) and that the seam carries one, so you extend the existing coverage rather than duplicating it.
+>
 > Read how the node parses a type-1 transaction, the engine seam's transaction request, and the binding's access-list option.
 >
 > A CROSS-ENGINE DIFF IS NOT ENOUGH HERE. If the mapping drops the list, both engines charge the same number and agree perfectly. The assertion that catches it is absolute: with the list versus without it, the gas must differ by what EIP-2930 says. Write that one first.
