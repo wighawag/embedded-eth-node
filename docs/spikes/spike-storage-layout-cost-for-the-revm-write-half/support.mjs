@@ -166,23 +166,43 @@ export function table(headers, rows) {
 	for (const r of rows) console.log(line(r));
 }
 
+/**
+ * The installed version of a dependency, found by walking UP from its resolved
+ * entry point to the owning `package.json`.
+ *
+ * Deliberately not a hard-coded `node_modules/.pnpm/<name>@<version>/…` path:
+ * these probes are meant to still RUN (and report the new version) when the
+ * package moves, which is the whole point of printing the version at all. A
+ * pinned path would make the version bump the probes exist to detect throw
+ * before a single measurement was taken.
+ */
+export async function packageVersion(name) {
+	const {readFile} = await import('node:fs/promises');
+	const path = await import('node:path');
+	let dir = path.dirname(require.resolve(name));
+	for (;;) {
+		try {
+			const pkg = JSON.parse(
+				await readFile(path.join(dir, 'package.json'), 'utf8'),
+			);
+			if (pkg.name === name) return pkg.version;
+		} catch {
+			// no package.json here, or not the one we want: keep walking up
+		}
+		const parent = path.dirname(dir);
+		if (parent === dir) return 'unknown';
+		dir = parent;
+	}
+}
+
 /** The machine and versions every measurement in this folder was taken on. */
 export async function environment() {
 	const os = await import('node:os');
-	const smPkg = JSON.parse(
-		await (await import('node:fs/promises')).readFile(
-			new URL(
-				'node_modules/.pnpm/@ethereumjs+statemanager@10.1.2/node_modules/@ethereumjs/statemanager/package.json',
-				REPO_ROOT,
-			),
-			'utf8',
-		),
-	).version;
 	return {
 		node: process.version,
 		platform: `${os.platform()} ${os.arch()}`,
 		cpu: os.cpus()[0]?.model ?? 'unknown',
-		statemanager: smPkg,
+		statemanager: await packageVersion('@ethereumjs/statemanager'),
 	};
 }
 

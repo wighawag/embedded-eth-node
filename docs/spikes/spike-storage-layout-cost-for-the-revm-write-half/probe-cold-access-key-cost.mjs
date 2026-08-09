@@ -23,6 +23,7 @@ import {
 	bench,
 	check,
 	exitWithFailures,
+	packageVersion,
 	printEnvironment,
 	REPO_ROOT,
 	table,
@@ -35,12 +36,7 @@ const require = createRequire(
 const {createRevm} = await import(require.resolve('revm-wasm'));
 const {wasmUrl} = await import(require.resolve('revm-wasm/wasm-url'));
 const {keccak_256} = await import(require.resolve('@noble/hashes/sha3.js'));
-const revmVersion = JSON.parse(
-	readFileSync(
-		require.resolve('revm-wasm').replace(/dist[/\\]index\.js$/, 'package.json'),
-		'utf8',
-	),
-).version;
+const revmVersion = await packageVersion('revm-wasm');
 
 const wasmBytes = readFileSync(fileURLToPath(wasmUrl));
 const wasmModule = new WebAssembly.Module(wasmBytes);

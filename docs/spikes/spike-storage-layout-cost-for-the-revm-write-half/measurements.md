@@ -4,10 +4,12 @@ Measured 2026-08-09 by the three probes in this folder. Every number below is on
 
 ```sh
 pnpm install   # also builds packages/embedded-eth-node/dist, which the probes read
-node docs/spikes/spike-storage-layout-cost-for-the-revm-write-half/probe-storage-layout.mjs
-node docs/spikes/spike-storage-layout-cost-for-the-revm-write-half/probe-transaction-shape.mjs
-node docs/spikes/spike-storage-layout-cost-for-the-revm-write-half/probe-cold-access-key-cost.mjs
+node --max-old-space-size=4096 docs/spikes/spike-storage-layout-cost-for-the-revm-write-half/probe-storage-layout.mjs
+node --max-old-space-size=4096 docs/spikes/spike-storage-layout-cost-for-the-revm-write-half/probe-transaction-shape.mjs
+node --max-old-space-size=4096 docs/spikes/spike-storage-layout-cost-for-the-revm-write-half/probe-cold-access-key-cost.mjs
 ```
+
+**Run them ONE AT A TIME, and keep the heap cap.** `probe-storage-layout.mjs` holds 100,000-slot and (in its pathological section) 1,000,000-slot maps and copies them repeatedly, four layouts over, so it is the memory-heavy one: it takes about 4 minutes and is the only probe here that can put a loaded machine into swap. The cap is not needed for correctness, it just makes an overrun fail as a JS heap error in the probe rather than as memory pressure on whatever else is running. The other two take about 12 seconds each. Every probe exits non-zero if any of its checks fail.
 
 Environment: Node v24.13.1, linux x64, AMD Ryzen 7 PRO 6850U, `@ethereumjs/statemanager` 10.1.2, `@ethereumjs/vm`/`evm` 10.1.2, `revm-wasm` 0.3.1. Every probe exits non-zero if any of its checks fail, so they double as regression probes when either package moves.
 
@@ -28,7 +30,7 @@ Spike code. Nothing under `packages/` imports any of it.
 1. **Q1 is the whole answer, and it is worse than the spec knew.** `SimpleStateManager.checkpointSync()` copies the ENTIRE storage map, and the EVM checkpoints per MESSAGE FRAME, so a transaction pays `frames + 1` full copies of all of state. At 100,000 slots that is 16-18 ms EACH. Four ordinary transactions cost **289 ms** on the shipped layout and **10 ms** on a layout that copies nothing per frame: **29x**, and the gap grows with state.
 2. **Q2 is real but second-order.** The `clearStorage` prefix scan is 14 ms at 100,000 slots, and it is paid once per CREATE (counted, not assumed: a CREATE transaction really does call it once). One scan against four full copies is not where the time is.
 3. **Q3: the per-account layout the task proposed is not the best shape the numbers point at.** Per-account with copy-on-write fixes `clearStorage` (O(1), 0.55 µs at any size) but leaves the checkpoint O(accounts), which is the same O(total) when state is one slot per account. Adding a per-frame DIFF (a journal frame) to the per-account layout makes the checkpoint O(1) as well, and that combination is the one that wins end to end.
-4. **Q4: the per-account NESTING buys nothing for reads. The KEY ENCODING is the cost.** 84% of a 1.23 µs cold revm access is JS-side key handling, but replacing `prefix + slotHex` with two map lookups recovers **-1%** (nothing, inside noise). Replacing the hex key with `revm-wasm`'s packed encoding recovers **50%**. The spec's "about 60% is hex key construction" was right about the cause and understated the share.
+4. **Q4: the per-account NESTING buys nothing for reads. The KEY ENCODING is the cost.** 84% of a 1.23 µs cold revm access is JS-side key handling, but replacing `prefix + slotHex` with two map lookups recovers **nothing** (-1% in the run transcribed below, +2% on re-run: zero either way). Replacing the hex key with `revm-wasm`'s packed encoding recovers **50%**. The spec's "about 60% is hex key construction" was right about the cause and understated the share.
 5. **Nothing here contradicts the standing decision that state ownership stays on the JS side.** The dominant cost is a JS-side data-structure choice the node can change without moving anything into wasm, and changing it removes 96% of it.
 
 **One ADR claim is refuted by measurement** and the write half needs to know before it plans: ADR 0005 says the layout can be swapped "behind that one accessor, and only the accessor changes". It cannot. Run against the prototype, the SHIPPED `SimpleStateManagerStore` answers "this slot is zero" for a slot that holds `0x2a`, `assertStackShape` passes anyway, and `dumpState`'s `'none'` branch dumps NO storage at all. Details in [Blast radius](#blast-radius-checked-not-assumed).
@@ -213,6 +215,29 @@ Two consequences a tasker should plan for. First, the node's public serialisatio
 Partly, and not on the critical path. There is a genuine upstream bug here in the ordinary sense: `checkpointSync` copies the whole of state per frame, so ANY `@ethereumjs/evm` consumer using `SimpleStateManager` pays O(state) per message frame, and `clearStorage`'s no-op signature (already filed as [#4357](https://github.com/ethereumjs/ethereumjs-monorepo/issues/4357) / [#4358](https://github.com/ethereumjs/ethereumjs-monorepo/pull/4358)) is the same class of problem. Filing this one with the numbers costs little and the evidence is already written; a journal-frame checkpoint is what `@ethereumjs/evm` already keeps ABOVE the state manager and what revm keeps inside wasm, so it is not an exotic ask.
 
 But the fix must ship in code we publish, for exactly ADR 0007's reason: `embedded-eth-node` is a LIBRARY, a consumer resolves `@ethereumjs/statemanager` themselves, and a `pnpm patch` would fix only our own test runs while every consumer kept the slow path. This case is stronger than ADR 0007's, because we are not only fixing a bug: we want a storage representation that our own `dumpState` and revm store read directly, and upstream has no reason to keep our accessors stable. So: our own class, published; report upstream; and if upstream ever adopts the same shape, the subclass narrows rather than disappears (the reach-through in `revm-state-store.ts` still needs SOMETHING to reach through).
+
+## Reproduction
+
+Re-run in full on 2026-08-09 on the same machine, one probe at a time under `--max-old-space-size=4096`. **All three exit 0, every check passes, and every finding reproduces**; the digits move by the amounts the next section describes and no ratio changes its story.
+
+| finding | transcribed above | re-run |
+| --- | --- | --- |
+| checkpoint counts per operation (all 7 rows) | see [Q1](#how-many-checkpoints-an-operation-incurs) | identical, every cell |
+| one checkpoint, 100k dense, flat | 17,830 µs | 26,204 µs |
+| one checkpoint, 100k dense, per-account + overlay | 0.296 µs | 0.238 µs |
+| one checkpoint, 100k sparse, per-account CoW | 13,833 µs | 15,466 µs |
+| `clearStorage`, 100k, flat | 13,961 µs | 16,386 µs |
+| `clearStorage`, 100k, per-account CoW | 0.547 µs | 0.528 µs |
+| four transactions at 100k slots, flat | 289.3 ms | 292.8 ms |
+| four transactions at 100k slots, per-account + overlay | 10.0 ms (29.0x) | 10.0 ms (29.2x) |
+| pathological frame, 100 accounts x 1,000 slots, per-account CoW | 11,853 µs | 13,917 µs |
+| cold revm access, shipped flat hex | 1.232 µs | 1.273 µs |
+| recovered by per-account hex keys | -1% | +2% |
+| recovered by packed keys | 50% | 51% |
+| naive (shared-inner-map) control | fails 3/5 semantics, diverges on the fuzz | identical |
+| blast radius: shipped store answers "zero" for `0x2a`, `assertStackShape` passes, `dumpState` dumps nothing | all three | identical |
+
+The one cell that moved in a way worth naming is `recovered by per-account hex keys`, which changed SIGN (-1% to +2%). That is the point: the quantity is zero, and a signed figure near zero is the honest way to say so. Nothing rests on it; what rests on Q4 is the 50-51% the packed encoding recovers, which is stable.
 
 ## Noise, and how to read these numbers
 
