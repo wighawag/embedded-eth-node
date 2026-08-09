@@ -7,9 +7,10 @@
  * revm's state reads must be synchronous: the interpreter is a synchronous loop
  * inside wasm and a read happens in the middle of an opcode, so there is no
  * suspension point to await at. Every method on `StateManagerInterface` returns
- * a `Promise`. The ONLY synchronous view of the node's state that exists is
- * `SimpleStateManager`'s three PUBLIC checkpoint stacks, so this module reaches
- * past the interface into that one implementation, exactly as `node.ts`'s
+ * a `Promise`. The ONLY synchronous view of the node's state that exists is the
+ * node's own `OverlayStorageStateManager` — `SimpleStateManager`'s two PUBLIC
+ * account/code checkpoint stacks plus our storage OVERLAY stack — so this module
+ * reaches past the interface into that one implementation, exactly as `node.ts`'s
  * `dumpState` already does in `'none'` mode. The full cost, the alternatives
  * that were rejected, and why `stateMode:'trie'` therefore cannot be served are
  * in `docs/adr/0005-revm-reads-the-nodes-state-through-simplestatemanagers-stacks.md`.
@@ -17,16 +18,19 @@
  * Three consequences worth having in your head before editing this file:
  *
  * 1. **Read the TOP of the stack on EVERY access.** A checkpoint pushes a COPY
- *    of all three maps, so a frame captured once answers from the frame below
- *    after the next checkpoint — silently, with no error and plausible values.
+ *    of the account and code maps, so a frame captured once answers from the
+ *    frame below after the next checkpoint — silently, with no error and
+ *    plausible values. Storage is read through `storageAt()`, which walks the
+ *    overlay stack live for the same reason.
  * 2. **The key formats are the state manager's, not ours**, and must be
  *    reproduced byte for byte: `address.toString()` (`0x`-prefixed lowercase
- *    hex) for accounts and code, `` `${address}_${slotHex}` `` for storage.
- *    Storage values are stored in shortest form, so reads left-pad to 32 bytes.
+ *    hex) for accounts and code, and the same address key plus a `0x`-prefixed
+ *    slot key for storage. Storage values are stored in shortest form, so reads
+ *    left-pad to 32 bytes.
  * 3. **`@ethereumjs/statemanager` is version-pinned deliberately.** Renaming a
  *    stack is a compile error here (which is why this file uses the real
- *    `SimpleStateManager` type and not `any`); changing the KEY FORMAT or the
- *    value padding would compile and return wrong values. {@link assertStackShape}
+ *    `OverlayStorageStateManager` type and not `any`); changing the KEY FORMAT or
+ *    the value padding would compile and return wrong values. {@link assertStateShape}
  *    catches the structural half at construction, and the cross-backend gas gate
  *    catches the rest, because feeding revm the wrong state changes gas.
  *
@@ -35,8 +39,8 @@
  * consumes them immediately (into a string key, or into a keccak hash); nothing
  * retains one.
  */
-import type {SimpleStateManager} from '@ethereumjs/statemanager';
 import type {Account} from '@ethereumjs/util';
+import type {OverlayStorageStateManager} from './state-manager.js';
 import {keccak_256} from '@noble/hashes/sha3.js';
 import type {AccountState, Address, Bytes32, StateStore} from 'revm-wasm';
 
@@ -71,14 +75,14 @@ const EMPTY_CODE_HASH_HEX = /* @__PURE__ */ hexOf(keccak_256(new Uint8Array()));
 const EMPTY_CODE = /* @__PURE__ */ new Uint8Array();
 
 /**
- * A per-account view of storage.
+ * A per-account view of storage: the address half of the key is bound once, and
+ * each read supplies only the slot.
  *
- * `clearStorage(address)` must be O(THAT ACCOUNT), and `SimpleStateManager`
- * keeps one FLAT `address_slot` map, which cannot do that. The write half is out
- * of scope here (`revm-engine-behind-runtx`), but the layout question must not
- * force a redesign of this adapter when it arrives — so the flat key is built in
- * exactly ONE place, behind this view, rather than inline at each call site. Swap
- * the flat map for `Map<account, Map<slot, value>>` and only this view changes.
+ * The node's storage IS `Map<address, Map<slot, value>>` behind a stack of
+ * overlays, so this is a thin binding rather than a translation — but it stays a
+ * named seam because it is the ONE place a storage key is built, and the packed
+ * key encoding (worth ~50% of a cold revm access, deferred to
+ * `revm-state-store-packed-storage-keys`) replaces exactly this and nothing else.
  */
 interface AccountStorageView {
 	/** The raw (possibly zero-length, possibly short) stored value. */
@@ -97,13 +101,21 @@ export interface SimpleStateStoreOptions {
 }
 
 /**
- * Throw unless `sm` still has the three public checkpoint stacks this adapter
- * reads. Cheap, once, at engine construction: a shape change in
- * `@ethereumjs/statemanager` should fail LOUDLY here rather than answer reads
- * from `undefined`.
+ * Throw unless `sm` still has the exact representation this adapter reads: the
+ * two upstream account/code checkpoint stacks AND the node's own storage overlay
+ * stack. Cheap, once, at engine construction.
+ *
+ * IT MUST CONSTRAIN THE REPRESENTATION, NOT MERELY ITS SHELL. Its predecessor
+ * asserted "three non-empty arrays of Maps", which a per-account layout satisfied
+ * while every storage read silently answered zero — the guard passed on exactly
+ * the change it existed to catch (demonstrated in
+ * `docs/spikes/spike-storage-layout-cost-for-the-revm-write-half/measurements.md`).
+ * So this asserts the storage side by the two ACCESSORS the adapter actually
+ * calls plus the overlay stack's own shape, and `test/storage-overlay.spec.ts`
+ * feeds it a stock `SimpleStateManager` (the flat layout) to prove it refuses one.
  */
-export function assertStackShape(sm: SimpleStateManager): void {
-	for (const name of ['accountStack', 'codeStack', 'storageStack'] as const) {
+export function assertStateShape(sm: OverlayStorageStateManager): void {
+	for (const name of ['accountStack', 'codeStack'] as const) {
 		const stack = sm[name] as unknown;
 		if (
 			!Array.isArray(stack) ||
@@ -119,6 +131,40 @@ export function assertStackShape(sm: SimpleStateManager): void {
 			);
 		}
 	}
+	if (
+		typeof sm.storageAt !== 'function' ||
+		typeof sm.liveStorage !== 'function'
+	) {
+		throw new Error(
+			'embedded-eth-node/revm: the state manager does not expose storageAt() and ' +
+				"liveStorage(), so it is not the node's OverlayStorageStateManager. The revm " +
+				'engine reads storage synchronously through those accessors; a state manager ' +
+				'with a different storage representation would answer every slot as ZERO ' +
+				'rather than failing. See src/state-manager.ts.',
+		);
+	}
+	const overlays = sm.storageOverlays as unknown;
+	const top = Array.isArray(overlays)
+		? (overlays[overlays.length - 1] as StorageOverlayShape | undefined)
+		: undefined;
+	if (
+		!Array.isArray(overlays) ||
+		overlays.length === 0 ||
+		!(top?.written instanceof Map) ||
+		!(top?.cleared instanceof Set)
+	) {
+		throw new Error(
+			'embedded-eth-node/revm: the state manager does not have the expected ' +
+				'storageOverlays (a non-empty array whose top overlay has a `written` Map ' +
+				'and a `cleared` Set). See src/state-manager.ts.',
+		);
+	}
+}
+
+/** Only what {@link assertStateShape} checks, so the guard can look before it leaps. */
+interface StorageOverlayShape {
+	written?: unknown;
+	cleared?: unknown;
 }
 
 /**
@@ -129,7 +175,7 @@ export function assertStackShape(sm: SimpleStateManager): void {
  * store at instantiation time, so the store is the thing that waits.
  */
 export class SimpleStateManagerStore implements StateStore {
-	#sm: SimpleStateManager | undefined;
+	#sm: OverlayStorageStateManager | undefined;
 	#blockHash: ((blockNumber: bigint) => Uint8Array | undefined) | undefined;
 	/** codeHash (unprefixed hex) -> code. Derived, never authoritative. */
 	readonly #byCodeHash = new Map<string, Uint8Array>();
@@ -150,7 +196,10 @@ export class SimpleStateManagerStore implements StateStore {
 	 * ./types.ts), so a second call is a consumer sharing one engine across nodes,
 	 * and it fails at the second construction rather than at the first wrong read.
 	 */
-	bind(sm: SimpleStateManager, options: SimpleStateStoreOptions = {}): void {
+	bind(
+		sm: OverlayStorageStateManager,
+		options: SimpleStateStoreOptions = {},
+	): void {
 		if (this.#sm !== undefined) {
 			throw new Error(
 				'embedded-eth-node/revm: this engine is already connected to a node. An ' +
@@ -160,7 +209,7 @@ export class SimpleStateManagerStore implements StateStore {
 					'WebAssembly.Module to each if you want to compile the wasm only once.',
 			);
 		}
-		assertStackShape(sm);
+		assertStateShape(sm);
 		this.#sm = sm;
 		this.#blockHash = options.blockHash;
 	}
@@ -192,12 +241,8 @@ export class SimpleStateManagerStore implements StateStore {
 		const s = this.#connected().codeStack;
 		return s[s.length - 1];
 	}
-	get #storage(): Map<string, Uint8Array> {
-		const s = this.#connected().storageStack;
-		return s[s.length - 1];
-	}
 
-	#connected(): SimpleStateManager {
+	#connected(): OverlayStorageStateManager {
 		if (this.#sm === undefined)
 			throw new Error(
 				'embedded-eth-node/revm: the engine read state before connect() bound it ' +
@@ -206,13 +251,15 @@ export class SimpleStateManagerStore implements StateStore {
 		return this.#sm;
 	}
 
-	/** The ONLY place a flat `address_slot` storage key is built. */
+	/** The ONLY place a storage key is built. */
 	#storageOf(addressKey: string): AccountStorageView {
 		let view = this.#storageViews.get(addressKey);
 		if (view === undefined) {
-			const prefix = `${addressKey}_0x`;
-			// Reads the map afresh each time: the top of the stack moves.
-			view = {get: (slotHex) => this.#storage.get(prefix + slotHex)};
+			// Walks the overlay stack afresh each time: the top of it moves.
+			view = {
+				get: (slotHex) =>
+					this.#connected().storageAt(addressKey, '0x' + slotHex),
+			};
 			this.#storageViews.set(addressKey, view);
 		}
 		return view;

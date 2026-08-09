@@ -6,6 +6,11 @@
  * Modes (one per library test):
  *   - 'slim-node-checks'   : legacy/1559 receipts, honest -32601 gaps, dump/load,
  *                            state-root mode (none throws / trie real root)
+ *   - 'storage-overlay'    : `stateMode:'none'` storage is per-account with a
+ *                            per-checkpoint OVERLAY — checkpoint/commit/revert
+ *                            semantics against a naive control, a randomised
+ *                            differential against the flat layout the node used
+ *                            to ship, and the serialised dumpState format
  *   - 'engine-seam'        : the read path runs on an ENGINE — default
  *                            @ethereumjs/evm, injected engine serves all three
  *                            read-path callers, transactions stay on the VM
@@ -33,6 +38,7 @@ import type {
 } from 'playwright-browser-harness/contract';
 import {captureEnv} from 'playwright-browser-harness/contract';
 import {slimNodeHonestyChecks} from './slim-node-checks.js';
+import {runStorageOverlayChecks} from './storage-overlay.js';
 import {runEngineSeamChecks} from './engine-seam.js';
 import {runTrustedSenderChecks} from './trusted-sender.js';
 import {workerRoundtrip} from './worker-roundtrip.js';
@@ -55,6 +61,19 @@ const cut: CodeUnderTest = {
 		if (ctx.params.mode === 'slim-node-checks') {
 			try {
 				results.slimNodeChecks = await slimNodeHonestyChecks();
+			} catch (e) {
+				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
+			}
+			return {results, timings, errors, env: captureEnv()};
+		}
+
+		// storage-overlay: the `stateMode:'none'` storage representation. Correctness
+		// FIRST (semantics + a randomised differential against the layout the node
+		// shipped before, with the plausible wrong version kept as a control that must
+		// fail them), then the readers, then the serialised dumpState format.
+		if (ctx.params.mode === 'storage-overlay') {
+			try {
+				results.storageOverlay = await runStorageOverlayChecks();
 			} catch (e) {
 				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
 			}

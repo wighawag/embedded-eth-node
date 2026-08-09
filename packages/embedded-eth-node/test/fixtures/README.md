@@ -1,4 +1,33 @@
-# Vendored `ethereum/tests` fixtures (for track B conformance)
+# Test fixtures
+
+Two unrelated things live here. The `GeneralStateTests/` tree is vendored from
+`ethereum/tests`; `dumpstate-flat-layout.json` is one of ours.
+
+## `dumpstate-flat-layout.json` — a `dumpState()` captured from the PRE-OVERLAY build
+
+Captured 2026-08-09 from the node as it shipped BEFORE
+[ADR 0009](../../../../docs/adr/0009-none-mode-storage-is-per-account-with-per-checkpoint-overlays.md)
+re-layered `stateMode:'none'` storage, i.e. while storage was still
+`SimpleStateManager`'s one flat `${address}_${slot}` map.
+
+It exists because `dumpState` output is **persisted data** (IndexedDB, `loadState`
+fixtures) with existing state behind it, so the internal layout is free to move
+under it and the serialised format is not. `../storage-overlay.spec.ts` uses it
+twice: it rebuilds the identical state on the current code and asserts the
+`accounts`/`code`/`storage` sections are **byte-identical** (key ORDER included),
+and it `loadState`s this very file into a fresh node and reads the values back.
+
+The state it holds is mixed on purpose: pre-state storage, storage written by the
+EVM through nested checkpoints, a CREATE (which calls `clearStorage`) that also
+writes a slot, a cheat giving storage to an account that had none, and a cheat
+appending a slot to an account that had some — so it exercises grouping AND
+within-account ordering. `blocks` carries a wall-clock genesis timestamp, so it is
+not byte-compared; only the three state sections are.
+
+**Do not regenerate it.** Its whole value is that it came from the older code; a
+fresh capture from the current build would assert nothing.
+
+## Vendored `ethereum/tests` fixtures (for track B conformance)
 
 These are a **small, hand-picked handful** of canonical Ethereum
 `GeneralStateTests` JSON files, copied verbatim, used by

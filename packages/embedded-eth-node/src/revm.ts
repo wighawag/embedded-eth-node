@@ -43,7 +43,7 @@
  * enforces. See ADR 0008.
  */
 import type {Common} from '@ethereumjs/common';
-import type {SimpleStateManager} from '@ethereumjs/statemanager';
+import type {OverlayStorageStateManager} from './state-manager.js';
 import {createRevm, type SpecName, type WasmSource} from 'revm-wasm';
 import type {Revm} from 'revm-wasm';
 import {intrinsicGas} from './intrinsic-gas.js';
@@ -269,13 +269,17 @@ export async function createRevmEngine(
 			chainId = context.common.chainId();
 			nodeCommon = context.common;
 			// The one cast: `StateManagerInterface` does not declare the stacks, but
-			// `'none'` mode IS `SimpleStateManager`. Cast to the REAL type (never to
-			// `any`) so every field access below is still typechecked and a rename in
-			// `@ethereumjs/statemanager` is a compile error here. `bind` also asserts
-			// the shape at runtime, which is the half the compiler cannot see.
-			store.bind(context.stateManager as unknown as SimpleStateManager, {
-				blockHash: context.getBlockHash,
-			});
+			// `'none'` mode IS the node's `OverlayStorageStateManager`. Cast to the REAL
+			// type (never to `any`) so every field access below is still typechecked and
+			// a rename in `@ethereumjs/statemanager` — or in our own state manager — is a
+			// compile error here. `bind` also asserts the shape at runtime, which is the
+			// half the compiler cannot see.
+			store.bind(
+				context.stateManager as unknown as OverlayStorageStateManager,
+				{
+					blockHash: context.getBlockHash,
+				},
+			);
 		},
 
 		async call(request: ReadCallRequest): Promise<ReadCallResult> {

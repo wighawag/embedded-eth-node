@@ -1,5 +1,7 @@
 # What the flat storage layout costs, and what a per-account layout buys, measured
 
+> **ACTED ON, 2026-08-09.** The recommendation below shipped: `stateMode:'none'` storage is per-account with per-checkpoint overlays (`docs/adr/0009-none-mode-storage-is-per-account-with-per-checkpoint-overlays.md`), and the AFTER measurement against the shipped class is [`../re-layer-storage-as-per-account-maps-with-per-frame-diffs/measurements.md`](../re-layer-storage-as-per-account-maps-with-per-frame-diffs/measurements.md). Two consequences for this folder, which is now the historical record of the DECISION rather than a live probe set: its "flat (shipped)" baseline is no longer what the node ships, and its probes read `SimpleStateManagerWithClearStorage`, `assertStackShape` and `storageStack` — all three renamed or retired by that change — so they no longer run unmodified. Nothing below is retracted; every number was measured, and the design it argued for is the one in the code. The re-runnable script lives in the new folder.
+
 Measured 2026-08-09 by the three probes in this folder. Every number below is one of their output lines, not a summary of reasoning; re-run them and they will print the same tables (the digits move, the ratios do not: see [Noise](#noise-and-how-to-read-these-numbers)).
 
 ```sh

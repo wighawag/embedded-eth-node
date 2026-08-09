@@ -28,7 +28,7 @@
  */
 import {createVM, runTx, type VM} from '@ethereumjs/vm';
 import {MerkleStateManager} from '@ethereumjs/statemanager';
-import {SimpleStateManagerWithClearStorage} from './state-manager.js';
+import {OverlayStorageStateManager} from './state-manager.js';
 import {Common, Mainnet, Hardfork} from '@ethereumjs/common';
 import {createBlock, type Block} from '@ethereumjs/block';
 import {createTxFromRLP, createTx, type TypedTransaction} from '@ethereumjs/tx';
@@ -130,13 +130,15 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 
 	// State backing: SimpleStateManager (no trie, fast — default) or
 	// MerkleStateManager (real trie + state root — opt-in, slower, conformance-able).
-	// The 'none' manager is our SUBCLASS, which implements the `clearStorage(address)`
-	// that upstream ships as an empty no-op; without it a contract created at an
-	// address that already holds storage inherits it. See ./state-manager.ts.
+	// The 'none' manager is our SUBCLASS: storage is per-account with per-checkpoint
+	// OVERLAYS (upstream copies the whole flat storage map on every message frame),
+	// and it implements the `clearStorage(address)` that upstream ships as an empty
+	// no-op — without which a contract created at an address that already holds
+	// storage inherits it. See ./state-manager.ts.
 	const sm =
 		stateMode === 'trie'
 			? new MerkleStateManager()
-			: new SimpleStateManagerWithClearStorage();
+			: new OverlayStorageStateManager();
 
 	// Touched-account set for the trie-mode dump (storage is read back via the
 	// trie's own dumpStorage). We record the addresses each tx touches at the NODE
@@ -1056,24 +1058,25 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 				if (c.length > 0) code[addr] = hex(c);
 			}
 		} else {
-			// 'none' mode: SimpleStateManager keeps plain Maps on a checkpoint stack.
-			// The top of each stack IS the live set — dump it directly (no trie walk).
-			const smAny = sm as any;
-			const accMap: Map<string, any> =
-				smAny.accountStack[smAny.accountStack.length - 1];
-			const codeMap: Map<string, Uint8Array> =
-				smAny.codeStack[smAny.codeStack.length - 1];
-			const storageMap: Map<string, Uint8Array> =
-				smAny.storageStack[smAny.storageStack.length - 1];
+			// 'none' mode: the account and code stacks are still plain Maps whose TOP
+			// frame is the live set, and storage is per-account with per-checkpoint
+			// OVERLAYS, flattened by liveStorage(). Dump both directly (no trie walk).
+			//
+			// THE SERIALISED FORMAT IS NOT THE INTERNAL LAYOUT and must not follow it:
+			// this output is persisted data (IndexedDB, loadState fixtures) with existing
+			// state behind it. It stays `{address: {slot: value}}` in 0x-hex, and
+			// `test/storage-overlay.spec.ts` asserts it byte-identical to a dump taken
+			// from the pre-overlay flat layout.
+			const live = sm as OverlayStorageStateManager;
+			const accMap = live.accountStack[live.accountStack.length - 1];
+			const codeMap = live.codeStack[live.codeStack.length - 1];
 			for (const [addr, acc] of accMap) {
 				if (acc !== undefined) accounts[addr] = hex(acc.serialize());
 			}
 			for (const [addr, c] of codeMap) code[addr] = hex(c);
-			for (const [combined, val] of storageMap) {
-				const sep = combined.indexOf('_');
-				const addr = combined.slice(0, sep);
-				const slot = combined.slice(sep + 1); // already 0x-prefixed hex
-				(storage[addr] ??= {})[slot] = hex(val);
+			for (const [addr, slots] of live.liveStorage()) {
+				for (const [slot, val] of slots)
+					(storage[addr] ??= {})[slot] = hex(val);
 			}
 		}
 

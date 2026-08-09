@@ -93,7 +93,10 @@ import {intrinsicGas} from '../../src/intrinsic-gas.js';
 import {createEthereumjsReadEngine} from '../../src/engine.js';
 import type {ReadEngine} from '../../src/index.js';
 import {Common, Mainnet} from '@ethereumjs/common';
-import {SimpleStateManager} from '@ethereumjs/statemanager';
+// The node's OWN 'none'-mode state manager, not a stock `SimpleStateManager`: the
+// revm store reads storage through its per-account OVERLAY representation and
+// refuses anything else, loudly, rather than reporting every slot as zero.
+import {OverlayStorageStateManager} from '../../src/state-manager.js';
 import {createEVM} from '@ethereumjs/evm';
 import {createBlock} from '@ethereumjs/block';
 import {createLegacyTx} from '@ethereumjs/tx';
@@ -591,7 +594,7 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 		engineKind: 'default' | 'revm',
 		value: bigint,
 	): Promise<{failed: boolean; error: string; calleeAnswer: boolean}> {
-		const stateManager = new SimpleStateManager();
+		const stateManager = new OverlayStorageStateManager();
 		await stateManager.putAccount(
 			createAddressFromString(account.address),
 			new Account(0n, SEAM_BALANCE),
@@ -859,7 +862,7 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 		const engine = await createRevmEngine({wasm: sharedModule});
 		try {
 			await engine.connect!({
-				stateManager: new SimpleStateManager(),
+				stateManager: new OverlayStorageStateManager(),
 				common: commonOn(hardfork),
 				getBlockHash: () => undefined,
 				stateMode: 'none',
@@ -1335,14 +1338,14 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 		};
 		// Each engine on its OWN empty state, because a CREATE derives its address
 		// from the sender's nonce and neither engine may see the other's deploy.
-		const defaultState = new SimpleStateManager();
+		const defaultState = new OverlayStorageStateManager();
 		const defaultEngine = createEthereumjsReadEngine({
 			evm: await createEVM({common, stateManager: defaultState}),
 			stateManager: defaultState,
 		});
 		const revmEngine = await createRevmEngine({wasm: sharedModule});
 		await revmEngine.connect!({
-			stateManager: new SimpleStateManager(),
+			stateManager: new OverlayStorageStateManager(),
 			common,
 			getBlockHash: () => undefined,
 			stateMode: 'none',

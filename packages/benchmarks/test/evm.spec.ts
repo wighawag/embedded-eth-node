@@ -90,7 +90,19 @@ const collected: Record<string, unknown>[] = [];
  * change that grows it, and say why in the changeset. A red assertion here means
  * either that or an accidental import into the core graph.
  *
- * RE-PINNED TWICE SINCE. Most recent first:
+ * RE-PINNED THREE TIMES SINCE. Most recent first:
+ *
+ * 413.7 -> 416.3 KB raw / 124.6 -> 125.4 KB gzip, by
+ * `re-layer-storage-as-per-account-maps-with-per-frame-diffs`:
+ * `src/state-manager.ts` re-layers `stateMode:'none'` storage as per-account maps
+ * with per-checkpoint OVERLAYS, so a checkpoint stops copying the whole storage
+ * map (28x on four transactions at 100,000 slots, and flat in state size). The
+ * 2.6 KB is the overlay walk, the commit merge, the two synchronous accessors the
+ * revm store and `dumpState` read through, and the error text for the retired
+ * flat `storageStack`. It has to be in the CORE graph for the same reason the
+ * previous re-pin did: this IS the default state manager for `stateMode:'none'`,
+ * which is every consumer who passes no options — and the growth buys that same
+ * consumer the 28x. Still zero bytes of `revm-wasm`.
  *
  * 413.5 -> 413.7 KB raw (gzip unchanged at 124.6), by the `clearStorage` fix:
  * `src/state-manager.ts` subclasses `SimpleStateManager` to implement the
@@ -114,7 +126,7 @@ const collected: Record<string, unknown>[] = [];
  * carries 1% of slack because the zlib shipped with different Node builds does
  * not compress byte-identically, which is noise rather than growth.
  */
-const DEFAULT_ENTRY_BASELINE = {rawKB: 413.7, gzipKB: 124.6};
+const DEFAULT_ENTRY_BASELINE = {rawKB: 416.3, gzipKB: 125.4};
 const GZIP_SLACK = 1.01;
 
 // Build + serve once for the whole file (the cut contains all backends).
