@@ -465,7 +465,15 @@ exactly that (see `test/statetest.spec.ts`, 5/5 vendored cases pass). `VMTests`
 Beyond that, the test suite also runs a **differential** conformance check
 (`test/conformance.spec.ts`): a battery of signed txs through BOTH the node and a
 hand-wired trie-backed `@ethereumjs/vm` `runTx` reference, asserting field-by-field
-equality of receipts/logs/return-data/gas/post-state in both state modes.
+equality of receipts/logs/return-data/gas/post-state in both state modes. That
+reference is the oracle for the receipt and post-state steps but deliberately not
+for all of them: the block-environment and value-bearing steps are diffed instead
+against the node's OWN block plus the `blockEnv` it was configured with, and
+against an absolute succeed/fail statement per sender and per value, because the
+reference is a separate hand-built chain (its own timestamps, a zero coinbase, and
+no receipt at all for a refused read) and those two classes of bug are structurally
+invisible to it (see *conformance differential* in [`CONTEXT.md`](CONTEXT.md), and
+the `THE ORACLE IS ...` comments in `test/helpers/conformance.ts`).
 
 That same battery runs once more with the optional revm engine installed
 (`test/revm-conformance.spec.ts`), in the one state mode that engine serves

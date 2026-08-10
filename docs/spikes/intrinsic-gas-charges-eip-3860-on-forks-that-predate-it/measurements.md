@@ -4,6 +4,8 @@ Measured 2026-08-02 against `revm-wasm@0.3.0` (revm 42.0.1), `@ethereumjs/common
 
 The question, and why it is not the one the previous spike answered. `packages/embedded-eth-node/src/intrinsic-gas.ts` adds the EIP-3860 initcode word cost (`ceil(len/32) * 2`) to every CREATE with no hardfork gate, and `REVM_SPEC_BY_HARDFORK` admitted `berlin`, `london` and `paris` — three forks that predate EIP-3860 (Shanghai). Section 3 of `docs/spikes/prague-intrinsic-gas-floor-or-refuse/measurements.md` observed that revm charges it on BERLIN too and set the matter aside, because the two sides then agree and no divergence reaches an estimate. Agreement between two parties, however, is evidence about the two parties and not about the protocol, so this probe asks a THIRD party.
 
+**Reading order.** Sections 1 to 5 record `revm-wasm@0.3.0` and the fix that landed against it. `0.3.1` fixed the artifact upstream the same day and INVERTED that remedy, so §6 (re-measured) and §7 (what shipped) carry the current conclusions; the earlier sections are kept as measurement history, not as current guidance.
+
 The probe's subject is a CREATE whose initcode is `PUSH1 0 / PUSH1 0 / RETURN` zero-padded to a chosen length: it deploys empty code and costs 6 gas to execute at every spec, so gas that moves when the LENGTH moves is intrinsic gas and nothing else.
 
 ## 1. revm's answer, twice, and it is the spike's answer
@@ -37,6 +39,8 @@ EIP-3860 shipped in Shanghai. On `berlin`, `london` and `paris` the node and rev
 
 ## 3. What reaches a user, and why the fork GATE on its own is not the fix
 
+> **Superseded in its remedy, not in its measurements, by §6 below.** The numbers here are `revm-wasm@0.3.0`'s and stand as measured. The conclusion drawn from them, that gating the term locally would CREATE a cross-backend divergence, is void against `0.3.1`, which gates the term itself: there the gate is what restores agreement. Kept because it is the reasoning the fork gate had to overturn.
+
 `eth_estimateGas` is `executionGas + intrinsicGas(...)`. On the default `@ethereumjs/evm` engine `runCall` charges no intrinsic gas, so the estimate moves when the node's formula moves. On revm the engine SUBTRACTS the node's intrinsic from `totalGasSpent` and the node adds the same number straight back, so the estimate is revm's `totalGasSpent` whatever the node's formula says:
 
 | spec | default engine | revm engine | protocol | if `intrinsic-gas.ts` gated EIP-3860 |
@@ -57,13 +61,13 @@ A mis-costing that turned out to be "this artifact ignores the spec" would be a 
 | PUSH0 (0x5f, Shanghai) | halt | halt | halt | ok | ok |
 | TLOAD (0x5c, Cancun) | halt | halt | halt | halt | ok |
 
-The divergence is confined to the PRE-EXECUTION intrinsic-gas computation, which behaves as though it were evaluated at a fixed late spec. That is the same root cause as `work/notes/observations/revm-wasm-gasused-carries-the-eip-7623-floor.md` (a Prague floor reported in `gasUsed` on BERLIN), and it is now recorded as `work/notes/observations/revm-wasm-intrinsic-gas-ignores-the-spec.md` — with the sharpening that it does not merely REPORT a post-fork cost pre-fork, it CHARGES one.
+The divergence is confined to the PRE-EXECUTION intrinsic-gas computation, which behaves as though it were evaluated at a fixed late spec. That is the same root cause as `work/notes/observations/revm-wasm-gasused-carries-the-eip-7623-floor.md` (a Prague floor reported in `gasUsed` on BERLIN), and it was recorded as `work/notes/observations/revm-wasm-intrinsic-gas-ignores-the-spec.md`, with the sharpening that it does not merely REPORT a post-fork cost pre-fork, it CHARGES one. That note's own discharge condition (this repo upgrades and re-admits) was met by §7 below, so it too was discharged by deletion, in commit `68f59e2`; that commit names §6 of this document, ADR 0008's first two amendments, the gate in `src/intrinsic-gas.ts` and the clause-(b) assertions in `test/revm-engine.spec.ts` as where its signal now lives. Its sibling above is KEPT and still live: the `gasUsed` floor is unfixed upstream.
 
 ## 5. What this repo did about it
 
 > **Superseded by §6 and §7 below.** This is what landed against `0.3.0`; the upstream fix reversed it the same day. Kept because it is the reason the fork gate now exists.
 
-`berlin`, `london` and `paris` moved from `REVM_SPEC_BY_HARDFORK` to `REVM_REFUSED_HARDFORKS`, so `embedded-eth-node/revm` admits `shanghai` and `cancun` only, and `src/intrinsic-gas.ts` keeps its unconditional EIP-3860 term — which is now correct at every fork any part of this node can run. Reasoning: `docs/adr/0008-the-revm-engine-admits-only-hardforks-it-can-cost.md` (amended, including the sharpened admission rule) and `work/notes/observations/decisions-intrinsic-gas-charges-eip-3860-on-forks-that-predate-it-2026-08-02.md`.
+`berlin`, `london` and `paris` moved from `REVM_SPEC_BY_HARDFORK` to `REVM_REFUSED_HARDFORKS`, so `embedded-eth-node/revm` admits `shanghai` and `cancun` only, and `src/intrinsic-gas.ts` keeps its unconditional EIP-3860 term — which is now correct at every fork any part of this node can run. Reasoning: `docs/adr/0008-the-revm-engine-admits-only-hardforks-it-can-cost.md` (amended, including the sharpened admission rule). The capture-bucket note taken alongside it was ratified by the maintainer and discharged by deletion in commit `38e0164` (`work/protocol/WORK-CONTRACT.md`: a note leaves its bucket by deletion, and git history is the archive); that commit names where each of its decisions now lives, which for this one is ADR 0008 and its amendment, the refusal strings in `src/revm.ts`, the fork-range comment in `src/intrinsic-gas.ts`, and the re-runnable probe in this folder.
 
 ## 6. RE-MEASURED against `revm-wasm@0.3.1`, which FIXED it, and thereby inverted the local fix
 
@@ -113,4 +117,4 @@ The EIP-7623 floor is now correctly ACTIVE on Prague and later, which is precise
 - `berlin`, `london` and `paris` moved back into `REVM_SPEC_BY_HARDFORK`; `prague` and `osaka` stayed refused, verbatim;
 - `test/revm-engine.spec.ts` now asserts the CREATE-shaped `eth_estimateGas` on BOTH engines at every admitted fork (53298 pre-Shanghai, 53302 from Shanghai — the §6 numbers, reproduced in a browser), and the node's intrinsic gas against `@ethereumjs/tx`'s.
 
-Reasoning: the second amendment to `docs/adr/0008-the-revm-engine-admits-only-hardforks-it-can-cost.md`, and `work/notes/observations/decisions-upgrade-0-3-1-gate-eip-3860-and-readmit-pre-shanghai-forks-2026-08-02.md`.
+Reasoning: the second amendment to `docs/adr/0008-the-revm-engine-admits-only-hardforks-it-can-cost.md`. The capture-bucket note taken alongside it was likewise ratified and discharged by deletion, in commit `40e0c73`; its reasoning is carried by that amendment, by the `WHY THE FORK IS A Common AND NOT A HARDFORK NAME` block at the top of `src/intrinsic-gas.ts`, and by the per-fork assertions in `test/revm-engine.spec.ts`.
