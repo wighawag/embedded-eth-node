@@ -14,11 +14,14 @@ The trap is silent rather than loud. Both helpers assert on the payload the fixt
 
 Share the fixture from one home and have both helpers import it, so its bytecode and the payload it is expected to produce cannot drift apart.
 
-Worth carrying while you are there: that bytecode uses `PUSH0` (`0x5f`), so it silently requires Shanghai or later. `close-the-residual-holes-in-the-affordability-classification` owns making it fork-portable (its item 4). If that task has already landed, share whatever encoding it settled on rather than re-introducing the `PUSH0` form; if it has not, do not pre-empt its decision, just make sure there is ONE copy for it to fix instead of two.
+**The encoding question is SETTLED (updated 2026-08-10).** `close-the-residual-holes-in-the-affordability-classification` has landed and made the fixture fork-portable: both copies now read `0x60ff60005360016000fd`, which uses `PUSH1 00` instead of `PUSH0` and so no longer silently requires Shanghai. Share THAT encoding; do not re-introduce a `PUSH0` form.
+
+That task also added a per-fork control loop which executes the fixture at every hardfork the revm engine admits, and this is the second reason to share rather than merely tidy: the loop reads `revm-engine.ts`'s constant ONLY. The conformance battery's verbatim copy, and the newer funds-naming fixture, are asserted `PUSH0`-free by COMMENT alone and are never executed anywhere but the node's pinned fork. So today someone could revert the conformance copy to a `PUSH0` form, or add `PUSH0` to the funds-naming fixture, and the per-fork loop would not notice. Sharing one definition is what puts the fixtures that are ASSERTED portable and the fixture that is MEASURED portable behind the same bytes.
 
 ## Acceptance criteria
 
 - [ ] `REVERT_WITH_REASON_ADDR` and `REVERT_WITH_REASON_CODE` are defined in exactly ONE place and imported by both helpers; no verbatim duplicate remains.
+- [ ] The fixture the per-fork control loop EXECUTES is the same definition the conformance battery uses, so a fixture asserted `PUSH0`-free cannot drift away from the one actually measured per fork. Include the funds-naming fixture if it shares the same exposure.
 - [ ] The expected payload the fixture produces is asserted against the shared definition, so editing the bytecode cannot leave a stale expectation behind in the other helper.
 - [ ] The full battery still passes on both engines and both state modes, with the same steps asserted by label as before.
 - [ ] Reference gas is unchanged: `number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 returning `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`.
