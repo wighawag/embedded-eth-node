@@ -6,6 +6,8 @@ blockedBy: []
 covers: [15]
 ---
 
+> **WIDENED 2026-08-10, after `revm-executes-the-first-transaction-with-commit`: the gap is no longer only in the RECEIPT.** That change mapped the node's transaction onto the binding's execute WITHOUT the blob fields, so a type-3 transaction on a revm-backed node now EXECUTES as a 1559 one: `BLOBHASH` answers zero and blob gas is neither charged nor validated, where the default engine charges and validates it. That is an execution divergence between the two engines on a fork they both admit, not merely two absent receipt fields, and it makes the decision below sharper rather than different: a transaction that executes under the wrong rules and returns a plausible receipt is worse than one that is refused. The binding DOES accept `blobVersionedHashes` and `maxFeePerBlobGas`, so mapping them is available; what it does not surface is the blob gas the receipt wants. Cover both halves, and prefer REFUSING a type-3 transaction on a path that cannot cost it correctly over executing it under 1559 rules.
+
 ## What to build
 
 revm supports blob transactions fully: `BLOBHASH`, `BLOBBASEFEE`, the blob gas price and the versioned-hash checks all work, and the engine's own differential covers thousands of blob transactions. What is missing is an INTERFACE omission: the binding's outcome does not surface `blobGasUsed` or `blobGasPrice`, so a type-3 receipt cannot be fully reconstructed from it. Verified against `revm-wasm@0.3.1`: the outcome blob's documented layout carries gas used, total gas spent, refunded, return data, logs, the bloom, per-account changes and the effective gas price, and no blob gas fields.

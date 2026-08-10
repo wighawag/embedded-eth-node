@@ -6,6 +6,8 @@ blockedBy: [revm-executes-the-first-transaction-with-commit]
 covers: []
 ---
 
+> **URGENT AS OF 2026-08-10, and no longer hypothetical.** `revm-executes-the-first-transaction-with-commit` landed with this criterion UNMET: `TransactionRequest` still carries only `{tx, block}`, and the revm engine reads `request.tx.getSenderAddress()`. So trusted mode works TODAY only because `node.ts` shadows that method on the parsed transaction and revm happens to call it, which means the guarantee now depends on an undocumented convention holding ACROSS an engine boundary, and Gate 2 noted that no test could detect a regression in it. Nothing is wrong right now; everything about it is fragile, and any third-party engine that recovers its own sender is silently wrong. This task is what makes it structural, so it should be built BEFORE more engines or more transaction shapes arrive.
+
 ## What to build
 
 The spec's Solution names the `evm_*As` trusted-sender variants as executing on the installed engine, and until this task nothing delivered or verified that. It is the most dangerous gap in the set, because getting it wrong is SILENT: the transaction executes as a different address, commits, and returns a completely plausible receipt.
