@@ -35,6 +35,10 @@
  *      answer, and NAMES a shortfall of funds in each engine's own words
  *      (`insufficient balance` / revm's quoted `LackOfFundForMaxFee`), read at
  *      the engine seam because the node flattens both into `execution reverted`.
+ *      The seam probe takes the fork FROM THE NODE rather than naming one, and
+ *      the callee the negative controls use is bytecode every admitted fork can
+ *      execute — measured at each of them, since a control a fork lacks the
+ *      opcodes for fails the call anyway and would pass as the control working.
  *   5e. WHAT A FAILURE CARRIES AS `data` is the same on both engines: `0x` for a
  *      refused transfer (revm's own validation text reaches the engine as return
  *      data and `src/revm.ts` drops it, rather than handing a client bytes it
@@ -188,6 +192,50 @@ async function defaultEngineOn(
 }
 
 /**
+ * The `Common` THE NODE ITSELF PINS, taken from a real `createNode()` rather
+ * than restated — the same discipline `src/intrinsic-gas.ts` follows by taking
+ * the node's `Common` instead of naming a hardfork.
+ *
+ * The seam probes below drive engines DIRECTLY, with no node above them, so they
+ * need chain params of their own; hand-writing `hardfork: 'cancun'` there made
+ * "the fork the node pins" two independent statements with a comment claiming
+ * they were one, and the day the node's fork moves the probe would go on
+ * measuring the old one, silently. `connect` is handed the node's live context,
+ * so an engine that does nothing but record it answers the question from the
+ * node under test itself.
+ *
+ * The probe engine never executes: `createNode()` calls `connect` during
+ * construction, and this node is disposed immediately after.
+ */
+async function nodePinnedCommon(): Promise<Common> {
+	let captured: Common | undefined;
+	const forkProbe: Engine = {
+		id: 'fork-probe',
+		connect(context) {
+			captured = context.common;
+		},
+		async call() {
+			throw new Error(
+				'fork-probe: this engine only records the node Common, it never runs',
+			);
+		},
+		async transact() {
+			throw new Error(
+				'fork-probe: this engine only records the node Common, it never runs',
+			);
+		},
+	};
+	const probeNode = await createNode({chainId: CHAIN_ID, engine: forkProbe});
+	await probeNode.dispose();
+	if (captured === undefined)
+		throw new Error(
+			'fork-probe: createNode() never connected the engine, so there is no ' +
+				'node fork to derive the seam probes from',
+		);
+	return captured;
+}
+
+/**
  * Restates the node's intrinsic-gas formula for a CALL, so decomposing an
  * estimate into execution gas is a real comparison rather than a tautology.
  *
@@ -206,6 +254,18 @@ function intrinsicGasForCall(dataHex: string): bigint {
 	}
 	return gas;
 }
+
+/**
+ * This chain, at a GIVEN hardfork — the shape a node whose fork had moved would
+ * hand an engine at `connect`, and the only fork input the per-fork sections
+ * take. The fork is a PARAMETER here and nowhere a constant: the fork the node
+ * actually pins is read from the node itself ({@link nodePinnedCommon}).
+ */
+const commonOn = (hardfork: string) =>
+	new Common({
+		chain: {...Mainnet, chainId: CHAIN_ID, name: 'embedded-eth-node'},
+		hardfork,
+	});
 
 /**
  * Runtime bytecode returning `blockhash(number - 1)`.
@@ -240,17 +300,27 @@ const CALLDATA_SINK_ADDR = '0x00000000000000000000000000000000ca11da7a';
 /** A codeless address to send ether to, for the value-bearing reads. */
 const VALUE_SINK_ADDR = '0x0000000000000000000000000000000000005151';
 /**
- * A callee that REVERTS WITH A REASON: `PUSH1 ff, PUSH0, MSTORE8, PUSH1 01,
- * PUSH0, REVERT` — one byte of revert data, the CALLEE's own answer. It is the
- * other side of the return-data check below: an engine that stopped forwarding
- * its own validation text must still forward these bytes, on both engines.
+ * A callee that REVERTS WITH A REASON: `PUSH1 ff, PUSH1 00, MSTORE8, PUSH1 01,
+ * PUSH1 00, REVERT` — one byte of revert data, the CALLEE's own answer. It is
+ * the other side of the return-data check below: an engine that stopped
+ * forwarding its own validation text must still forward these bytes, on both
+ * engines.
  *
- * `PUSH0` needs Shanghai or later, which these nodes are (they run the node's
- * pinned `cancun`, and nothing here varies the fork — the per-fork sections
- * below build their own `Common` and execute no contract).
+ * FORK-PORTABLE, and deliberately: this was `PUSH0` (`0x5f`) for the two zeroes,
+ * which silently required Shanghai. Nothing varies the fork where the bars run
+ * today, but a control that a fork cannot EXECUTE fails the call anyway (as an
+ * invalid opcode), which reads as the control working while measuring nothing.
+ * `PUSH1 00` costs one byte each and the whole fixture is then Byzantium-era
+ * (`PUSH1`/`MSTORE8` are Frontier, `REVERT` is Byzantium), i.e. valid at every
+ * fork this engine admits and every later one. MEASURED, not merely stated, at
+ * `controlAtFork` below.
+ *
+ * Kept BYTE-IDENTICAL to the copy in ./conformance.ts, which asserts the same
+ * payload against it. Sharing one definition is
+ * `share-the-revert-with-reason-fixture-between-the-two-test-helpers`.
  */
 const REVERT_WITH_REASON_ADDR = '0x000000000000000000000000000000000bad0bad';
-const REVERT_WITH_REASON_CODE = '0x60ff5f5360015ffd';
+const REVERT_WITH_REASON_CODE = '0x60ff60005360016000fd';
 /** ...and the bytes it reverts with, as `eth_call` surfaces them. */
 const REVERT_WITH_REASON_DATA = '0xff';
 /** The node's default block coinbase, which is credited the priority fee. */
@@ -759,11 +829,18 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 	// start at exactly `balance + 1`.
 	// That is the difference between "this call did not succeed" and "the sender
 	// could not afford this transfer".
-	const seamCommon = new Common({
-		chain: {...Mainnet, chainId: CHAIN_ID, name: 'embedded-eth-node'},
-		// The fork the node pins, so the seam probe fails the way the node would.
-		hardfork: 'cancun',
-	});
+	//
+	// THE FORK IS THE NODE'S OWN, DERIVED (see {@link nodePinnedCommon}), so the
+	// probe cannot go on measuring a fork the node has left. It is also reported,
+	// because the seam probe only says anything about the revm engine if that fork
+	// is one the engine ADMITS — on a refused fork `connect` throws and there is no
+	// measurement at all.
+	const seamCommon = await nodePinnedCommon();
+	out.seamHardfork = seamCommon.hardfork();
+	out.seamHardforkIsAdmitted = Object.prototype.hasOwnProperty.call(
+		REVM_SPEC_BY_HARDFORK,
+		seamCommon.hardfork(),
+	);
 	const SEAM_BALANCE = 10n ** 18n;
 	/**
 	 * One value-bearing read made STRAIGHT to an engine, on a state where the
@@ -859,6 +936,60 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 		'ERC20: transfer amount exceeds balance',
 		'ERC20: insufficient allowance',
 	].every((message) => !namesLackOfFunds(message));
+
+	// ---------- the NEGATIVE CONTROL runs at every fork the engine ADMITS ------
+	// A control is only a control if it EXECUTES. An invalid opcode fails a call
+	// too, so a control whose bytecode a fork does not have would still "not
+	// succeed" — and would be read as the control doing its job while measuring
+	// nothing, or misreported as a failure of the thing under test.
+	// {@link REVERT_WITH_REASON_CODE} is written without `PUSH0` for that reason,
+	// and this is the MEASUREMENT of that claim rather than a comment making it:
+	// the fixture is executed at every fork `REVM_SPEC_BY_HARDFORK` admits (berlin
+	// upward) and must revert with its own byte at each. The bars themselves run on
+	// the fork the node pins, so what this protects is the day anything runs them
+	// per fork.
+	//
+	// On the DEFAULT engine deliberately: what is in question is whether the
+	// BYTECODE is valid AT A FORK, and `@ethereumjs/evm`'s per-fork opcode table is
+	// the authority on that. Both engines run these same bytes above, on the node's
+	// own fork, and are held to the same payload there.
+	const controlAtFork: Record<string, string> = {};
+	for (const hardfork of Object.keys(REVM_SPEC_BY_HARDFORK)) {
+		const stateManager = new OverlayStorageStateManager();
+		const callee = createAddressFromString(REVERT_WITH_REASON_ADDR);
+		await stateManager.putAccount(callee, new Account());
+		await stateManager.putCode(callee, hexToBytes(REVERT_WITH_REASON_CODE));
+		const common = commonOn(hardfork);
+		const engine = await defaultEngineOn(stateManager, common);
+		const r = await engine.call({
+			from: createAddressFromString(account.address),
+			to: callee,
+			data: new Uint8Array(),
+			value: 0n,
+			gasLimit: 1_000_000n,
+			// No base fee on the header: it is an EIP-1559 field, and berlin (the
+			// lowest admitted fork) predates it. Each fork's own default applies.
+			block: createBlock(
+				{
+					header: {
+						number: 1n,
+						gasLimit: 30_000_000n,
+						timestamp: SHARED_BLOCK_ENV.timestamp,
+					},
+				},
+				{common},
+			),
+		});
+		// Both halves are reported: WHY it failed and WHAT it returned. An invalid
+		// opcode returns no data, so the payload alone would say `0x` for a fork the
+		// fixture cannot run on and for a fixture that returned nothing alike.
+		controlAtFork[hardfork] =
+			r.error === undefined
+				? `SUCCEEDED (${bytesToHex(r.returnValue)})`
+				: `failed (${r.error}), data ${bytesToHex(r.returnValue)}`;
+	}
+	out.controlAtFork = controlAtFork;
+	out.controlAtForkExpected = `failed (revert), data ${REVERT_WITH_REASON_DATA}`;
 
 	// ---------- the BLOCK ENVIRONMENT, engine against engine ----------
 	// Two nodes given the SAME block environment verbatim, so any difference in
@@ -1030,11 +1161,6 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 	// the one place the guard is reachable: `connect` is handed a `Common` on each
 	// fork directly, exactly as a node whose hardfork had moved would hand it.
 	const sharedModule = await WebAssembly.compile(bundlerResolvedWasm);
-	const commonOn = (hardfork: string) =>
-		new Common({
-			chain: {...Mainnet, chainId: CHAIN_ID, name: 'embedded-eth-node'},
-			hardfork,
-		});
 	async function connectOn(hardfork: string): Promise<string> {
 		const engine = await createRevmEngine({wasm: sharedModule});
 		try {

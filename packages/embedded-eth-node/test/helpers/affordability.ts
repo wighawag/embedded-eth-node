@@ -38,19 +38,29 @@
  *     never in the return data, which is what lets {@link isCalleeAnswer} be
  *     nothing but an emptiness test.
  *
- * CAN IT GO RED? Checked by MUTATION on 2026-08-02, chromium, every mutation
- * reverted afterwards:
+ * CAN IT GO RED? Checked by MUTATION on 2026-08-02 and again on 2026-08-10,
+ * chromium, every mutation reverted afterwards:
  *
  *   - `classifyValueRead` returning {@link REJECTED} for any throw (the bare
  *     `catch` this replaced) -> `value-bearing read affordability` RED on both
- *     engines and both state modes, on the two negative controls the step
- *     issues (a malformed sender, a callee reverting with a reason).
+ *     engines and both state modes, on the negative controls the step issues (a
+ *     malformed sender, a callee reverting with a reason, a callee whose reason
+ *     names a lack of funds).
  *   - one negative case's sender replaced by `0xnotanaddress` (an unrelated
  *     error at the SAME call site) -> RED, reported as
  *     `NOT an engine rejection (code undefined): Invalid address input=...`.
  *   - either half of {@link namesLackOfFunds} forced true -> `revm-engine.spec`
  *     RED on the near-miss controls (`ERC20: transfer amount exceeds balance`,
  *     `ERC20: insufficient allowance`).
+ *   - (2026-08-10) {@link isCalleeAnswer} given back the vocabulary tolerance it
+ *     used to carry (`namesLackOfFunds(text) -> false`) -> RED on the third
+ *     control alone, reported as `negative control 'callee reverts naming a lack
+ *     of funds' classified as 'rejected by the engine, no callee return data'`.
+ *     That control exists for exactly this mutation; see ./conformance.ts.
+ *   - (2026-08-10) the controls' callee bytecode put back to its `PUSH0` form ->
+ *     `revm-engine.spec` RED at `berlin`, `london` and `paris`
+ *     (`failed (invalid opcode), data 0x`), which is the reading a control that
+ *     cannot RUN produces.
  */
 
 /** A value-bearing read that SUCCEEDED. */
@@ -111,6 +121,11 @@ function describeReadFailure(err: unknown): string {
  *
  * ANY bytes are. Emptiness is the whole test, and it is that simple again
  * because the engines now agree about what a refused transfer returns: nothing.
+ * A CONTRACT is therefore free to revert with any reason at all, `insufficient
+ * funds` included, and still classifies as the callee answering rather than as
+ * the sender being refused — issued as a control in ./conformance.ts, where the
+ * reasoning for keeping a near-vacuous check is recorded.
+ *
  * This predicate used to carry a TOLERANCE — return data whose text named a
  * shortfall of funds was read as the ENGINE talking rather than the callee —
  * because `revm-wasm` reuses the outcome's return-data slot for a VALIDATION

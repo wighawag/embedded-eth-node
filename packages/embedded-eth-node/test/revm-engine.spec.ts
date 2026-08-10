@@ -173,6 +173,11 @@ test('revm engine: same results + same gas as @ethereumjs/evm, on the node own s
 	// of those four clauses false.
 	expect(c.valueSeamOutcomes.default).toBe(c.valueSeamExpected);
 	expect(c.valueSeamOutcomes.revm).toBe(c.valueSeamExpected);
+	// ...on the fork the NODE pins, read off a real `createNode()` rather than
+	// named a second time here — and that fork must be one the engine ADMITS, or
+	// the revm half of the probe could not have connected at all.
+	expect(c.seamHardforkIsAdmitted).toBe(true);
+	expect(c.admittedHardforks).toContain(c.seamHardfork);
 	// The two engines say it in their OWN words, which is why the predicate above
 	// is a vocabulary rather than a string: neither message may be asserted on the
 	// other engine.
@@ -181,6 +186,15 @@ test('revm engine: same results + same gas as @ethereumjs/evm, on the node own s
 	// ...and that vocabulary REFUSES every other failure this read path produces,
 	// so an unrelated error cannot be mistaken for an unaffordable transfer.
 	expect(c.lackOfFundsVocabularyRejects).toBe(true);
+	// ...and the NEGATIVE CONTROL those bars issue is bytecode every admitted fork
+	// can actually run, not only the one the node pins today: an invalid opcode
+	// fails a call too, so a control a fork cannot execute would pass as the
+	// control working while measuring nothing.
+	expect(Object.keys(c.controlAtFork).length).toBeGreaterThan(1);
+	for (const [hardfork, outcome] of Object.entries(c.controlAtFork))
+		expect(`${hardfork}: ${outcome}`).toBe(
+			`${hardfork}: ${c.controlAtForkExpected}`,
+		);
 
 	// the BLOCK ENVIRONMENT read through a contract is the node's own, and the
 	// SAME on both engines. Gas cannot see this class of bug: these opcodes are

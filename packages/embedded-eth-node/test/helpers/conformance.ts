@@ -85,13 +85,39 @@ const VALUE_SINK_ADDR = '0x0000000000000000000000000000000000005151';
 const UNFUNDED_SENDER = '0x00000000000000000000000000000000dead0001';
 /**
  * The value-bearing step's NEGATIVE CONTROL callee: runtime code that reverts
- * WITH one byte of return data (`PUSH1 ff, PUSH0, MSTORE8, PUSH1 01, PUSH0,
- * REVERT`). It fails the same call the same way a refused transfer does — an
- * engine failure, JSON-RPC code 3 — and is told apart by the CALLEE ANSWER in
- * its return data, which a refused transfer never produces.
+ * WITH one byte of return data (`PUSH1 ff, PUSH1 00, MSTORE8, PUSH1 01,
+ * PUSH1 00, REVERT`). It fails the same call the same way a refused transfer
+ * does — an engine failure, JSON-RPC code 3 — and is told apart by the CALLEE
+ * ANSWER in its return data, which a refused transfer never produces.
+ *
+ * FORK-PORTABLE, and deliberately: this was `PUSH0` (`0x5f`) for the two zeroes,
+ * so the battery silently required Shanghai. A control a fork cannot EXECUTE
+ * still fails the call (as an invalid opcode), which would read as the control
+ * working while measuring nothing — or misreport as the step under test failing,
+ * the day anything runs this battery per fork. `PUSH1 00` costs one byte each
+ * and leaves the fixture Byzantium-era, i.e. valid at every fork the revm engine
+ * admits (berlin upward). Executed at each of them in ./revm-engine.ts
+ * (`controlAtFork`), which shares this bytecode BYTE-IDENTICALLY — keep the two
+ * in step until
+ * `share-the-revert-with-reason-fixture-between-the-two-test-helpers` gives them
+ * one home.
  */
 const REVERT_WITH_REASON_ADDR = '0x000000000000000000000000000000000bad0bad';
-const REVERT_WITH_REASON_CODE = '0x60ff5f5360015ffd';
+const REVERT_WITH_REASON_CODE = '0x60ff60005360016000fd';
+/**
+ * ...and the same callee with the AFFORDABILITY VOCABULARY in its payload: it
+ * reverts with the ASCII `insufficient funds` (`PUSH18 <reason>, PUSH1 00,
+ * MSTORE, PUSH1 12, PUSH1 0e, REVERT` — `revert(14, 18)`, the 18 bytes MSTORE
+ * right-aligned in the first word). Same fork-portability as above: no `PUSH0`.
+ *
+ * A CONTRACT is free to revert saying that, and its reason is still the CALLEE's
+ * answer, never evidence that the SENDER could not afford the transfer — which
+ * is the one thing this step's negative cases mean. See the controls below for
+ * why it is issued.
+ */
+const REVERT_NAMING_FUNDS_ADDR = '0x000000000000000000000000000000000bad1dea';
+const REVERT_NAMING_FUNDS_CODE =
+	'0x71696e73756666696369656e742066756e64736000526012600efd';
 /** The node's default `from` when an `eth_call` names no sender. */
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 
@@ -1088,14 +1114,49 @@ async function runBattery(
 			cmp(m, `eth_call: ${c.label}`, outcome, c.ok ? OK : REJECTED);
 		}
 		// ---- NEGATIVE CONTROLS: the step must be able to go RED ----
-		// Two REAL failures at the SAME call site, neither of them a refused
-		// transfer. Under the bare `catch` this step used to have, both classified
-		// as "failed" and would have satisfied any negative case above. Each must
-		// now classify as ITSELF — neither `ok` nor a rejection — or this step is
-		// back to proving only that something threw.
+		// REAL failures at the SAME call site, none of them a refused transfer.
+		// Under the bare `catch` this step used to have, every one of them classified
+		// as "failed" and would have satisfied any negative case above. Each must now
+		// classify as ITSELF — neither `ok` nor a rejection — or this step is back to
+		// proving only that something threw.
+		//
+		// WHY THE THIRD ONE (a callee whose revert reason says `insufficient
+		// funds`) IS ISSUED, and it is a REGRESSION control rather than a hole being
+		// closed. ./affordability.ts's {@link isCalleeAnswer} is a pure emptiness
+		// test today, so this control passes BY CONSTRUCTION: any bytes are the
+		// callee's, whatever they spell. It was not always: the predicate carried a
+		// TOLERANCE for return data naming a shortfall of funds, because revm
+		// forwarded its own validation text as return data, and under it THIS callee
+		// classified as a refused transfer — a contract talking its way into an
+		// affordability verdict. `src/revm.ts` removed the cause (validation errors
+		// keep their words in the seam result's `error`), the tolerance went with it,
+		// and this control is what makes the tolerance's return visible: re-add any
+		// vocabulary to `isCalleeAnswer` and this classifies as REJECTED and the step
+		// goes red. Near-vacuous against an emptiness test is the POINT — it costs
+		// one `eth_call` and it is the only thing standing between that history and
+		// its repetition. The engines' vocabulary check on their own ERROR
+		// (`namesLackOfFunds`) is a different job and is untouched by this.
+		//
+		// AND WHY THERE IS NO BARE `REVERT 0, 0` CONTROL, decided here rather than
+		// left to be re-derived. Such a callee classifies as {@link REJECTED} — code
+		// 3, no return data — exactly as a refused transfer does, so it CANNOT be
+		// issued as a control: it would demand that this step tell apart two failures
+		// that are identical in everything the node exposes above the seam. That is
+		// not a hole in the classification, it is the limit of the SHAPE layer, and
+		// it is covered twice over elsewhere: (a) the negative cases send to a
+		// CODELESS sink and the wei-exact boundary runs through the SAME address, so
+		// a sink that had somehow acquired reverting code fails the
+		// `value == balance` POSITIVE case too and turns this step red; (b) the
+		// engines' own words for the refusal are asserted one layer down, at the
+		// seam, in ./revm-engine.ts, where a bare revert says `revert` and cannot
+		// pass `namesLackOfFunds`. See ./affordability.ts for the two layers.
 		await node4.request({
 			method: 'evm_setCode',
 			params: [REVERT_WITH_REASON_ADDR, REVERT_WITH_REASON_CODE],
+		});
+		await node4.request({
+			method: 'evm_setCode',
+			params: [REVERT_NAMING_FUNDS_ADDR, REVERT_NAMING_FUNDS_CODE],
 		});
 		const controls: {label: string; params: Record<string, unknown>}[] = [
 			{
@@ -1112,6 +1173,18 @@ async function runBattery(
 				params: {
 					from: account.address,
 					to: REVERT_WITH_REASON_ADDR,
+					value: '0x1',
+				},
+			},
+			{
+				// ...and the same, with the revert reason SPEAKING THE AFFORDABILITY
+				// VOCABULARY: an affordable value, a callee that reverts saying
+				// `insufficient funds`. A contract's reason is the CALLEE's answer
+				// whatever it spells, so this must not classify as a refused transfer.
+				label: 'callee reverts naming a lack of funds',
+				params: {
+					from: account.address,
+					to: REVERT_NAMING_FUNDS_ADDR,
 					value: '0x1',
 				},
 			},
