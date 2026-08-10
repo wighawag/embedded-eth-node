@@ -483,6 +483,16 @@ no receipt at all for a refused read) and those two classes of bug are structura
 invisible to it (see *conformance differential* in [`CONTEXT.md`](CONTEXT.md), and
 the `THE ORACLE IS ...` comments in `test/helpers/conformance.ts`).
 
+Two further differentials sit beside it, both against a default-engine
+(`@ethereumjs/vm` `runTx`) node built from identical state, because gas equality
+is blind to them: `test/revm-post-state.spec.ts` diffs what transactions LEAVE
+BEHIND (balances, nonces, code, storage, `dumpState`), and
+`test/revm-fees.spec.ts` diffs what they COST — the sender charged, the coinbase
+credited and the base fee burnt, read off BALANCES rather than off the receipt's
+`effectiveGasPrice`, for legacy, EIP-2930 and EIP-1559 transactions and for a
+storage-clearing refund. A receipt can carry the right price while the wrong
+amount left the sender, which is why the money is asserted where the money is.
+
 That same battery runs once more with the optional revm engine installed
 (`test/revm-conformance.spec.ts`), in the one state mode that engine serves
 (`'none'` — it refuses `'trie'` at construction), so the alternative EVM faces

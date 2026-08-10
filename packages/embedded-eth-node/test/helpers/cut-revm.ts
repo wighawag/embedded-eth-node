@@ -23,6 +23,11 @@
  *                      creation, nested-frame storage, an EIP-161 emptying, a
  *                      selfdestruct) leaving state the default engine's cannot be
  *                      told apart from, read through the node's public surface
+ *   - 'fees'         : the SHARED money differential (helpers/fees.ts) — what a
+ *                      legacy, EIP-2930, EIP-1559 and storage-clearing-refund
+ *                      transaction COSTS, measured on BALANCES (sender charged,
+ *                      coinbase credited, base fee burnt) rather than on the
+ *                      receipt's `effectiveGasPrice`
  */
 import type {
 	CodeUnderTest,
@@ -34,6 +39,7 @@ import {runRevmEngineChecks} from './revm-engine.js';
 import {runRevmConformance} from './revm-conformance.js';
 import {runRevmTrustedSender} from './revm-trusted-sender.js';
 import {runRevmPostState} from './revm-post-state.js';
+import {runRevmFees} from './revm-fees.js';
 
 const cut: CodeUnderTest = {
 	name: 'embedded-eth-node/revm',
@@ -86,6 +92,19 @@ const cut: CodeUnderTest = {
 		if (ctx.params.mode === 'post-state') {
 			try {
 				results.revmPostState = await runRevmPostState();
+			} catch (e) {
+				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
+			}
+			return {results, timings, errors, env: captureEnv()};
+		}
+
+		// The SHARED money differential, with the revm engine installed. A receipt can
+		// carry the right `effectiveGasPrice` while the wrong amount left the sender,
+		// so this one reads BALANCES: what the sender was charged, what the coinbase was
+		// credited, and what was burnt.
+		if (ctx.params.mode === 'fees') {
+			try {
+				results.revmFees = await runRevmFees();
 			} catch (e) {
 				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
 			}
