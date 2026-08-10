@@ -46,7 +46,12 @@ import {
 	type PrefixedHexString,
 } from '@ethereumjs/util';
 import {keccak_256} from '@noble/hashes/sha3.js';
-import {encodeFunctionData, encodeDeployData, decodeFunctionResult} from 'viem';
+import {
+	encodeFunctionData,
+	encodeDeployData,
+	decodeFunctionResult,
+	encodeEventTopics,
+} from 'viem';
 import {privateKeyToAccount} from 'viem/accounts';
 import {
 	createNode,
@@ -56,6 +61,10 @@ import {
 } from '../../src/index.js';
 import {counterAbi, counterBytecode} from './counter.js';
 import {probeAbi, probeBytecode} from './probe.js';
+import {
+	discardedLogProbeAbi,
+	discardedLogProbeBytecode,
+} from './discarded-log-probe.js';
 import {
 	blockEnvProbeAbi,
 	blockEnvProbeRuntimeBytecode,
@@ -120,6 +129,39 @@ const REVERT_NAMING_FUNDS_CODE =
 	'0x71696e73756666696369656e742066756e64736000526012600efd';
 /** The node's default `from` when an `eth_call` names no sender. */
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+
+/**
+ * The bloom of NO logs: 256 zero bytes, STATED rather than computed.
+ *
+ * This file computes no bloom, and that is deliberate rather than lazy: a bloom
+ * implementation here would be a second implementation of the thing the engine
+ * seam exists to have exactly one of (`TransactionResult.logsBloom` comes from
+ * the engine that executed the transaction, on both engines), and a receipt
+ * diffed against it would be diffed against our own arithmetic rather than
+ * against an EVM. The all-zero bloom is the one value that needs no arithmetic
+ * to know, which is why it is the only literal here — and it is worth stating,
+ * because it is exactly the value revm's wire format OMITS when the log count
+ * is zero (`src/revm.ts`), i.e. the one a decoder can silently turn into an
+ * empty byte string.
+ */
+const ZERO_LOGS_BLOOM = '0x' + '00'.repeat(256);
+
+/**
+ * `Discarded(uint256)`'s topic0 — the event the probe emits from a frame that
+ * then REVERTS, and therefore the one topic that must appear NOWHERE: not in a
+ * receipt's logs, not in its bloom, not in `eth_getLogs`. Derived from the same
+ * ABI the transaction is encoded with, so it cannot drift from the contract.
+ */
+const DISCARDED_TOPIC = encodeEventTopics({
+	abi: discardedLogProbeAbi,
+	eventName: 'Discarded',
+})[0] as string;
+
+/** ...and one of the two events that DO survive, for the control filter. */
+const SURVIVING_TOPIC = encodeEventTopics({
+	abi: discardedLogProbeAbi,
+	eventName: 'Before',
+})[0] as string;
 
 /**
  * The block-gas-limit step's fixtures: the gas limits and the two nodes are
@@ -350,6 +392,8 @@ interface BuildCtx {
 	nonce: number;
 	counterAddr?: string;
 	probeAddr?: string;
+	/** The `DiscardedLogProbe` deployed by the reverted-sub-call step. */
+	discardedProbeAddr?: string;
 }
 
 /** Post-state reads to diff between the slim node and the reference. */
@@ -615,8 +659,21 @@ async function runBattery(
 			value: 12345n,
 			gas: 21_000n,
 		});
-		await oneTxBlock('1559-value-transfer', raw);
+		const nr = await oneTxBlock('1559-value-transfer', raw);
 		ctx.nonce++;
+		// A ZERO-LOG TRANSACTION'S BLOOM IS ALL ZERO, stated absolutely as well as
+		// diffed. `oneTxBlock` already compares it against the reference, but both
+		// engines DECODE their own answer and revm's wire format omits the 256 bytes
+		// entirely when the log count is zero: a hand-rolled reader hands the node a
+		// 0-byte `logsBloom` (or mis-parses everything after it), and this is the
+		// cheapest transaction in the battery to get that wrong on.
+		const zeroLogBloom: string[] = [];
+		cmp(zeroLogBloom, 'zero-log tx logCount', nr.logs.length, 0);
+		cmp(zeroLogBloom, 'zero-log tx logsBloom', nr.logsBloom, ZERO_LOGS_BLOOM);
+		steps.push({
+			label: '1559-value-transfer zero-log bloom is all zero',
+			mismatches: zeroLogBloom,
+		});
 		await readsMatch('1559-value-transfer post-state', {
 			balances: [to, account.address],
 		});
@@ -714,7 +771,148 @@ async function runBattery(
 		ctx.nonce++;
 	}
 
-	// 9) Reverting tx: boom() — status 0, gas still charged, no logs.
+	// 9) THE LOG THAT MUST NOT APPEAR: a sub-call that emits and then REVERTS.
+	//
+	//    WHY THIS STEP EXISTS. A receipt carrying a log from a frame that reverted
+	//    is entirely plausible on its face — real address, real topics, sane
+	//    ordering — and the only thing wrong with it is that the event never
+	//    happened. `eth_getLogs` then reports it, and an application that reacts to
+	//    events acts on one the chain does not contain. Nothing else in this
+	//    battery emits from a frame that dies: `boom()` reverts before emitting
+	//    anything, so a log leaking out of a discarded frame would diff CLEAN
+	//    against every other step here.
+	//
+	//    THE BLOOM IS PINNED WITHOUT COMPUTING ONE, in two statements:
+	//      * `oneTxBlock` diffs the whole 256 bytes against the `@ethereumjs/vm`
+	//        reference, as it does for every receipt in this battery; and
+	//      * the bloom must be BYTE-IDENTICAL to the BASELINE mined just before it
+	//        — `DiscardedLogProbe.emitTwo(3,4)`, which emits the same two events
+	//        from the same address with the same indexed arguments and makes no
+	//        reverting sub-call. A bloom is over log ADDRESSES and TOPICS only, so
+	//        the only thing that can make the two differ is the discarded frame's
+	//        `Discarded` topic: they differ exactly when the reverted log leaked
+	//        into the bloom. That is a bloom-level assertion of absence with no
+	//        bloom implementation in this file (see {@link ZERO_LOGS_BLOOM} for why
+	//        there is none).
+	//
+	//    THE BASELINE IS MINED HERE, not borrowed from step 8's `ConformanceProbe`:
+	//    the pair only says something if the two transactions differ in NOTHING but
+	//    the reverting sub-call, which is a property of one contract emitting from
+	//    one address (see contracts/DiscardedLogProbe.sol, which also records why it
+	//    is a separate contract).
+	{
+		const deployRaw = await sign1559({
+			nonce: ctx.nonce,
+			data: encodeDeployData({
+				abi: discardedLogProbeAbi,
+				bytecode: discardedLogProbeBytecode,
+			}),
+			gas: 1_000_000n,
+		});
+		const dr = await oneTxBlock('1559-deploy(DiscardedLogProbe)', deployRaw, {
+			expectCreate: true,
+		});
+		ctx.discardedProbeAddr = (dr.contractAddress as string).toLowerCase();
+		ctx.nonce++;
+
+		const baselineRaw = await sign1559({
+			nonce: ctx.nonce,
+			to: ctx.discardedProbeAddr,
+			data: encodeFunctionData({
+				abi: discardedLogProbeAbi,
+				functionName: 'emitTwo',
+				args: [3n, 4n],
+			}),
+			gas: 200_000n,
+		});
+		const baseline = await oneTxBlock(
+			'discarded-log baseline(emitTwo)',
+			baselineRaw,
+		);
+		ctx.nonce++;
+
+		const data = encodeFunctionData({
+			abi: discardedLogProbeAbi,
+			functionName: 'emitTwoAroundRevertingSubCall',
+			args: [3n, 4n],
+		});
+		const raw = await sign1559({
+			nonce: ctx.nonce,
+			to: ctx.discardedProbeAddr,
+			data,
+			gas: 200_000n,
+		});
+		const nr = await oneTxBlock('reverted-sub-call(emitTwoAround…)', raw);
+		const m: string[] = [];
+		// The transaction ITSELF succeeded: the sub-call reverted and the caller
+		// swallowed it. A step that mined a failed transaction would be asserting
+		// the absence of every log, which is not the property under test.
+		cmp(m, 'status', nr.status, '0x1');
+		cmp(m, 'surviving log count', nr.logs.length, 2);
+		// ...and the two survivors are the ones emitted BEFORE and AFTER the
+		// discarded frame, in that order, so the reverted frame did not perturb
+		// emission order either.
+		cmp(
+			m,
+			'surviving logIndexes',
+			nr.logs.map((l: any) => Number(BigInt(l.logIndex))),
+			[0, 1],
+		);
+		const topics = nr.logs.flatMap((l: any) =>
+			l.topics.map((t: string) => t.toLowerCase()),
+		);
+		if (topics.includes(DISCARDED_TOPIC.toLowerCase()))
+			m.push(
+				`the reverted sub-call's log is IN the receipt: topics ${JSON.stringify(topics)}`,
+			);
+		// THE BLOOM-LEVEL STATEMENT (see the header above).
+		cmp(
+			m,
+			'bloom == baseline emitTwo(3,4) bloom',
+			nr.logsBloom,
+			baseline.logsBloom,
+		);
+		// ...and that comparison means something only if the bloom is not the empty
+		// one, which a receipt that lost BOTH logs would also match.
+		if (nr.logsBloom === ZERO_LOGS_BLOOM)
+			m.push('bloom is all-zero, so the comparison above proves nothing');
+		steps.push({
+			label: "reverted sub-call's log is in neither the logs nor the bloom",
+			mismatches: m,
+		});
+		ctx.nonce++;
+	}
+
+	// 10) ...AND THE SAME FRAME AT THE TOP LEVEL: a transaction that emits and then
+	//     reverts wholesale keeps NOTHING. Same bug, other shape: here the receipt
+	//     is a failed one, so what must be empty is everything — zero logs and the
+	//     all-zero bloom, which is also the zero-log bloom case on a receipt that
+	//     DID execute log-emitting code (the value transfer above never ran any).
+	{
+		const data = encodeFunctionData({
+			abi: discardedLogProbeAbi,
+			functionName: 'emitThenRevert',
+			args: [9n],
+		});
+		const raw = await sign1559({
+			nonce: ctx.nonce,
+			to: ctx.discardedProbeAddr,
+			data,
+			gas: 200_000n,
+		});
+		const nr = await oneTxBlock('reverted-top-level(emitThenRevert)', raw);
+		const m: string[] = [];
+		cmp(m, 'status', nr.status, '0x0');
+		cmp(m, 'log count', nr.logs.length, 0);
+		cmp(m, 'logsBloom', nr.logsBloom, ZERO_LOGS_BLOOM);
+		steps.push({
+			label: 'a reverted transaction keeps neither its log nor its bloom bits',
+			mismatches: m,
+		});
+		ctx.nonce++;
+	}
+
+	// 11) Reverting tx: boom() — status 0, gas still charged, no logs.
 	{
 		const data = encodeFunctionData({abi: probeAbi, functionName: 'boom'});
 		const raw = await sign1559({
@@ -733,7 +931,7 @@ async function runBattery(
 		ctx.nonce++;
 	}
 
-	// 10) eth_estimateGas exactness: estimate a fresh increment() and compare to the
+	// 12) eth_estimateGas exactness: estimate a fresh increment() and compare to the
 	//     reference runTx totalGasSpent for the SAME call mined in the reference.
 	{
 		const data = encodeFunctionData({
@@ -761,7 +959,7 @@ async function runBattery(
 		ctx.nonce++;
 	}
 
-	// 11) Intrinsic-floor + EIP-3860 initcode: deploy with estimateGas exactness on
+	// 13) Intrinsic-floor + EIP-3860 initcode: deploy with estimateGas exactness on
 	//     a CREATE (initcode word cost must be counted). Estimate vs reference runTx.
 	{
 		const data = encodeDeployData({
@@ -789,7 +987,7 @@ async function runBattery(
 		ctx.nonce++;
 	}
 
-	// 12) Back-to-back txs in ONE block: cumulativeGasUsed accumulation + tx/log
+	// 14) Back-to-back txs in ONE block: cumulativeGasUsed accumulation + tx/log
 	//     indices. Auto mode mines one block PER tx, so to get two txs in ONE block
 	//     we use a fresh manual-mining node: deploy, then queue two calls and mine
 	//     a single block. We assert the cumulative/index invariants (the reference
@@ -881,7 +1079,215 @@ async function runBattery(
 		ctx.nonce += 0; // node2 is independent; ctx.nonce unchanged
 	}
 
-	// 13) BLOCK ENVIRONMENT read THROUGH A CONTRACT: BASEFEE / PREVRANDAO /
+	// 15) `logIndex` RUNS ACROSS THE BLOCK, AND `eth_getLogs` READS THE SAME LOGS
+	//     BACK OUT OF IT.
+	//
+	//     THE DIVISION OF LABOUR THIS STEP PINS. The engine owns a log's address,
+	//     topics, data and emission ORDER; everything POSITIONAL is the node's —
+	//     block hash, block number, transaction hash, transaction index, and a
+	//     `logIndex` that is a running total ACROSS THE BLOCK rather than within
+	//     the transaction. A per-transaction index is the way that is silently got
+	//     wrong, and it needs a block with SEVERAL log-emitting transactions to
+	//     show: step 14's block has one log per transaction, where the block-wide
+	//     count and "the transaction's position" happen to coincide. This block
+	//     emits 2, then 0, then 2, so a per-transaction index reads 0,1,0,1 where
+	//     the block-wide one reads 0,1,2,3 — and the zero-log transaction in the
+	//     middle proves the running total is over LOGS and not over transactions.
+	//
+	//     THE ORACLE IS THE NODE'S OWN RECEIPTS, not the reference EVM, and
+	//     deliberately: the reference is a separate hand-built chain whose nonces
+	//     are those of the battery above, so it cannot mine THIS node's block. What
+	//     the reference already guarantees is the half it owns — every log's
+	//     address, topics, data and order are diffed against it field for field in
+	//     steps 8 and 9, on these same transactions. So this step asserts the
+	//     node's half absolutely (continuity, block/transaction metadata) and that
+	//     `eth_getLogs` returns exactly the receipts' logs, which composes into a
+	//     cross-engine statement because this battery runs on the default engine
+	//     (conformance.spec.ts) AND on revm (revm-conformance.spec.ts).
+	//
+	//     AND THE DISCARDED LOG IS CHASED INTO `eth_getLogs`, which is where its
+	//     absence actually matters: a receipt nobody re-reads is one thing, but a
+	//     `eth_getLogs` filtered on that topic returning a hit IS an application
+	//     being told an event happened that never did.
+	{
+		const m: string[] = [];
+		const node5 = await createNode({
+			chainId: CHAIN_ID,
+			stateMode,
+			miningConfig: {type: 'manual'},
+			initialBalances: {[account.address]: GENESIS_BALANCE},
+			// Its OWN engine: one engine instance serves one node.
+			engine: await makeEngine?.(),
+		});
+		const deployRaw = await sign1559({
+			nonce: 0,
+			data: encodeDeployData({
+				abi: discardedLogProbeAbi,
+				bytecode: discardedLogProbeBytecode,
+			}),
+			gas: 1_000_000n,
+		});
+		await node5.request({
+			method: 'eth_sendRawTransaction',
+			params: [deployRaw],
+		});
+		await node5.mine();
+		const deployBlock = (await node5.request({
+			method: 'eth_getBlockByNumber',
+			params: ['latest', true],
+		})) as any;
+		const probe = (
+			(await node5.request({
+				method: 'eth_getTransactionReceipt',
+				params: [deployBlock.transactions[0].hash],
+			})) as any
+		).contractAddress.toLowerCase();
+		// THREE transactions, ONE block: two logs, then none, then two more — the
+		// last of them around a sub-call whose log is discarded, so the block also
+		// carries the case the step below filters for.
+		const blockTxs = [
+			{
+				label: 'emitTwo(3,4)',
+				logCount: 2,
+				data: encodeFunctionData({
+					abi: discardedLogProbeAbi,
+					functionName: 'emitTwo',
+					args: [3n, 4n],
+				}),
+			},
+			{
+				label: 'store(1,2) — no logs',
+				logCount: 0,
+				data: encodeFunctionData({
+					abi: discardedLogProbeAbi,
+					functionName: 'store',
+					args: [1n, 2n],
+				}),
+			},
+			{
+				label: 'emitTwoAroundRevertingSubCall(5,6)',
+				logCount: 2,
+				data: encodeFunctionData({
+					abi: discardedLogProbeAbi,
+					functionName: 'emitTwoAroundRevertingSubCall',
+					args: [5n, 6n],
+				}),
+			},
+		];
+		for (let i = 0; i < blockTxs.length; i++) {
+			const raw = await sign1559({
+				nonce: i + 1,
+				to: probe,
+				data: blockTxs[i].data,
+				gas: 200_000n,
+			});
+			await node5.request({method: 'eth_sendRawTransaction', params: [raw]});
+		}
+		await node5.mine();
+		const block = (await node5.request({
+			method: 'eth_getBlockByNumber',
+			params: ['latest', true],
+		})) as any;
+		cmp(m, 'txs in the block', block.transactions.length, blockTxs.length);
+		// ---- the receipts: continuity, and the metadata the node owns ----
+		const fromReceipts: any[] = [];
+		let expectedLogIndex = 0;
+		for (let i = 0; i < blockTxs.length; i++) {
+			const txHash = block.transactions[i].hash;
+			const rcpt = (await node5.request({
+				method: 'eth_getTransactionReceipt',
+				params: [txHash],
+			})) as any;
+			cmp(m, `${blockTxs[i].label}: status`, rcpt.status, '0x1');
+			cmp(
+				m,
+				`${blockTxs[i].label}: logs`,
+				rcpt.logs.length,
+				blockTxs[i].logCount,
+			);
+			for (const log of rcpt.logs) {
+				cmp(
+					m,
+					`${blockTxs[i].label}: logIndex`,
+					BigInt(log.logIndex),
+					BigInt(expectedLogIndex++),
+				);
+				cmp(
+					m,
+					`${blockTxs[i].label}: log.blockHash`,
+					log.blockHash,
+					block.hash,
+				);
+				cmp(
+					m,
+					`${blockTxs[i].label}: log.blockNumber`,
+					BigInt(log.blockNumber),
+					BigInt(block.number),
+				);
+				cmp(
+					m,
+					`${blockTxs[i].label}: log.transactionHash`,
+					log.transactionHash,
+					txHash,
+				);
+				cmp(
+					m,
+					`${blockTxs[i].label}: log.transactionIndex`,
+					BigInt(log.transactionIndex),
+					BigInt(i),
+				);
+				cmp(m, `${blockTxs[i].label}: log.removed`, log.removed, false);
+				fromReceipts.push(log);
+			}
+		}
+		// The block really did carry SEVERAL log-emitting transactions, so the
+		// continuity above is a statement about a block and not about one receipt.
+		cmp(
+			m,
+			'log-emitting txs in the block',
+			blockTxs.filter((t) => t.logCount > 0).length,
+			2,
+		);
+		cmp(m, 'logs in the block', fromReceipts.length, 4);
+		// ---- ...and `eth_getLogs` reads exactly those back out of the block ----
+		const fromGetLogs = (await node5.request({
+			method: 'eth_getLogs',
+			params: [{fromBlock: block.number, toBlock: block.number}],
+		})) as any[];
+		cmp(m, 'eth_getLogs count', fromGetLogs.length, fromReceipts.length);
+		for (
+			let i = 0;
+			i < Math.max(fromGetLogs.length, fromReceipts.length);
+			i++
+		) {
+			cmp(m, `eth_getLogs[${i}]`, fromGetLogs[i], fromReceipts[i]);
+		}
+		// ---- ...and the discarded log is not among them, on any filter ----
+		const discarded = (await node5.request({
+			method: 'eth_getLogs',
+			params: [
+				{fromBlock: '0x0', toBlock: 'latest', topics: [DISCARDED_TOPIC]},
+			],
+		})) as any[];
+		cmp(m, 'eth_getLogs for the discarded topic', discarded, []);
+		// ...and the filter itself works, so the empty answer above is evidence:
+		// the SURVIVING events come back when filtered for the same way.
+		const survivors = (await node5.request({
+			method: 'eth_getLogs',
+			params: [
+				{fromBlock: '0x0', toBlock: 'latest', topics: [SURVIVING_TOPIC]},
+			],
+		})) as any[];
+		cmp(m, 'eth_getLogs for a surviving topic', survivors.length, 2);
+		steps.push({
+			label:
+				'logIndex runs across the block; eth_getLogs agrees with the receipts',
+			mismatches: m,
+		});
+		await node5.dispose();
+	}
+
+	// 16) BLOCK ENVIRONMENT read THROUGH A CONTRACT: BASEFEE / PREVRANDAO /
 	//     COINBASE / NUMBER / TIMESTAMP / GASLIMIT.
 	//
 	//     WHY THIS STEP EXISTS AND NOTHING ELSE COVERS IT. Every one of these
@@ -970,7 +1376,7 @@ async function runBattery(
 		await node3.dispose();
 	}
 
-	// 14) A VALUE-BEARING READ IS STILL SUBJECT TO THE VALUE TRANSFER: an
+	// 17) A VALUE-BEARING READ IS STILL SUBJECT TO THE VALUE TRANSFER: an
 	//     `eth_call` carrying `value` the sender cannot afford must FAIL, and one
 	//     it can afford must SUCCEED, identically on every engine.
 	//
@@ -1200,7 +1606,7 @@ async function runBattery(
 		await node4.dispose();
 	}
 
-	// 15) THE BLOCK GAS LIMIT IS ENFORCED, AND `blockGasLimit` IS WHAT LIFTS IT.
+	// 18) THE BLOCK GAS LIMIT IS ENFORCED, AND `blockGasLimit` IS WHAT LIFTS IT.
 	//
 	//     WHY THIS STEP EXISTS. The node used to hand `@ethereumjs/vm`'s `runTx` a
 	//     `skipBlockGasLimitValidation`, so a transaction whose gas limit exceeded

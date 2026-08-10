@@ -77,7 +77,7 @@ test('differential conformance with the revm engine installed (stateMode:none)',
 
 	// Sanity: the same full battery, not a short-circuited subset. Same bound as
 	// `conformance.spec.ts` uses for each of its two modes.
-	expect(served.steps.length).toBeGreaterThanOrEqual(15);
+	expect(served.steps.length).toBeGreaterThanOrEqual(20);
 
 	// The steps that pin the halves the engine owns are in there, and passed.
 	const labels = served.steps.map((s: any) => s.label);
@@ -90,6 +90,27 @@ test('differential conformance with the revm engine installed (stateMode:none)',
 	expect(labels).toContain('1559-deploy(Counter)');
 	expect(labels).toContain('legacy-value-transfer');
 	expect(labels).toContain('2930-call(increment, access-list)');
+	// ...INCLUDING THE LOG THAT MUST NOT BE THERE: a log emitted inside a sub-call
+	// that then reverted appears in neither the receipt's logs nor its bloom. Named
+	// here because this is the engine's half of it — revm decides which logs
+	// survive a discarded frame, and its outcome's bloom is the one the receipt
+	// carries (and is OMITTED from the wire format when the log count is zero, so
+	// the zero-log case exercises a decoding path the default engine does not have).
+	expect(labels).toContain(
+		"reverted sub-call's log is in neither the logs nor the bloom",
+	);
+	expect(labels).toContain(
+		'a reverted transaction keeps neither its log nor its bloom bits',
+	);
+	expect(labels).toContain('1559-value-transfer zero-log bloom is all zero');
+	// ...and the node's half, which must be unchanged by the engine underneath it:
+	// `logIndex` running across a block of several log-emitting transactions, and
+	// `eth_getLogs` returning exactly the receipts' logs for that block — the same
+	// absolute statement the default engine is held to in `conformance.spec.ts`,
+	// which is what makes the pair a cross-engine bar.
+	expect(labels).toContain(
+		'logIndex runs across the block; eth_getLogs agrees with the receipts',
+	);
 	// ...and the READ half.
 	expect(labels).toContain('1559-call(increment) view number()');
 	expect(labels).toContain('estimateGas exactness (increment)');

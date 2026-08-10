@@ -60,9 +60,9 @@ test('slim-node differential conformance vs trie-backed @ethereumjs/vm reference
 
 	// Sanity: the battery actually ran a meaningful number of steps (not silently
 	// short-circuited). Each mode runs the full battery (deploy/calls/legacy/2930/
-	// multi-log/revert/estimate/back-to-back + post-state reads).
-	expect(c.none.steps.length).toBeGreaterThanOrEqual(15);
-	expect(c.trie.steps.length).toBeGreaterThanOrEqual(15);
+	// multi-log/discarded-log/revert/estimate/back-to-back + post-state reads).
+	expect(c.none.steps.length).toBeGreaterThanOrEqual(20);
+	expect(c.trie.steps.length).toBeGreaterThanOrEqual(20);
 
 	// The BLOCK-ENVIRONMENT step ran, in both modes. Named explicitly because it
 	// is the only step whose class of bug is invisible to every other bar in the
@@ -83,6 +83,30 @@ test('slim-node differential conformance vs trie-backed @ethereumjs/vm reference
 	for (const mode of ['none', 'trie'] as const) {
 		expect(c[mode].steps.map((s: any) => s.label)).toContain(
 			'value-bearing read affordability',
+		);
+	}
+
+	// The DISCARDED-LOG step ran too, in both modes, and its central assertions
+	// are absolute for a reason the other steps do not have: the reference EVM
+	// executes the SAME contract, so a log that leaked out of a reverted frame
+	// would leak on both sides and diff perfectly clean. What cannot diff clean is
+	// the discarded event's topic appearing in the receipt at all, or the bloom
+	// differing from the plain `emitTwo(3,4)` transaction that emits the same two
+	// events without a reverting sub-call.
+	for (const mode of ['none', 'trie'] as const) {
+		expect(c[mode].steps.map((s: any) => s.label)).toContain(
+			"reverted sub-call's log is in neither the logs nor the bloom",
+		);
+	}
+
+	// ...and the step that pins the LOG POSITIONS the node owns rather than the
+	// engine: a `logIndex` running across a block of several log-emitting
+	// transactions, and `eth_getLogs` reading exactly the receipts' logs back out.
+	// Its oracle is the node's own receipts (the reference is a separate chain and
+	// cannot mine that block), so counting steps would not notice it going away.
+	for (const mode of ['none', 'trie'] as const) {
+		expect(c[mode].steps.map((s: any) => s.label)).toContain(
+			'logIndex runs across the block; eth_getLogs agrees with the receipts',
 		);
 	}
 
