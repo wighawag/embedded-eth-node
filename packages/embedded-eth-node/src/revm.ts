@@ -343,13 +343,23 @@ export async function createRevmEngine(
 				//                       fee is not (`GasPriceLessThanBasefee`). This is
 				//                       ALSO what keeps a read from an unfunded address
 				//                       working, see `disableBalanceCheck` below;
-				//  disableBlockGasLimit the node's default read budget IS the block gas
-				//                       limit, and revm charges intrinsic gas out of the
+				//  disableBlockGasLimit a read can be handed a gas budget EQUAL to the
+				//                       block gas limit, on any node: that is what
+				//                       `DEFAULT_READ_BUDGET` does on a default node (the
+				//                       two numbers coincide at 30,000,000, and are still
+				//                       decided apart, see src/node.ts), and an explicit
+				//                       `gas` argument does it whatever `blockGasLimit`
+				//                       is. revm then charges intrinsic gas out of the
 				//                       transaction limit while `@ethereumjs/evm`'s
 				//                       `runCall` charges none, so the equivalent budget
-				//                       is `gasLimit + intrinsic` — which is over the
+				//                       is `gasLimit + intrinsic`, which is over the
 				//                       block limit by exactly `intrinsic`
-				//                       (`CallerGasLimitMoreThanBlock`);
+				//                       (`CallerGasLimitMoreThanBlock`). READ PATH ONLY,
+				//                       and NOT made removable by the node now enforcing
+				//                       that limit: what it enforces is a rule about a
+				//                       transaction being MINED (`transact` below, and
+				//                       `refuseIfOverBlockGasLimit` in ./node.ts ahead of
+				//                       it), and a read is not mined;
 				//  disableEip3607       EIP-3607 rejects a caller that holds code, which
 				//                       is a rule about SENDING a transaction. Simulating
 				//                       from a contract address is ordinary practice
