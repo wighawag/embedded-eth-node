@@ -555,10 +555,17 @@ export async function createRevmEngine(
 			// against the throwing shape: `eth_sendRawTransaction` must fail rather than
 			// mine a block containing a zero-gas receipt for a transaction that was
 			// rejected. So this converts. The MESSAGE is revm's own, verbatim, because
-			// it is the only thing that knows why (`NonceTooLow { tx: 0, state: 1 }`);
-			// turning these into the node's own JSON-RPC errors, matched against what
-			// the default engine says, is
-			// `replayed-and-invalid-transactions-are-rejected-as-the-nodes-own-errors`.
+			// it is the only thing that knows why (`NonceTooLow { tx: 0, state: 1 }`).
+			//
+			// IT IS A BACKSTOP NOW, NOT THE ANSWER A CALLER GETS. The node refuses a
+			// replayed nonce, an unreachable nonce, an unaffordable transaction and a
+			// gas limit below intrinsic gas ITSELF, above the seam and before this
+			// method is called (`refuseIfSenderCannotSend` and
+			// `refuseIfBelowIntrinsicGas` in ./node.ts), because those four are the
+			// same rules on every engine and only the node can state them in one
+			// vocabulary. What still reaches this line is a cause the node does not
+			// pre-check — EIP-3607, a type-3 transaction's blob fee, anything a later
+			// revm adds — and for those, revm's own words are the only ones there are.
 			if (outcome.status === 'validation-error') {
 				throw new Error(
 					`embedded-eth-node/revm: the transaction is invalid and was NOT executed: ` +
@@ -621,16 +628,18 @@ const EMPTY_BLOOM = /* @__PURE__ */ new Uint8Array(256);
  * "revm would not run this at all", and a reader who has met one should not have
  * to learn a second sentence for the other.
  *
- * REVM'S WORDS ARE QUOTED, NOT TRANSLATED. Mapping each `InvalidTransaction`
- * variant onto a phrase of the node's own (`insufficient funds for transfer`
- * and friends) is a REAL vocabulary, and it is one this repo has already decided
- * to build in ONE place, for the transaction path, matched against what the
- * default engine says for the same rejection
- * (`replayed-and-invalid-transactions-are-rejected-as-the-nodes-own-errors`, the
- * same task the `transact` rejection above points at).
- * Inventing a second, read-only half of that vocabulary here would fork it
- * before it exists, and it is the engine — not this wrapper — that knows whether
- * the shortfall was the value, the fee or the gas.
+ * REVM'S WORDS ARE QUOTED, NOT TRANSLATED. That vocabulary now EXISTS — `nonce
+ * too low`, `nonce too high`, `insufficient funds for gas * price + value`,
+ * `intrinsic gas too low`, geth's phrasing so a client recognises it — and it
+ * lives in exactly ONE place: `src/node.ts`, ABOVE the seam, where the node
+ * refuses a transaction before any engine sees it. It is deliberately not
+ * reached for here, and the reason is not tidiness: a READ IS NOT A
+ * TRANSACTION. `call` relaxes a transaction's validity rules on purpose (base
+ * fee, block gas limit, EIP-3607), so there is no pre-flight above it to speak
+ * that vocabulary and nothing here to translate INTO it — the one rule a read
+ * keeps is the value transfer, and it is the engine, not this wrapper, that
+ * knows whether the shortfall was the value, the fee or the gas. Building a
+ * second, read-only half of the vocabulary here would fork it in two.
  *
  * IT DOES NOT BECOME AN RPC MESSAGE, and that is the point of the seam: `node.ts`
  * flattens EVERY engine failure into `RpcError(3, 'execution reverted')` on both

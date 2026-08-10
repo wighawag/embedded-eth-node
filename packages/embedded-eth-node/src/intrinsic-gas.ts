@@ -13,6 +13,22 @@
  * charges none. Two copies of this formula would drift and the drift would show
  * up as an `eth_estimateGas` that differs by engine.
  *
+ * WHAT IT IS NOT: A TRANSACTION'S VALIDITY FLOOR. This formula answers the READ
+ * path's question — how much gas a call costs before execution, so the node can
+ * add it to what an engine reports and the revm engine can subtract it — and an
+ * `eth_call` carries no ACCESS LIST, so there is no access-list term here. A
+ * TRANSACTION pays one: 2,400 per address and 1,900 per storage key, which both
+ * engines charge, so this figure is 6,200 gas short of the floor for a type-1
+ * transaction naming one address and two keys. The node therefore refuses a gas
+ * limit below intrinsic gas against the parsed transaction's OWN
+ * `getIntrinsicGas()` (`refuseIfBelowIntrinsicGas` in ./node.ts), which is also
+ * the figure `runTx` validates against. Two questions, two figures, both the
+ * node's, neither a copy of the other; measured side by side on four transaction
+ * shapes in
+ * `docs/spikes/replayed-and-invalid-transactions-are-rejected-as-the-nodes-own-errors/measurements.md`.
+ * Do not "unify" them by adding an access-list term here: the read path has no
+ * access list to charge, so the term would be dead arithmetic on this side.
+ *
  * WHY THE FORK IS A `Common` AND NOT A HARDFORK NAME. The formula has a
  * fork-dependent term, so both callers have to name the same fork — and the
  * cheapest way to guarantee that is not to compare two names but to pass ONE

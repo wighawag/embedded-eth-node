@@ -90,7 +90,21 @@ const collected: Record<string, unknown>[] = [];
  * change that grows it, and say why in the changeset. A red assertion here means
  * either that or an accidental import into the core graph.
  *
- * RE-PINNED SEVEN TIMES SINCE. Most recent first:
+ * RE-PINNED EIGHT TIMES SINCE. Most recent first:
+ *
+ * 417.9 -> 419.7 KB raw / 126.0 -> 126.6 KB gzip, by
+ * `replayed-and-invalid-transactions-are-rejected-as-the-nodes-own-errors`: the
+ * node now REFUSES a replayed nonce, a nonce it will never reach, a transaction
+ * the sender cannot afford and a gas limit below intrinsic gas ITSELF, above the
+ * seam, instead of letting whichever EVM is installed answer in its own words
+ * (`Transaction(NonceTooLow { tx: 0, state: 1 })` on revm; the same rejection
+ * plus a dump of the whole block on `@ethereumjs/vm`). The 1.8 KB is those four
+ * refusals' prose in `src/node.ts` — the cause in geth's vocabulary, the numbers
+ * behind it, and what to do about it — plus the three-line checks that produce
+ * them. Prose in the core bundle, paid by every consumer including the JS-only
+ * one, and it IS the feature, exactly as in the block-gas-limit re-pin below:
+ * the alternative is a wasm-shaped string reaching a client. Still zero bytes of
+ * `revm-wasm`.
  *
  * 417.8 -> 417.9 KB raw (gzip unchanged at 126.0), by
  * `revm-write-callbacks-reproduce-the-post-state`:
@@ -175,7 +189,7 @@ const collected: Record<string, unknown>[] = [];
  * carries 1% of slack because the zlib shipped with different Node builds does
  * not compress byte-identically, which is noise rather than growth.
  */
-const DEFAULT_ENTRY_BASELINE = {rawKB: 417.9, gzipKB: 126.0};
+const DEFAULT_ENTRY_BASELINE = {rawKB: 419.7, gzipKB: 126.6};
 const GZIP_SLACK = 1.01;
 
 // Build + serve once for the whole file (the cut contains all backends).

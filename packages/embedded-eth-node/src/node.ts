@@ -111,6 +111,42 @@ function intrinsicGas(
 	);
 }
 
+/**
+ * WHAT A SENDER MUST BE ABLE TO PAY BEFORE THE TRANSACTION RUNS: its value plus
+ * its WHOLE gas limit at the MAXIMUM fee it offered.
+ *
+ * THE MAX FEE, NOT THE EFFECTIVE ONE, and that is the protocol's own line rather
+ * than a conservative choice: EIP-1559 states it as `assert balance >= gas_limit
+ * * max_fee_per_gas`, and both engines enforce exactly that — measured to the
+ * wei, on both, in
+ * `docs/spikes/replayed-and-invalid-transactions-are-rejected-as-the-nodes-own-errors/measurements.md`.
+ * A node checking the EFFECTIVE price instead would admit a window of
+ * transactions (`gasLimit * (maxFee - effective)` wide) that both engines then
+ * refuse in their own words.
+ *
+ * THIS IS NOT A SECOND IMPLEMENTATION OF THE FEE ARITHMETIC. What a transaction
+ * COSTS is the engine's and has exactly one implementation per engine (the
+ * `effectiveGasPrice` on the receipt is the engine's own number, never
+ * recomputed here — see ./engine.ts and `test/revm-fees.spec.ts`). This is an
+ * ADMISSION rule: what the sender must be able to cover for the transaction to be
+ * executable at all, which is the node's question because the node decides what
+ * goes into the blocks it builds.
+ *
+ * A TYPE-3 (BLOB) TRANSACTION IS UNDERSTATED HERE by its blob fee
+ * (`blobGas * maxFeePerBlobGas`), which is part of the same assertion in EIP-4844.
+ * That is the known type-3 gap this node documents rather than closes (the seam
+ * carries no blob fields at all), and the engines' own checks are the backstop:
+ * the node admits such a transaction and the engine refuses it in its own words.
+ */
+function upfrontCost(tx: TypedTransaction): bigint {
+	const anyTx = tx as any;
+	const perGas: bigint =
+		anyTx.maxFeePerGas !== undefined && anyTx.maxFeePerGas !== null
+			? anyTx.maxFeePerGas
+			: (anyTx.gasPrice as bigint);
+	return (anyTx.value ?? 0n) + tx.gasLimit * perGas;
+}
+
 interface StoredBlock {
 	block: Block;
 	header: SerializedBlock;
@@ -415,6 +451,15 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 			// (recovered, or claimed in `senderMode:'trusted'`), and the receipt's `from`
 			// below is the SAME value — so "who the engine executed as" and "who the
 			// receipt names" cannot drift apart by engine.
+			//
+			// ...AND WHETHER IT MAY SEND IT AT ALL IS ANSWERED FIRST, HERE, against the
+			// state this transaction is about to run on and in the node's own words, so
+			// that a replayed, unaffordable or unreachable-nonce transaction is refused
+			// identically on every engine instead of in whichever vocabulary the
+			// installed one happens to speak. Nothing has been committed for this
+			// transaction when it throws: no receipt is built, no log is recorded, and
+			// the block below is never stored.
+			await refuseIfSenderCannotSend(tx, sender);
 			const res = await engine.transact({tx, sender, block});
 			cumulativeGasUsed += res.gasUsed;
 			const h = txHashOf(tx);
@@ -640,12 +685,143 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 		);
 	}
 
+	/**
+	 * REFUSE A TRANSACTION THE SENDER'S OWN ACCOUNT FORBIDS — a replay, a nonce this
+	 * node will never reach, or a bill the sender cannot cover — in the node's own
+	 * words, before the engine sees it.
+	 *
+	 * WHY THE NODE SAYS IT AND NOT THE ENGINE, which is the same argument
+	 * {@link refuseIfOverBlockGasLimit} makes and the reason this sits beside it.
+	 * Both engines enforce these three rules already, and neither can say them in a
+	 * way a client can use: `@ethereumjs/vm` answers a replay with `the tx doesn't
+	 * have the correct nonce. account has nonce of: 1 tx has nonce of: 0` followed
+	 * by a dump of the whole block and transaction, and revm answers it with
+	 * `Transaction(NonceTooLow { tx: 0, state: 1 })`. Same node, same transaction,
+	 * two unrelated sentences — and the revm one is a wasm-shaped string arriving
+	 * where a client expects prose, the transaction-path twin of the mistake
+	 * recorded in the `rejectionMessage` JSDoc of ./revm.ts. The node owns the
+	 * STATE on every engine (ADR 0010) and it owns the transaction's parsing, so
+	 * "may this sender send this transaction now" is the node's question, and
+	 * answering it here is what makes the refusal IDENTICAL across engines rather
+	 * than merely present on both. The engines' own checks stay as the backstop
+	 * underneath: these are the same three rules, so a transaction that passes here
+	 * passes there.
+	 *
+	 * IT ALSO FIXES THE ORDER, which no engine agrees about: a transaction that is
+	 * both replayed and unaffordable is reported as a nonce failure by geth and by
+	 * this node, and could be reported as either by an engine. One order here means
+	 * one answer whatever is installed.
+	 *
+	 * WHY AT MINE-TIME rather than at submit, unlike its two siblings: these answers
+	 * CHANGE WITH TIME. In `manual`/`interval` mining a consumer submits nonce 0 and
+	 * nonce 1 back to back, and at submit the second is a nonce this node has not
+	 * reached; by the time the batch is mined, the first has advanced it. The same
+	 * goes for the money. So the reading is taken at the last possible moment —
+	 * immediately before the engine would execute it — against the state the
+	 * transaction is actually about to run on.
+	 *
+	 * THE VOCABULARY IS geth's leading clause (`nonce too low` / `nonce too high` /
+	 * `insufficient funds for gas * price + value`), because a client already knows
+	 * it: viem maps those phrases onto typed errors. Inventing a private dialect for
+	 * rules the whole ecosystem already names would cost every consumer a
+	 * translation and buy nothing. What follows the clause is this node's own
+	 * honest-edge half — what happened and what to do about it — including the one
+	 * thing a real node would NOT say: that there is no mempool here, so a
+	 * too-high nonce is refused rather than queued.
+	 */
+	async function refuseIfSenderCannotSend(
+		tx: TypedTransaction,
+		sender: Address,
+	): Promise<void> {
+		// ONE READ of the sender's account, for both rules: a missing account is a
+		// sender at nonce 0 holding nothing, which is exactly how every other read on
+		// this node reports it (`eth_getTransactionCount`, `eth_getBalance`).
+		const account = await sm.getAccount(sender);
+		const stateNonce = account?.nonce ?? 0n;
+		const txNonce = tx.nonce;
+		const address = sender.toString();
+		if (txNonce < stateNonce) {
+			throw new RpcError(
+				-32000,
+				`nonce too low: address ${address}, tx: ${txNonce}, state: ${stateNonce}. ` +
+					`The sender has already used that nonce, so this transaction is a REPLAY ` +
+					`and is REFUSED rather than mined a second time. Sign it again with nonce ` +
+					`${stateNonce} — eth_getTransactionCount reports the sender's next nonce.`,
+			);
+		}
+		if (txNonce > stateNonce) {
+			throw new RpcError(
+				-32000,
+				`nonce too high: address ${address}, tx: ${txNonce}, state: ${stateNonce}. ` +
+					`This node has NO MEMPOOL, so a transaction that is not executable NOW is ` +
+					`refused rather than queued until the gap is filled: waiting will not mine ` +
+					`it. Send the missing transactions first, or sign this one with nonce ` +
+					`${stateNonce} — eth_getTransactionCount reports the sender's next nonce.`,
+			);
+		}
+		const balance = account?.balance ?? 0n;
+		const upfront = upfrontCost(tx);
+		if (balance < upfront) {
+			throw new RpcError(
+				-32000,
+				`insufficient funds for gas * price + value: address ${address} have ` +
+					`${balance} want ${upfront}. The sender must be able to pay for its WHOLE ` +
+					`gas limit at the maximum fee it offered, plus the value it sends, BEFORE ` +
+					`the transaction runs — even though it is charged less than that once the ` +
+					`gas it really used is known. Lower the value, the gas limit or ` +
+					`maxFeePerGas, or fund the sender.`,
+			);
+		}
+	}
+
+	/**
+	 * REFUSE A TRANSACTION THAT COULD NOT REACH ITS FIRST OPCODE, in the node's own
+	 * words, before any engine sees it.
+	 *
+	 * The second of the two refusals a transaction earns ON ITS OWN, which is why it
+	 * sits beside {@link refuseIfOverBlockGasLimit} and at the same moment: both
+	 * read the transaction and nothing else, so neither answer can change while the
+	 * transaction waits in `pending`, and refusing eagerly means the
+	 * `eth_sendRawTransaction*` call that submitted it is the one that fails. The
+	 * two that DO depend on the chain's state — the nonce and the money — are
+	 * checked at the last possible moment instead, in {@link refuseIfSenderCannotSend}.
+	 *
+	 * THE FLOOR IS THE TRANSACTION'S OWN `getIntrinsicGas()`, NOT the shared
+	 * `intrinsicGas()` of ./intrinsic-gas.ts, and the difference is load-bearing:
+	 * the shared formula has no ACCESS-LIST term, because an `eth_call` carries no
+	 * access list, so it is 6,200 gas short for a type-1 transaction naming one
+	 * address and two keys. Both engines charge the access list, so a check built on
+	 * the shared formula would wave such a transaction through and let the engine
+	 * refuse it in its own vocabulary — the exact divergence this refusal exists to
+	 * remove. Measured, on four transaction shapes and against BOTH engines' actual
+	 * floors, in
+	 * `docs/spikes/replayed-and-invalid-transactions-are-rejected-as-the-nodes-own-errors/measurements.md`.
+	 * The two figures answer two different questions and both are the node's: what a
+	 * READ must be budgeted (and an engine's execution gas topped up by), versus what
+	 * a TRANSACTION must be able to pay before it starts.
+	 */
+	function refuseIfBelowIntrinsicGas(tx: TypedTransaction): void {
+		const gasLimit = tx.gasLimit;
+		const minimum = tx.getIntrinsicGas();
+		if (gasLimit >= minimum) return;
+		throw new RpcError(
+			-32000,
+			`intrinsic gas too low: have ${gasLimit}, want ${minimum}. ` +
+				`A transaction pays a 21000 base plus its calldata (and its access list, and ` +
+				`32000 more to create a contract) before its first opcode runs, so this gas ` +
+				`limit could not start it and no block this node builds could contain it. ` +
+				`Raise the gas limit to at least ${minimum} — eth_estimateGas reports what a ` +
+				`transaction needs.`,
+		);
+	}
+
 	/** Queue-or-execute a submitted tx; returns the hash, or the receipt if `sync`. */
 	async function submit(
 		submitted: SubmittedTx,
 		sync: boolean,
 	): Promise<unknown> {
 		refuseIfOverBlockGasLimit(submitted.tx);
+		refuseIfBelowIntrinsicGas(submitted.tx);
 		const h = txHashOf(submitted.tx);
 		if (miningConfig.type === 'auto') {
 			await executeAndMine([submitted]);

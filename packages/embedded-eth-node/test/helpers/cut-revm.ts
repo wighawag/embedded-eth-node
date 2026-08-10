@@ -28,6 +28,11 @@
  *                      transaction COSTS, measured on BALANCES (sender charged,
  *                      coinbase credited, base fee burnt) rather than on the
  *                      receipt's `effectiveGasPrice`
+ *   - 'invalid-transactions': the SHARED refusal battery
+ *                      (helpers/invalid-transactions.ts) — a replayed nonce, a
+ *                      far-future nonce, an unaffordable transaction and a gas
+ *                      limit below intrinsic gas, refused in the NODE's own words
+ *                      on both engines, with every state reading unmoved
  */
 import type {
 	CodeUnderTest,
@@ -40,6 +45,7 @@ import {runRevmConformance} from './revm-conformance.js';
 import {runRevmTrustedSender} from './revm-trusted-sender.js';
 import {runRevmPostState} from './revm-post-state.js';
 import {runRevmFees} from './revm-fees.js';
+import {runRevmInvalidTransactions} from './revm-invalid-transactions.js';
 
 const cut: CodeUnderTest = {
 	name: 'embedded-eth-node/revm',
@@ -105,6 +111,19 @@ const cut: CodeUnderTest = {
 		if (ctx.params.mode === 'fees') {
 			try {
 				results.revmFees = await runRevmFees();
+			} catch (e) {
+				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
+			}
+			return {results, timings, errors, env: captureEnv()};
+		}
+
+		// The SHARED refusal battery, with the revm engine installed. What a node
+		// REFUSES must be the same on both engines, and so must what it leaves behind
+		// when it refuses: a half-committed rejection is the worst outcome available
+		// on this path and only a state reading catches it.
+		if (ctx.params.mode === 'invalid-transactions') {
+			try {
+				results.revmInvalidTransactions = await runRevmInvalidTransactions();
 			} catch (e) {
 				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
 			}
