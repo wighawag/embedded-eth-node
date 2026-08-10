@@ -316,7 +316,9 @@ export interface Engine {
 	 * node's transactions on the node's OWN `@ethereumjs/vm`, which is exactly what
 	 * every non-default engine did before this seam covered transactions. The
 	 * shipped `embedded-eth-node/revm` engine is in that state today (its write
-	 * half is `work/tasks/backlog/revm-executes-the-first-transaction-with-commit.md`),
+	 * half is the task `revm-executes-the-first-transaction-with-commit`, under the
+	 * spec `revm-engine-behind-runtx`; a bucket PATH is not cited because a work
+	 * item's status IS its folder, so the path moves and this comment ships),
 	 * so requiring the method here would have meant either refusing every
 	 * transaction on a revm-backed node or changing what one does — and this seam's
 	 * whole bar is that nothing changes. `node.engine.id` names the engine the seam

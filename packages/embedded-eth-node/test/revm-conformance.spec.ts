@@ -6,8 +6,9 @@
  * the same signed transactions through the node AND through a trie-backed
  * `@ethereumjs/vm` `runTx` reference, diffed field by field plus post-state. What
  * changes here is only WHICH EVM answers the READ path — `eth_call` return data
- * and `eth_estimateGas` — because that is the whole of what an engine owns
- * (transactions run on `@ethereumjs/vm` whatever engine is installed).
+ * and `eth_estimateGas` — because that is the whole of what THIS engine owns
+ * today: the seam covers transactions, and `createRevmEngine()` has no write half
+ * yet, so a revm-backed node still executes its transactions on `@ethereumjs/vm`.
  *
  * STATE-MODE COVERAGE IS EXPLICIT, and it is the shipped engine's refusal that
  * decides the split, not a convenience:

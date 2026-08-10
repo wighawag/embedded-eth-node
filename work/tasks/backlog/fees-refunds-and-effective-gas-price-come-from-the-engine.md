@@ -10,7 +10,9 @@ covers: [3, 4]
 
 A transaction's money must be real: the sender is charged `value + gasUsed * effectiveGasPrice`, the coinbase is credited the priority portion, and the base fee is burnt. On the revm path the engine already does all of that inside its committing execute, and its outcome carries the effective gas price it actually used. Take that number. Do NOT recompute `min(maxFee, baseFee + tip)` in JS beside it: a second implementation of fee arithmetic is precisely the drift this spec exists to avoid, and it is the field the engine's own authors expect to disagree first.
 
-The node currently computes `effectiveGasPrice` in JS for its receipts. After this task that JS computation is the DEFAULT engine's implementation of the seam's contract and nothing else: it lives behind the default engine, the revm engine answers from its outcome, and the receipt takes whatever the engine that ran the transaction reported. One implementation per engine, none in the node.
+> **De-drifted 2026-08-10.** Half of this task already happened. `re-widen-the-engine-seam-to-cover-transactions` moved the JS fee computation OUT of the node and behind the default engine, where it is that engine's implementation of the seam's contract. So the node no longer computes a fee, and the remaining scope is the REVM side plus the proof: make the revm engine answer from its outcome, and diff the money against `@ethereumjs/vm`. Confirm that before you start, and if the node has somehow regained a fee helper, that is the finding.
+
+One implementation per engine, none in the node: the default engine owns the JS arithmetic, the revm engine answers from its outcome, and the receipt takes whatever the engine that ran the transaction reported.
 
 Refunds are the case a hand-rolled version gets wrong, so cover it: a storage-clearing refund is priced at the EFFECTIVE gas price, and the node must not price it any other way. Include a transaction that clears storage and check both the gas and the resulting balances against `@ethereumjs/vm`.
 

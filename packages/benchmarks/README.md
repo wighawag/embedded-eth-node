@@ -69,8 +69,9 @@ const node = await createNode({engine: await createRevmEngine({wasm})});
 top of the interpreter. That delta between the two node rows **is** the engine
 swap; the delta to the raw `revm` row is what the node itself costs.
 
-Only READS move. Transactions run on `@ethereumjs/vm` whatever engine is
-installed (which is why the node calls it a *read engine*), so `deploy` and
+Only READS move here. The node's engine seam covers transactions too, but the
+shipped `embedded-eth-node/revm` engine has no write half yet, so a revm-backed
+node still executes its transactions on `@ethereumjs/vm`: `deploy` and
 `callAvg` are unaffected by design and any difference there is noise. The rows
 that mean something are `read`, `compute`, `keccak`, `frame` and `floor`.
 

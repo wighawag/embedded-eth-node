@@ -19,8 +19,9 @@
  * `eth_fillTransaction`'s estimation. It implements `Engine.call` and not (yet)
  * `Engine.transact`, so a node with this engine installed still mines its
  * transactions on its own `@ethereumjs/vm`, exactly as it did before the seam
- * covered transactions; the write half is
- * `work/tasks/backlog/revm-executes-the-first-transaction-with-commit.md`. `Revm#call`
+ * covered transactions; the write half is the task
+ * `revm-executes-the-first-transaction-with-commit` (cited by SLUG, not by bucket
+ * path, because a work item's status is its folder). `Revm#call`
  * is structurally incapable of committing, so this engine needs neither the
  * checkpoint/revert nor the EIP-2929 reset the default `@ethereumjs/evm` engine
  * pays for.

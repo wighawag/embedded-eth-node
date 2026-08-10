@@ -40,6 +40,9 @@ Three things have to come alive together, which is what makes this a vertical sl
 - [ ] The receipt's `gasUsed` is net of refunds on both engines, with the chosen outcome field and the reason recorded at the mapping site.
 - [ ] The transaction path carries NO simulation switch, asserted rather than assumed.
 - [ ] `dumpState`, `loadState` and the `evm_set*` cheats behave identically with the revm engine installed for the state this task touches.
+- [ ] **`Engine.transact` becomes REQUIRED and the fallback is DELETED, in this change.** The seam task shipped it OPTIONAL for one reason only: the revm engine had no write half, so requiring it would have meant either refusing every transaction on a revm-backed node or changing behaviour, and that task's bar was that nothing changes. This task removes that reason. So finish the contraction here rather than leaving a vestigial capability check in shipped code: drop the `?`, delete the node's `transacts(engine) ? engine : defaultEngine` fallback and the second internally-built engine it selects, and remove the transitional wording from `Engine.transact`'s doc, ADR 0006's amendment and `CONTEXT.md`. The maintainer's tasking-time decision was ONE interface with both operations, not an optional capability; this is where that becomes true.
+- [ ] With the contraction done, `node.engine` reports the engine that ran BOTH the reads and the transactions, so the misattribution ADR 0006's second consequence warned about is gone rather than merely documented.
+- [ ] The seam's construction refusal for a present-but-not-callable `transact` is ASSERTED, in the same place the other engine refusals are (the engine-seam honesty checks). It shipped untested, and this repo's own convention is that a refusal nothing measures is one refactor away from disappearing.
 - [ ] An ADR records the state-ownership decision, its reasoning and the measured affordability above, including the caveat that cuts against it.
 - [ ] Reference gas is unchanged (`number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 returning `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`), and the default engine's behaviour is untouched.
 - [ ] A changeset.
@@ -62,6 +65,6 @@ Three things have to come alive together, which is what makes this a vertical sl
 >
 > Nonce checking must be impossible to forget, which means it is chosen by the call path and never surfaced as a parameter a node-level caller can pass.
 >
-> Do not bulk-sync state. Reads are on demand; writes are only what changed. The benchmarks package's revm backend does the opposite and is not a model to copy.
+> FINISH THE CONTRACTION. `Engine.transact` is optional today only because this engine could not implement it. Once it can, the optional marker and the node's fallback to a second internally-built engine are vestigial code in a published package, and nobody else owns removing them. Delete them here, and take the transitional wording out of the doc comment, ADR 0006's amendment and the glossary with them.
 >
 > Done means: one transfer, on revm, committed, with a receipt and post-state a diff cannot tell apart from ethereumjs's, plus the ADR that records why the node still owns state.
