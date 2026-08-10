@@ -14,7 +14,7 @@ through the engine rather than calling `runTx` itself.
 Renamed on the public surface, with **no deprecation alias**, because a shim would
 have left two words for one concept from the day it landed:
 
-- `ReadEngine` → `Engine` (and it gained the optional `transact`)
+- `ReadEngine` → `Engine` (and it gained `transact`)
 - `ReadEngineContext` → `EngineContext`
 - `ReadEngineInfo` → `EngineInfo`
 - `SlimNode.readEngine` → `SlimNode.engine` (same `{id}` value, over comlink too)
@@ -41,15 +41,19 @@ are one EVM's vocabulary, and `revm-wasm` refuses to combine its equivalent
 relaxation with committing, so a neutral field would have been a promise another
 engine could only throw at. The reasoning is at the code site in `src/engine.ts`.
 
-`transact` is OPTIONAL, transitionally: an engine that omits it leaves transactions
+`transact` was OPTIONAL, transitionally: an engine that omitted it left transactions
 on the node's own `@ethereumjs/vm`, which is exactly what every non-default engine
-did before this change. `createRevmEngine()` from `embedded-eth-node/revm` is in
-that state today — it serves the seam's read half, so a node with it installed
-still mines on `@ethereumjs/vm` and a receipt cannot be attributed to
-`node.engine.id`. A `transact` that is present but is not a function is now refused
-at construction, next to the existing engine refusals, because a half-built engine
-silently mining somewhere else is the same class of lie those refusals exist to
-prevent.
+did before this change, and `createRevmEngine()` from `embedded-eth-node/revm` was
+in that state — it served the seam's read half only, so a node with it installed
+still mined on `@ethereumjs/vm` and a receipt could not be attributed to
+`node.engine.id`. **That state did not survive the release**: the sibling entry for
+`revm-executes-the-first-transaction-with-commit` makes `transact` REQUIRED, deletes
+that fallback and gives the revm engine its write half, so no published version ever
+shipped the optional marker (written in the past tense for that reason — the two
+entries land under one version heading). A `transact` that is present but is not a
+function is refused at construction, next to the existing engine refusals, because a
+half-built engine silently mining somewhere else is the same class of lie those
+refusals exist to prevent.
 
 No behaviour change anywhere: reference gas is identical (`number()` 2446,
 `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 →

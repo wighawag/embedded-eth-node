@@ -69,11 +69,16 @@ const node = await createNode({engine: await createRevmEngine({wasm})});
 top of the interpreter. That delta between the two node rows **is** the engine
 swap; the delta to the raw `revm` row is what the node itself costs.
 
-Only READS move here. The node's engine seam covers transactions too, but the
-shipped `embedded-eth-node/revm` engine has no write half yet, so a revm-backed
-node still executes its transactions on `@ethereumjs/vm`: `deploy` and
-`callAvg` are unaffected by design and any difference there is noise. The rows
-that mean something are `read`, `compute`, `keccak`, `frame` and `floor`.
+BOTH HALVES MOVE, so every row here is engine-sensitive. The engine executes this
+row's transactions as well as its reads (it served reads only until the revm write
+half landed), so `deploy` and `callAvg` are meaningful engine comparisons rather
+than noise: a difference there is the interpreter, not the harness, and it is the
+row to look at when a transaction-heavy tick gets slower. Read them knowing what
+else they contain — this row signs each transaction and recovers its sender, ~1.3
+ms plus ~2 ms that the engine cannot make cheaper, and those dominate a 21000-gas
+transfer, so the engine delta shows up compressed. The read rows (`read`,
+`compute`, `keccak`, `frame`, `floor`) isolate the interpreter, which is why the
+library README's frame figure comes from `frame`.
 
 It is an ordinary backend under the gate: its execution gas is compared against
 both the JS node and raw revm, and its keccak-chain result against every backend.
@@ -83,9 +88,10 @@ backends — is captured with its conditions in
 [`docs/spikes/revm-engine-under-conformance-and-gate/frame-measurements.md`](../../docs/spikes/revm-engine-under-conformance-and-gate/frame-measurements.md).
 
 The engine's own correctness (identical results and gas against the default
-engine, reading the node's authoritative state, purity, the refused `stateMode`)
-lives in the library package, as does the differential conformance battery run
-with the engine installed. This package only measures it and gates its gas.
+engine, reading AND writing the node's authoritative state, a read's purity, the
+refused `stateMode`) lives in the library package, as does the differential
+conformance battery run with the engine installed, receipts and post-state
+included. This package only measures it and gates its gas.
 
 ## What it measures
 

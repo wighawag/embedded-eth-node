@@ -197,7 +197,9 @@ export const REVM_REFUSED_HARDFORKS: Readonly<Record<string, string>> =
 	});
 
 /**
- * Build a revm-backed engine, serving the seam's READ half.
+ * Build a revm-backed engine, serving BOTH halves of the seam: `call` for the
+ * node's reads and `transact` for the transactions it mines and commits (see the
+ * module header for how the two differ, which is validity and nothing else).
  *
  * The wasm is fetched and compiled HERE, so a consumer can start the download
  * while the UI paints and hand the finished engine to `createNode()` afterwards.
@@ -207,10 +209,10 @@ export const REVM_REFUSED_HARDFORKS: Readonly<Record<string, string>> =
  *
  * ONE ENGINE PER NODE. The returned engine binds to the first node it is given
  * to and REFUSES a second, because rebinding would silently re-point the first
- * node's reads at the second node's state. To pay the wasm compilation only
- * once, compile it yourself and pass the same `WebAssembly.Module` to each
- * `createRevmEngine()` call — that is what the `wasm` option accepting a
- * compiled module is for.
+ * node's reads and transactions at the second node's state. To pay the wasm
+ * compilation only once, compile it yourself and pass the same
+ * `WebAssembly.Module` to each `createRevmEngine()` call — that is what the
+ * `wasm` option accepting a compiled module is for.
  */
 export async function createRevmEngine(
 	options: RevmEngineOptions,

@@ -2,7 +2,8 @@
  * probe-host-callbacks.mjs: how often crossing the wasm boundary actually
  * happens, measured HERE rather than quoted from the engine's own repo.
  *
- * WHY IT EXISTS. `docs/adr/0010-revm-reads-and-writes-through-host-callbacks.md`
+ * WHY IT EXISTS. ADR 0010
+ * (`docs/adr/0010-revm-reads-and-writes-through-host-callbacks-the-node-keeps-owning-state.md`)
  * claims that keeping state on the JS side is AFFORDABLE because the boundary is
  * crossed once per COLD state access — revm's journal answers everything warm
  * from inside wasm. That claim arrived as three numbers measured on the engine

@@ -3,7 +3,7 @@
 Run: `node docs/spikes/revm-executes-the-first-transaction-with-commit/probe-host-callbacks.mjs`
 Taken 2026-08-10, Node 24, `revm-wasm@0.3.1` as installed in `packages/embedded-eth-node`, spec `CANCUN`. The probe exits non-zero if any of its own checks fail, so a stale number here is a red run rather than a wrong document.
 
-These figures back `docs/adr/0010-revm-reads-and-writes-through-host-callbacks.md`. They exist because the affordability argument for keeping state on the JS side arrived as three numbers measured on the ENGINE side, with nothing in this repo able to reproduce them. They now reproduce here, exactly, and one clause of the original claim turns out to be looser than it read (§1).
+These figures back [`docs/adr/0010-revm-reads-and-writes-through-host-callbacks-the-node-keeps-owning-state.md`](../../adr/0010-revm-reads-and-writes-through-host-callbacks-the-node-keeps-owning-state.md). They exist because the affordability argument for keeping state on the JS side arrived as three numbers measured on the ENGINE side, with nothing in this repo able to reproduce them. They now reproduce here, exactly, and one clause of the original claim turns out to be looser than it read (§1).
 
 ## 1. One host callback per COLD state access
 
