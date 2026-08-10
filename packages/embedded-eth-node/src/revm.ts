@@ -484,15 +484,18 @@ export async function createRevmEngine(
 				// rather than lie — but that is the binding protecting us, not a design,
 				// and the absence is asserted in `test/revm-engine.spec.ts`.
 				//
-				// ONE CONSEQUENCE, STATED RATHER THAN WORKED AROUND: the node lets a
-				// client set a gas limit above the block's and passes
-				// `skipBlockGasLimitValidation` to `runTx` on the default engine
-				// (./engine.ts). There is no committing equivalent here, so a transaction
-				// whose gas limit exceeds the node's `blockGasLimit` is REJECTED by revm
-				// (`CallerGasLimitMoreThanBlock`) and accepted by the default engine. That
-				// asymmetry is the binding's, it is why the flag never became a neutral
-				// request field, and the honest answer is a loud rejection rather than a
-				// switch that would relax the whole of validity to buy it back.
+				// THE ONE CONSEQUENCE THAT USED TO BE AN ASYMMETRY, now settled: this
+				// engine rejects a transaction whose gas limit exceeds the block's
+				// (`Transaction(CallerGasLimitMoreThanBlock)`) because it cannot relax that
+				// rule while committing, and the default engine used to ACCEPT the same
+				// transaction because it passed `skipBlockGasLimitValidation` to `runTx`.
+				// That flag is gone (./engine.ts): both engines enforce the block's limit,
+				// and a consumer who wants a bigger one raises `blockGasLimit` so the block
+				// REALLY is bigger, which this engine honours by construction, since the
+				// limit it validates against is the one in `block` just above. The node
+				// refuses such a transaction before it reaches either engine, in words that
+				// name the knob (`refuseIfOverBlockGasLimit` in ./node.ts); this rejection
+				// is the backstop under it, in revm's own vocabulary.
 			};
 
 			// A DEPLOYMENT GOES THROUGH `create`, where `data` is INIT CODE: `transact`

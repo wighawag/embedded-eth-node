@@ -94,6 +94,19 @@ const REVERT_WITH_REASON_ADDR = '0x000000000000000000000000000000000bad0bad';
 const REVERT_WITH_REASON_CODE = '0x60ff5f5360015ffd';
 /** The node's default `from` when an `eth_call` names no sender. */
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+
+/**
+ * The block-gas-limit step's fixtures: the gas limits and the two nodes are
+ * chosen so that the SAME transaction is refused on one node and mined on the
+ * other, and the only difference between the nodes is the configured
+ * `blockGasLimit`.
+ */
+const DEFAULT_BLOCK_GAS_LIMIT = 30_000_000n;
+const RAISED_BLOCK_GAS_LIMIT = 60_000_000n;
+/** Above the default limit, below the raised one: the divergent transaction. */
+const OVER_DEFAULT_TX_GAS = 40_000_000n;
+/** Above BOTH, so the raised node refuses it against its OWN configured limit. */
+const OVER_RAISED_TX_GAS = RAISED_BLOCK_GAS_LIMIT + 1n;
 const account = privateKeyToAccount(PK);
 
 function hx(b: Uint8Array): string {
@@ -1109,6 +1122,211 @@ async function runBattery(
 		}
 		steps.push({label: 'value-bearing read affordability', mismatches: m});
 		await node4.dispose();
+	}
+
+	// 15) THE BLOCK GAS LIMIT IS ENFORCED, AND `blockGasLimit` IS WHAT LIFTS IT.
+	//
+	//     WHY THIS STEP EXISTS. The node used to hand `@ethereumjs/vm`'s `runTx` a
+	//     `skipBlockGasLimitValidation`, so a transaction whose gas limit exceeded
+	//     the block's was MINED on the default engine, while revm, which expresses
+	//     that relaxation as a simulation switch and refuses to combine any
+	//     simulation switch with committing, REJECTED the very same transaction
+	//     (`CallerGasLimitMoreThanBlock`). Same node, same transaction, two answers
+	//     depending on which engine was installed: the two-EVMs-disagreeing failure
+	//     the engine seam exists to remove.
+	//
+	//     THE ORACLE IS ABSOLUTE, NOT THE REFERENCE EVM, and here that is not a
+	//     preference but a requirement: this battery's reference `runTx` passes
+	//     `skipBlockGasLimitValidation` itself (see {@link Reference.mineBlock}), so
+	//     a diff of node-against-reference is structurally blind to exactly this
+	//     bug. What is asserted is the NODE's own answer (refused / mined) per
+	//     engine, and because this battery runs on the default engine
+	//     (conformance.spec.ts) AND on revm (revm-conformance.spec.ts), holding both
+	//     to the same absolute statement is what makes it a cross-engine bar.
+	//
+	//     AND THE REFUSAL IS READ, NOT JUST COUNTED. "It threw" is not evidence: a
+	//     malformed transaction, an unaffordable one or a construction error would
+	//     all throw at the same call site. The refusal must NAME the transaction's
+	//     gas limit, the block gas limit it exceeded, and `blockGasLimit` as the
+	//     knob that raises it. The second node proves that naming is not a
+	//     hardcoded 30000000, because the same words come back with the CONFIGURED
+	//     limit in them.
+	{
+		const m: string[] = [];
+		/** One submission, as either the mined receipt's status or the refusal text. */
+		const sendTx = async (n: SlimNode, raw: string) => {
+			try {
+				const rcpt = (await n.request({
+					method: 'eth_sendRawTransactionSync',
+					params: [raw],
+				})) as any;
+				return {outcome: `mined ${String(rcpt?.status)}`, message: ''};
+			} catch (e) {
+				const message = String((e as Error)?.message ?? e);
+				return {outcome: 'refused', message};
+			}
+		};
+		const blockNumberOf = async (n: SlimNode) =>
+			BigInt(
+				(await n.request({method: 'eth_blockNumber', params: []})) as string,
+			);
+		const nonceOf = async (n: SlimNode) =>
+			BigInt(
+				(await n.request({
+					method: 'eth_getTransactionCount',
+					params: [account.address, 'latest'],
+				})) as string,
+			);
+
+		// ---- a node at the DEFAULT block gas limit refuses the over-limit tx ----
+		const nodeDefault = await createNode({
+			chainId: CHAIN_ID,
+			stateMode,
+			miningConfig: {type: 'auto'},
+			initialBalances: {[account.address]: GENESIS_BALANCE},
+			engine: await makeEngine?.(),
+		});
+		// The default is READ back off the node's own block rather than assumed, so
+		// the numbers the refusal is checked for are the node's and not this file's.
+		const genesisGasLimit = BigInt(
+			(
+				(await nodeDefault.request({
+					method: 'eth_getBlockByNumber',
+					params: ['latest', false],
+				})) as any
+			).gasLimit,
+		);
+		cmp(m, 'default blockGasLimit', genesisGasLimit, DEFAULT_BLOCK_GAS_LIMIT);
+		const overLimitRaw = await sign1559({
+			nonce: 0,
+			to: VALUE_SINK_ADDR,
+			value: 1n,
+			gas: OVER_DEFAULT_TX_GAS,
+		});
+		const refused = await sendTx(nodeDefault, overLimitRaw);
+		cmp(m, 'over-limit tx at the default limit', refused.outcome, 'refused');
+		/**
+		 * A word the refusal must contain, reported AS THE REFUSAL when it does not:
+		 * `false` says nothing about which engine's error text came back instead,
+		 * which is the one thing a reader of this mismatch needs.
+		 */
+		const names = (text: string, word: string) =>
+			text.includes(word) ? 'named' : `NOT named, refusal was: ${text}`;
+		cmp(
+			m,
+			"refusal names the tx's gas limit",
+			names(refused.message, String(OVER_DEFAULT_TX_GAS)),
+			'named',
+		);
+		cmp(
+			m,
+			'refusal names the block gas limit exceeded',
+			names(refused.message, String(DEFAULT_BLOCK_GAS_LIMIT)),
+			'named',
+		);
+		cmp(
+			m,
+			'refusal names `blockGasLimit` as the knob',
+			names(refused.message, 'blockGasLimit'),
+			'named',
+		);
+		// A REFUSED TRANSACTION IS NOT A HALF-MINED ONE: no block, no nonce advance.
+		cmp(
+			m,
+			'no block was mined for the refused tx',
+			await blockNumberOf(nodeDefault),
+			0n,
+		);
+		cmp(m, 'sender nonce after the refusal', await nonceOf(nodeDefault), 0n);
+		// ...and the node is still perfectly able to mine a transaction that FITS, so
+		// the refusal above is about this transaction's gas limit and not about the
+		// node having broken.
+		const withinRaw = await sign1559({
+			nonce: 0,
+			to: VALUE_SINK_ADDR,
+			value: 1n,
+			gas: 21_000n,
+		});
+		cmp(
+			m,
+			'within-limit tx at the default limit',
+			(await sendTx(nodeDefault, withinRaw)).outcome,
+			'mined 0x1',
+		);
+		await nodeDefault.dispose();
+
+		// ---- ...and a node CONFIGURED for it mines the very same transaction ----
+		const nodeRaised = await createNode({
+			chainId: CHAIN_ID,
+			stateMode,
+			miningConfig: {type: 'auto'},
+			blockGasLimit: RAISED_BLOCK_GAS_LIMIT,
+			initialBalances: {[account.address]: GENESIS_BALANCE},
+			engine: await makeEngine?.(),
+		});
+		cmp(
+			m,
+			'over-limit tx on a node configured for it',
+			(await sendTx(nodeRaised, overLimitRaw)).outcome,
+			'mined 0x1',
+		);
+		// THE BLOCK REALLY IS THAT BIG: the permissiveness is a property of the
+		// block, not a per-transaction exemption. Read twice: off the RPC block, and
+		// (the only reading a contract can act on) through `GASLIMIT` inside the EVM.
+		const raisedHead = (await nodeRaised.request({
+			method: 'eth_getBlockByNumber',
+			params: ['latest', false],
+		})) as any;
+		cmp(
+			m,
+			'RPC block gasLimit',
+			BigInt(raisedHead.gasLimit),
+			RAISED_BLOCK_GAS_LIMIT,
+		);
+		await nodeRaised.request({
+			method: 'evm_setCode',
+			params: [BLOCK_ENV_PROBE_ADDR, blockEnvProbeRuntimeBytecode],
+		});
+		const raisedEnv = decodeFunctionResult({
+			abi: blockEnvProbeAbi,
+			functionName: 'env',
+			data: (await nodeRaised.request({
+				method: 'eth_call',
+				params: [
+					{
+						to: BLOCK_ENV_PROBE_ADDR,
+						data: encodeFunctionData({
+							abi: blockEnvProbeAbi,
+							functionName: 'env',
+						}),
+					},
+					'latest',
+				],
+			})) as `0x${string}`,
+		});
+		cmp(m, 'GASLIMIT through a contract', raisedEnv[5], RAISED_BLOCK_GAS_LIMIT);
+		// ...and the refusal moved WITH the configuration rather than staying at a
+		// hardcoded 30000000: ONE GAS above the configured limit is refused, naming
+		// THAT limit.
+		const wayOverRaw = await sign1559({
+			nonce: 1,
+			to: VALUE_SINK_ADDR,
+			value: 1n,
+			gas: OVER_RAISED_TX_GAS,
+		});
+		const refusedRaised = await sendTx(nodeRaised, wayOverRaw);
+		cmp(m, 'tx above the RAISED limit', refusedRaised.outcome, 'refused');
+		cmp(
+			m,
+			'refusal names the CONFIGURED block gas limit',
+			names(refusedRaised.message, String(RAISED_BLOCK_GAS_LIMIT)),
+			'named',
+		);
+		await nodeRaised.dispose();
+		steps.push({
+			label: 'block gas limit refuses an over-limit tx; blockGasLimit lifts it',
+			mismatches: m,
+		});
 	}
 
 	const engineId = node.engine.id;

@@ -147,9 +147,13 @@ export interface ReadCallResult {
  * WHAT IS DELIBERATELY ABSENT: any switch that relaxes this transaction's
  * VALIDITY. The read path's simulation switches (base fee, block gas limit,
  * EIP-3607 — see the `call` side of `src/revm.ts`) have no counterpart here, and
- * `@ethereumjs/vm`'s own `skip*Validation` flags stay INSIDE the default engine
- * where they mean something (see `src/engine.ts`). A transaction that runs with
- * relaxed validity is not a transaction.
+ * `@ethereumjs/vm`'s own `skipHardForkValidation` stays INSIDE the default engine
+ * where it means something (see `src/engine.ts`). Its `skipBlockGasLimitValidation`
+ * is not here either, and it is no longer there: it relaxed a rule only ONE engine
+ * could relax, so the relaxation was dropped rather than relocated, and a consumer
+ * who wants gas limits above the block's raises `NodeOptions.blockGasLimit` so that
+ * the block really is that large. A transaction that runs with relaxed validity is
+ * not a transaction.
  */
 export interface TransactionRequest {
 	/** The signed transaction, parsed by the node (which owns parsing). */
@@ -388,7 +392,14 @@ export interface NodeOptions {
 	baseFeePerGas?: bigint;
 	gasPrice?: bigint;
 	maxPriorityFeePerGas?: bigint;
-	/** Block gas limit. Default 30_000_000n. */
+	/**
+	 * Block gas limit. Default 30_000_000n, and a REAL limit: a transaction whose
+	 * own gas limit exceeds it is refused (identically on every engine) rather than
+	 * mined against a limit the block does not have. Raise it to admit bigger
+	 * transactions; the block then really is that large, so `GASLIMIT` reports this
+	 * number to a contract. It does NOT change the default `eth_call` read budget,
+	 * which stays 30_000_000 (pass `gas` on the call for more).
+	 */
 	blockGasLimit?: bigint;
 	/** Pre-fund accounts at genesis (address -> balance wei). */
 	initialBalances?: Record<string, bigint>;

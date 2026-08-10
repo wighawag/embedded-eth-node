@@ -16,7 +16,10 @@
  * `docs/adr/0005-revm-reads-the-nodes-state-through-simplestatemanagers-stacks.md`.
  *
  * The same rule decides where the TRANSACTION half's ethereumjs-specific settings
- * live: inside this module, at `transact` below.
+ * live: inside this module, at `transact` below. For the one of them that turned
+ * out to buy a BEHAVIOUR the other engine could not reproduce
+ * (`skipBlockGasLimitValidation`), the same rule decided that the behaviour had to
+ * go rather than the seam bend around it.
  */
 import {runTx, type VM} from '@ethereumjs/vm';
 import type {StateManagerInterface} from '@ethereumjs/common';
@@ -86,44 +89,46 @@ export function createEthereumjsEngine(deps: {
 		},
 
 		async transact(request: TransactionRequest): Promise<TransactionResult> {
-			// THE TWO SKIP FLAGS LIVE HERE, and nowhere else. They are what the node has
-			// always passed `runTx`, they are load-bearing (a mined transaction is
-			// validated differently without them), and they are `@ethereumjs/vm`'s OWN
-			// vocabulary:
+			// ONE SKIP FLAG LIVES HERE, and nowhere else. It is `@ethereumjs/vm`'s OWN
+			// vocabulary, which is why it lives inside this engine rather than on the
+			// neutral request:
 			//
-			//   skipBlockGasLimitValidation  the node mines one block per transaction and
-			//                                lets a client set any gas limit it likes;
-			//                                `runTx` otherwise refuses a transaction whose
-			//                                gas limit exceeds the block's.
-			//   skipHardForkValidation       skips re-checking the transaction's own
-			//                                hardfork-activation rules; the node builds
-			//                                every block on the ONE `Common` it created,
-			//                                so there is no second fork for a transaction
-			//                                to be valid under.
+			//   skipHardForkValidation  skips re-checking the transaction's own
+			//                           hardfork-activation rules; the node builds every
+			//                           block on the ONE `Common` it created, so there is
+			//                           no second fork for a transaction to be valid
+			//                           under. An engine with no equivalent simply does
+			//                           not have the check to skip.
 			//
-			// WHY NOT A NEUTRAL REQUEST FIELD. Two reasons, and the second is the one
-			// that decides it. (1) They are one EVM's concepts: an engine that is not
-			// `@ethereumjs/*` has no `runTx` to hand them to, so a field on
-			// `TransactionRequest` would be a field every other engine must read and
-			// ignore. (2) Worse, it would be a PROMISE the next engine cannot keep:
-			// `revm-wasm` expresses the block-gas-limit relaxation as `disableBlockGasLimit`
-			// and REFUSES to combine it with committing, so an engine asked to honour a
-			// neutral `skipBlockGasLimitValidation` could only throw. A request field that
-			// one engine must refuse is not a neutral request field.
+			// `skipBlockGasLimitValidation` USED TO LIVE HERE TOO, and it is GONE. It let
+			// a transaction whose gas limit exceeded the block's be mined against a
+			// limit the block did not have, and ONLY on this engine: `revm-wasm` expresses
+			// the same relaxation as a simulation switch (`disableBlockGasLimit`) and
+			// REFUSES to combine any simulation switch with committing, so the same
+			// transaction came back rejected there (`CallerGasLimitMoreThanBlock`). Same
+			// node, same transaction, two answers by engine, which is precisely the
+			// failure the seam exists to remove, and it is also why this was never made a
+			// neutral request field: a field one engine could only throw on is not a
+			// neutral request field, it is a promise the next engine cannot keep.
 			//
-			// The node loses nothing by their living here: it builds blocks at
-			// `blockGasLimit` and pins the fork itself, so what these buy is
-			// `@ethereumjs/vm`'s validation matching the node's own configuration. An
-			// engine with no equivalent simply does not have the checks to skip.
+			// SO THE RELAXATION IS BOUGHT BY CONFIGURATION INSTEAD. Both engines now
+			// enforce the block's gas limit, and a consumer who wants enormous gas limits
+			// raises `blockGasLimit` (`NodeOptions`, default 30,000,000), which both
+			// engines honour by construction because they are handed the same block. The
+			// node refuses an over-limit transaction ITSELF, at submit, so the refusal can
+			// name the numbers and the knob (see `refuseIfOverBlockGasLimit` in ./node.ts).
+			// `runTx`'s own "tx has a higher gas limit than the block" is the backstop
+			// under it, enforcing the same rule in this EVM's own words.
 			//
-			// NOTE that the conformance battery's reference `runTx` passes the same two
-			// flags, so dropping one here would NOT show up as a battery failure.
+			// NOTE that the conformance battery's reference `runTx` passes BOTH flags
+			// still, so neither dropping one here nor restoring it would show up as a
+			// receipt diff. The battery asserts the NODE's answer per engine instead
+			// (`block gas limit refuses an over-limit tx; blockGasLimit lifts it`).
 			const res = await runTx(vm, {
 				// THE SEAM'S SENDER, PINNED FOR `runTx`. See {@link asSender}: this engine
 				// executes on behalf of `request.sender` and derives nothing.
 				tx: asSender(request.tx, request.sender),
 				block: request.block,
-				skipBlockGasLimitValidation: true,
 				skipHardForkValidation: true,
 			});
 			return {

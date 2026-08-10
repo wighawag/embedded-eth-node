@@ -18,6 +18,13 @@
  *      whose `transact` touches no state: the recipient receives nothing, which
  *      is exactly what the deleted "fall back to the node's own
  *      `@ethereumjs/vm`" path used to hide.
+ *   5b. A TRANSACTION TOO LARGE FOR THE BLOCK NEVER REACHES THE ENGINE: the node
+ *      refuses it at submit, in words naming its gas limit, the block gas limit
+ *      it exceeded and `blockGasLimit` as the knob, and this stub's `transact`
+ *      is not called. The block is the node's half of the seam on every engine,
+ *      so the answer is the node's rather than each EVM's (`@ethereumjs/vm` used
+ *      to be told to skip the check entirely, revm always rejected, and neither
+ *      error carries a number or knows the node option exists).
  *   6. The default engine keeps the EIP-2929 warm/access reset AND the
  *      checkpoint/revert that the pure-read path has always done: a repeated
  *      `eth_estimateGas` for a warm SSTORE returns the SAME number (dropping the
@@ -252,6 +259,42 @@ export async function runEngineSeamChecks() {
 	out.stubTargetBalance = (
 		await stubPub.getBalance({address: TARGET})
 	).toString();
+
+	// 5b) A TRANSACTION TOO LARGE FOR THE BLOCK NEVER REACHES THE ENGINE. Which
+	// transactions can fit in a block is the NODE's question on every engine (it
+	// builds the block and configures its gas limit), and it is answered before the
+	// seam, so the refusal is the same on an engine that enforces the limit
+	// (revm), on one that had to be stopped from skipping it (@ethereumjs/vm), and
+	// on this stub, which would have returned a receipt for it without noticing.
+	// That is what makes the answer identical per engine rather than merely present
+	// per engine, and it is the only way the refusal can name `blockGasLimit`,
+	// which is the node's option and no engine's concept.
+	const overLimitRaw = await account.signTransaction({
+		chainId: CHAIN_ID,
+		type: 'eip1559',
+		nonce: 1,
+		to: TARGET,
+		value: 1n,
+		gas: 40_000_000n,
+		maxFeePerGas: 2_000_000_000n,
+		maxPriorityFeePerGas: 1_000_000_000n,
+	});
+	try {
+		await stubNode.request({
+			method: 'eth_sendRawTransactionSync',
+			params: [overLimitRaw],
+		});
+		out.overLimitOutcome = 'mined';
+		out.overLimitError = '';
+		out.overLimitErrorCode = null;
+	} catch (e) {
+		out.overLimitOutcome = 'refused';
+		out.overLimitError = String((e as Error)?.message ?? e);
+		out.overLimitErrorCode = (e as {code?: unknown})?.code ?? null;
+	}
+	// ...and the engine was NOT asked: still the one `transact` from the transfer
+	// above.
+	out.stubTransactCountAfterOverLimit = stubTransactCount;
 
 	await stubNode.dispose();
 

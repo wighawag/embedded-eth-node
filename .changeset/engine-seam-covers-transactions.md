@@ -40,6 +40,9 @@ stayed INSIDE the default engine rather than becoming neutral request fields —
 are one EVM's vocabulary, and `revm-wasm` refuses to combine its equivalent
 relaxation with committing, so a neutral field would have been a promise another
 engine could only throw at. The reasoning is at the code site in `src/engine.ts`.
+(Later in this same release, `skipBlockGasLimitValidation` was DROPPED rather than
+relocated. See the block-gas-limit entry: a relaxation only one engine could honour
+was the divergence, wherever it lived. `skipHardForkValidation` still lives there.)
 
 `transact` was OPTIONAL, transitionally: an engine that omitted it left transactions
 on the node's own `@ethereumjs/vm`, which is exactly what every non-default engine

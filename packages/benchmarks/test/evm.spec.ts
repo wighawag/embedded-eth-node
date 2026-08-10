@@ -90,7 +90,20 @@ const collected: Record<string, unknown>[] = [];
  * change that grows it, and say why in the changeset. A red assertion here means
  * either that or an accidental import into the core graph.
  *
- * RE-PINNED FIVE TIMES SINCE. Most recent first:
+ * RE-PINNED SIX TIMES SINCE. Most recent first:
+ *
+ * 417.2 -> 417.8 KB raw / 125.7 -> 126.0 KB gzip, by
+ * `the-block-gas-limit-relaxation-diverges-by-engine`: the node now REFUSES a
+ * transaction whose gas limit exceeds the block's, in its own words, instead of
+ * telling `@ethereumjs/vm` to skip that check (the relaxation the revm engine
+ * could not reproduce while committing, so the two engines answered differently).
+ * The 0.6 KB is almost entirely that refusal's prose in `src/node.ts`: it names
+ * the transaction's gas limit, the block gas limit it exceeded and
+ * `blockGasLimit` as the knob that raises it, because neither EVM's own error
+ * carries a number or knows the node option exists. Prose in the core bundle,
+ * paid by every consumer including the JS-only one, and it IS the feature, for
+ * the same reason the engine-refusal re-pin below was. Still zero bytes of
+ * `revm-wasm`.
  *
  * 417.1 -> 417.2 KB raw (gzip unchanged at 125.7), by
  * `revm-executes-the-first-transaction-with-commit`: `Engine.transact` became
@@ -150,7 +163,7 @@ const collected: Record<string, unknown>[] = [];
  * carries 1% of slack because the zlib shipped with different Node builds does
  * not compress byte-identically, which is noise rather than growth.
  */
-const DEFAULT_ENTRY_BASELINE = {rawKB: 417.2, gzipKB: 125.7};
+const DEFAULT_ENTRY_BASELINE = {rawKB: 417.8, gzipKB: 126.0};
 const GZIP_SLACK = 1.01;
 
 // Build + serve once for the whole file (the cut contains all backends).

@@ -85,4 +85,16 @@ test('slim-node differential conformance vs trie-backed @ethereumjs/vm reference
 			'value-bearing read affordability',
 		);
 	}
+
+	// The BLOCK-GAS-LIMIT step ran too, in both modes, and it is the third step
+	// whose oracle is NOT the reference: this file's reference `runTx` passes
+	// `skipBlockGasLimitValidation` itself, so a node that went back to mining a
+	// transaction too large for its block would diff CLEAN against it. Only the
+	// node's own answer (refused here, mined on a node configured for it) can see
+	// that, which is why the step must be named rather than counted.
+	for (const mode of ['none', 'trie'] as const) {
+		expect(c[mode].steps.map((s: any) => s.label)).toContain(
+			'block gas limit refuses an over-limit tx; blockGasLimit lifts it',
+		);
+	}
 });

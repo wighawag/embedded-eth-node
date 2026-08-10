@@ -320,13 +320,23 @@ sender crosses the seam as a required value on the request, so an engine execute
 on behalf of the address the node states rather than recovering one of its own (see
 [Sender mode](#sender-mode-recover-authenticated-default-vs-trusted-no-ecrecover)).
 
-One asymmetry worth knowing, because it is the binding's and not a choice: the
-node lets a client set a gas limit above the block's and tells `@ethereumjs/vm` to
-skip that check, and `revm-wasm` has no committing equivalent (its relaxation is a
-simulation switch it refuses to combine with committing). So a transaction whose
-gas limit exceeds `blockGasLimit` is REJECTED on revm and accepted on the default
-engine. A loud rejection is the honest answer; the alternative would relax the
-whole of transaction validity to buy it back.
+**The block gas limit is a real limit, on both engines.** A transaction whose gas
+limit exceeds the block's is REFUSED, with an error naming both numbers and the
+knob, rather than mined against a limit the block does not have. If you want
+enormous gas limits, say so: `createNode({blockGasLimit: 100_000_000n})`. The
+block then really is that large, `GASLIMIT` reports it to a contract and
+`eth_getBlockByNumber` reports it too, and both engines honour it by construction
+because they are handed the same block.
+
+This used to be the one place the two engines answered differently: the node told
+`@ethereumjs/vm` to skip that check (`skipBlockGasLimitValidation`), while
+`revm-wasm` expresses the same relaxation as a simulation switch it refuses to
+combine with committing, so the same transaction was mined on the default engine
+and rejected on revm. The flag is gone. A per-transaction exemption one engine
+could not honour became a configured property of the block that both can, and the
+node's default read budget for an `eth_call` that names no `gas` is deliberately
+NOT tied to it (a bigger block should not silently buy every unbudgeted read a
+longer runaway; pass `gas` on the call instead).
 
 ```ts
 // both wasm delivery shapes are the SAME code path — `wasm` takes bytes, a URL,

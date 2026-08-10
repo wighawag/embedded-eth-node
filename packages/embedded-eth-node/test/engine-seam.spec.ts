@@ -7,6 +7,8 @@
  *   - `call` and `transact` are two operations on ONE engine: there is no second
  *     EVM to mine on, so a stub whose `transact` touches no state leaves the
  *     recipient with nothing
+ *   - a transaction too large for the block is refused BY THE NODE, before the
+ *     engine, in words naming the numbers and `blockGasLimit`
  *   - the default engine keeps the EIP-2929 reset + pure-read checkpoint/revert
  *   - an engine that DOES transact owns the mining path, and the receipt is built
  *     from the neutral transaction result it returned
@@ -64,6 +66,19 @@ test('engine seam (default @ethereumjs/evm, injected engine, reads and transacti
 	expect(c.stubTxStatus).toBe('success');
 	expect(c.stubTxGasUsed).toBe('21000');
 	expect(c.stubTargetBalance).toBe('0');
+
+	// a transaction too large for the block is refused BY THE NODE, before the
+	// engine: this stub would have returned a receipt for it (the default engine
+	// used to mine it, revm always rejected it), so the answer is the node's on
+	// every engine, and only the node can name `blockGasLimit`, which is its own
+	// option and no engine's concept.
+	expect(c.overLimitOutcome).toBe('refused');
+	expect(c.overLimitErrorCode).toBe(-32000);
+	expect(c.overLimitError).toContain('40000000');
+	expect(c.overLimitError).toContain('30000000');
+	expect(c.overLimitError).toContain('blockGasLimit');
+	// ...and the engine was never asked to execute it.
+	expect(c.stubTransactCountAfterOverLimit).toBe(1);
 
 	// a reverting engine result is still an honest execution-reverted error
 	expect(c.revertingCall).toBe('threw:3:0xdeadbeef');

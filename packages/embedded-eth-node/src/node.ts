@@ -71,6 +71,14 @@ import {
 const ZERO_HASH = '0x' + '00'.repeat(32);
 const EMPTY_LOGS_BLOOM = '0x' + '00'.repeat(256);
 
+/**
+ * How much gas an `eth_call` / `eth_estimateGas` that names none may burn. A
+ * node-wide CONSTANT, not the node's `blockGasLimit`: the two are the same
+ * number by default and are still decided apart, for the reasons recorded at its
+ * one use site in `evmCall`.
+ */
+const DEFAULT_READ_BUDGET = 30_000_000n;
+
 function hex(b: Uint8Array): string {
 	return bytesToHex(b) as string;
 }
@@ -289,6 +297,26 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 
 	const blockEnv = options.blockEnv;
 
+	/**
+	 * THE GAS LIMIT OF EVERY BLOCK THIS NODE BUILDS, named once so that the block
+	 * builder and the check that refuses a transaction too large for it cannot
+	 * drift apart. `blockEnv.gasLimit` is the explicit per-block statement and
+	 * `blockGasLimit` the node-wide one, in that order, which is the precedence the
+	 * header below uses, because they are the same number.
+	 *
+	 * IT IS A REAL LIMIT, NOT A FORMALITY. The node used to hand `@ethereumjs/vm`
+	 * a `skipBlockGasLimitValidation`, so a transaction asking for more gas than
+	 * the block had was mined anyway, against a limit the block did not have, and
+	 * only on that engine (revm expresses the same relaxation as a simulation
+	 * switch and refuses to combine any of them with committing, so it rejected the
+	 * very same transaction with `CallerGasLimitMoreThanBlock`). The flag is gone.
+	 * A consumer who wants enormous gas limits raises `blockGasLimit`, which makes
+	 * the permissiveness a VISIBLE property of the block that both engines honour
+	 * by construction, and an honest one, since `GASLIMIT` then reports that same
+	 * number to a contract.
+	 */
+	const minedBlockGasLimit = blockEnv?.gasLimit ?? blockGasLimit;
+
 	// Genesis block.
 	const genesis = createBlock(
 		{
@@ -353,7 +381,7 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 			{
 				header: {
 					number,
-					gasLimit: blockEnv?.gasLimit ?? blockGasLimit,
+					gasLimit: minedBlockGasLimit,
 					baseFeePerGas: blockBaseFee,
 					parentHash,
 					timestamp:
@@ -571,11 +599,53 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 		return {tx, raw, sender: from};
 	}
 
+	/**
+	 * REFUSE A TRANSACTION NO BLOCK THIS NODE BUILDS COULD CONTAIN, in the node's
+	 * own words, before any engine sees it.
+	 *
+	 * WHY THE NODE SAYS IT AND NOT THE ENGINE. Both engines enforce this rule
+	 * themselves now that the default engine no longer skips it (see ./engine.ts),
+	 * and NEITHER can say it legibly: `@ethereumjs/vm` says "tx has a higher gas
+	 * limit than the block" and revm says `Transaction(CallerGasLimitMoreThanBlock)`.
+	 * Neither carries a number, and above all neither mentions `blockGasLimit`, the
+	 * knob that lifts it, which only the node knows about. The block is the NODE's
+	 * half of the seam on every engine (it builds it, it configures its gas limit),
+	 * so "does this transaction fit in a block I will build" is the node's question
+	 * to answer, and answering it here is what makes the refusal IDENTICAL on both
+	 * engines rather than merely present on both. The engines' own checks stay as
+	 * the backstop underneath: this is the same rule (`tx.gasLimit >
+	 * block.header.gasLimit`, per transaction, not cumulative), so a transaction
+	 * that passes here passes there.
+	 *
+	 * WHY AT SUBMIT rather than at mine: the same reason sender recovery is eager
+	 * (see {@link parseTx}). The transaction is rejected by the
+	 * `eth_sendRawTransaction*` call that submitted it, rather than sitting in
+	 * `pending` and taking a whole later `mine()` batch down with it. Nothing about
+	 * the answer changes with time: every block this node builds has the same
+	 * {@link minedBlockGasLimit}.
+	 */
+	function refuseIfOverBlockGasLimit(tx: TypedTransaction): void {
+		const gasLimit = (tx as any).gasLimit as bigint;
+		if (gasLimit <= minedBlockGasLimit) return;
+		// -32000 (the JSON-RPC server-error range geth uses for a transaction its
+		// pool refuses) rather than 3 `execution reverted`: nothing executed, and a
+		// client that reads a revert here would look for return data that does not
+		// exist.
+		throw new RpcError(
+			-32000,
+			`transaction gas limit ${gasLimit} exceeds the block gas limit ${minedBlockGasLimit}, so no block this node builds could contain it. ` +
+				`It is REFUSED rather than mined against a limit the block does not have (a real node refuses it too, and this node's other EVM engine always did). ` +
+				`To allow it, raise the limit: createNode({blockGasLimit: ${gasLimit}n}). The default is 30000000n, or blockEnv.gasLimit if you set the block environment explicitly. ` +
+				`The block then really is that large: GASLIMIT reports the configured value to a contract, and eth_getBlockByNumber reports it too.`,
+		);
+	}
+
 	/** Queue-or-execute a submitted tx; returns the hash, or the receipt if `sync`. */
 	async function submit(
 		submitted: SubmittedTx,
 		sync: boolean,
 	): Promise<unknown> {
+		refuseIfOverBlockGasLimit(submitted.tx);
 		const h = txHashOf(submitted.tx);
 		if (miningConfig.type === 'auto') {
 			await executeAndMine([submitted]);
@@ -709,7 +779,26 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 				? hexToBytes(params.input)
 				: new Uint8Array();
 		const value = params.value ? BigInt(params.value) : 0n;
-		const gasLimit = params.gas ? BigInt(params.gas) : 30_000_000n;
+		// THE DEFAULT READ BUDGET IS A CONSTANT, DELIBERATELY NOT `blockGasLimit`.
+		// They are the same number by default (30,000,000) and it would be easy to
+		// read the second off the first, but they answer different questions and are
+		// DECIDED APART. That is recorded here because a `blockGasLimit` a consumer
+		// may now have to raise (it is what buys back the block-gas-limit relaxation
+		// the engines used to disagree about; see `refuseIfOverBlockGasLimit` above)
+		// makes the link actively harmful:
+		//  - A BLOCK GAS LIMIT is a property of the chain a transaction is mined into,
+		//    visible to a contract as `GASLIMIT`. A READ BUDGET is how long an
+		//    `eth_call` with no `gas` may run before it halts. Linking them means
+		//    `createNode({blockGasLimit: 10_000_000_000n})` silently buys every
+		//    unbudgeted `eth_call` a 300x longer runaway, and the browser tab that
+		//    locks up is nowhere near the option that caused it.
+		//  - The constant is also QUOTED as a fixed number by the revm engine's
+		//    hardfork refusals (`REVM_REFUSED_HARDFORKS.osaka` compares it against
+		//    EIP-7825's 16,777,216 cap in src/revm.ts), which a per-node value would
+		//    make wrong for some nodes and right for others.
+		// A caller who wants a bigger budget passes `gas` on the call itself, which is
+		// the standard `eth_call` field for exactly this and needs no configuration.
+		const gasLimit = params.gas ? BigInt(params.gas) : DEFAULT_READ_BUDGET;
 		return engine.call({
 			from,
 			to,

@@ -104,6 +104,15 @@ test('differential conformance with the revm engine installed (stateMode:none)',
 	// TRANSFER, so a read carrying more ether than the sender holds fails on revm
 	// exactly as it does on `@ethereumjs/evm`.
 	expect(labels).toContain('value-bearing read affordability');
+	// ...and the BLOCK-GAS-LIMIT step, which is the one that exists BECAUSE this
+	// engine and the default one used to disagree: revm rejects a transaction whose
+	// gas limit exceeds the block's and cannot be talked out of it while committing,
+	// where the default engine skipped the check and mined it. Both now refuse it in
+	// the node's own words, and both mine it on a node whose `blockGasLimit` says
+	// they may.
+	expect(labels).toContain(
+		'block gas limit refuses an over-limit tx; blockGasLimit lifts it',
+	);
 
 	// ...and the OTHER state mode is refused rather than covered here — which is
 	// exactly why `conformance.spec.ts` keeps running it on the default engine.
