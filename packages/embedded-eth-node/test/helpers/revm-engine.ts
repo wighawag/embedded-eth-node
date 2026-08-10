@@ -1212,8 +1212,11 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 		try {
 			edit();
 			// A frozen object under sloppy mode DROPS the write silently; under strict
-			// mode it throws. Both leave the table intact, which is the property under
-			// test, so the outcome is RECORDED and the readings below are what judge it.
+			// mode it throws. Both leave the table intact, so the outcome is RECORDED
+			// rather than thrown from here, and the spec judges BOTH halves: the
+			// readings below (the guard survived) and this outcome (the write failed
+			// out loud, which is what a consumer of these ESM, and therefore strict,
+			// modules hits, and which the unchanged table does not imply).
 			tableEditOutcomes[what] = 'no error';
 		} catch (e) {
 			tableEditOutcomes[what] = `threw: ${String((e as Error)?.message ?? e)}`;

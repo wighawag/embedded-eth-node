@@ -276,6 +276,14 @@ test('revm engine: same results + same gas as @ethereumjs/evm, on the node own s
 	expect(c.refusedAfterEditAttempt).toEqual(['prague', 'osaka']);
 	expect(c.pragueRefusalAfterEditAttempt).toBe(c.hardforkRefusals.prague);
 	expect(c.pragueRefusalAfterEditAttempt).toContain('EIP-7623');
+	// ...and the write FAILS AT THE CONSUMER'S OWN LINE, which is the half a
+	// consumer is told about and the half the readings above cannot see: a
+	// sloppy-mode caller gets the unchanged table WITHOUT the throw, so neither
+	// implies the other. These modules are ESM and therefore strict, so both edits
+	// must throw here. The message is the browser's own words (V8 and JSC word it
+	// differently), so what is pinned is that it threw, not what it said.
+	expect(c.tableEditOutcomes['admit prague']).toMatch(/^threw: /);
+	expect(c.tableEditOutcomes['drop the prague refusal']).toMatch(/^threw: /);
 
 	// THE INVARIANT, asserted against the engine itself: on every hardfork the
 	// table admits, the number `eth_estimateGas` returned for a calldata-heavy
