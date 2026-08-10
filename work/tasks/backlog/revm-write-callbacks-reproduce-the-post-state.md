@@ -25,7 +25,8 @@ Expect the coinbase to VANISH from post-state when the priority fee is zero: it 
 - [ ] Storage clearing remains O(that account); nothing walks total storage.
 - [ ] The zero-priority-fee coinbase disappearing under EIP-161 is asserted as EXPECTED behaviour on both engines, with a comment at the assertion saying why, so a future reader does not "fix" it.
 - [ ] Writes remain proportional to what the transaction touched: no bulk sync, no whole-state rebuild after a write.
-- [ ] `dumpState` output after a revm transaction is byte-identical to `dumpState` after the same transaction on the default engine.
+- [ ] `dumpState` after a revm transaction is EQUIVALENT to `dumpState` after the same transaction on the default engine, compared structurally (same accounts, same code, same slots, same values) rather than byte for byte: key order follows insertion order, which follows each engine's write order, and revm's account changes arrive sorted by address while ethereumjs writes in touch order. A byte comparison fails on a correct implementation as soon as a transaction creates two accounts.
+- [ ] The CREATED ADDRESS is derived correctly, including for a transaction performing NESTED creations: the binding's outcome has no created-address field, so it is derived from the account changes, and "the entry flagged created" is ambiguous the moment there is more than one. The receipt's `contractAddress` must name the top-level creation and match `@ethereumjs/vm`, asserted on a nested-create transaction rather than only on a simple deploy.
 - [ ] Reference gas is unchanged: `number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 returning `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`.
 
 ## Blocked by

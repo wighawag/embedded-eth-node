@@ -2,7 +2,7 @@
 title: Measure what transactions on revm actually cost, against the CURRENT baseline
 slug: measure-what-transactions-on-revm-actually-cost
 spec: revm-engine-behind-runtx
-blockedBy: [the-conformance-differential-covers-transactions-on-revm]
+blockedBy: [the-conformance-differential-covers-transactions-on-revm, sender-recovery-uses-the-engines-ecrecover]
 covers: [8]
 ---
 
@@ -10,7 +10,9 @@ covers: [8]
 
 Story 8 says a game developer wants transaction execution measurably faster, and the honest form of that is a MEASUREMENT, not an assertion. Measure it after the write path is correct, and report the answer whatever it is, including "no faster" or "slower", because this spec's real justification is single-EVM coherence and a truthful number is worth more than a favourable one.
 
-**The baseline moved, twice, and the spec's own framing is stale.** Its problem statement says the interpreter is only about 6% of a transaction's time. That was measured while the state manager copied ALL of storage on every message frame, which ADR 0009 removed: four transactions at 100,000 slots went from 289 ms to about 12 ms, and one transaction through the node's own surface went from 39-94 ms to 2.4-3.0 ms. So the interpreter's SHARE of a transaction is now larger and unmeasured, and the comparison must be made against the current numbers in `docs/spikes/re-layer-storage-as-per-account-maps-with-per-frame-diffs/measurements.md`, never against anything quoted in the spec.
+**The baseline moved, and the framing this spec was written with is stale.** The spec used to say the interpreter is only about 6% of a transaction's time (the sentence was removed when the spec was trimmed, so do not go looking for it; it is quoted here as the belief to distrust). It was measured while the state manager copied ALL of storage on every message frame, which ADR 0009 removed. So the interpreter's SHARE of a transaction is now larger and unmeasured.
+
+Measure against `docs/spikes/re-layer-storage-as-per-account-maps-with-per-frame-diffs/measurements.md`, and read it the way it asks to be read: the four-transaction row at 100,000 slots is **18-28x and FLAT**, from two runs of the same script on the same machine (336.1 to 11.9, and 301.1 to 16.8), and the document says in bold not to quote the single 28x cell because it is the allocation-heaviest in the file. The durable claim is the FLATNESS, not any ratio. Take the same care with your own numbers: this task's whole subject is numeric honesty, so a single cherry-picked cell in its own report would be self-refuting.
 
 Two more things to measure rather than assume, both named by the spec:
 
@@ -27,13 +29,14 @@ The repo already has the instrument: the benchmark suite's existing rows and the
 - [ ] The commit path is measured specifically, including the coinbase write that now happens on every transaction.
 - [ ] Sender recovery is reported separately from execution, so the two levers can be told apart.
 - [ ] The result is recorded with a re-runnable script and the environment stated, in the style of the repo's existing measurement documents, and the numbers are produced by that script rather than quoted from reasoning.
-- [ ] The answer is reported plainly even if it is unfavourable, and the spec's stale "interpreter is ~6%" framing is not repeated anywhere.
+- [ ] The answer is reported plainly even if it is unfavourable, the stale "interpreter is ~6%" framing is not repeated anywhere, and no single allocation-heavy cell is quoted as if it were the result.
 - [ ] If the measurement suggests the design should be revisited (for example a real workload touching thousands of distinct slots per tick), that is stated as a finding rather than acted on.
 - [ ] Reference gas is unchanged: `number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 returning `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`.
 
 ## Blocked by
 
 - `the-conformance-differential-covers-transactions-on-revm` — measure a correct implementation, not a plausible one.
+- `sender-recovery-uses-the-engines-ecrecover` — it moves a fixed per-transaction cost that this task has to report with and without, and it authors the same figure. Measuring first would publish a number that task immediately invalidates, and would then have it rewriting this task's document.
 
 ## Prompt
 

@@ -16,12 +16,13 @@ The seam becomes ONE interface with two operations: execute a read-only call, an
 
 `CONTEXT.md`'s glossary already anticipated this and wrote down the condition: its *engine* entry says not to re-widen the term to mean "the EVM behind the node" **until a spec actually moves transactions onto it**. That spec is `revm-engine-behind-runtx`, so the condition is met and the entry is updated to say so rather than being quietly rewritten.
 
-**THE BLAST RADIUS, COUNTED RATHER THAN ASSUMED.** `readEngine` / `ReadEngine` / `ReadCallRequest` / `ReadCallResult` occur **139 times across 28 files** outside `work/`. Re-run the count before you start (it is one grep) and treat this list as the scope fence, because a rename that stops at the source tree leaves the repo not compiling and the documentation lying:
+**THE BLAST RADIUS IS WIDE: COUNT IT YOURSELF, FIRST.** `readEngine` / `ReadEngine` / `ReadCallRequest` / `ReadCallResult` occur roughly 140 times across about thirty files outside `work/`. Do not take those figures as the scope fence: **re-run the grep** (it is one command) and use its output. The list below is what the count found at tasking time, and it is here so you can tell whether anything has MOVED, not so you can skip counting:
 
-- **Source, six modules:** the seam and its refusals, the types module, the node, the revm engine, the worker client, the package entry point. Plus one mention each in the state store and the intrinsic-gas header.
+- **Source:** the seam and its refusals, the types module, the node, the revm engine, the worker client, the worker entry, the package entry point, plus a mention each in the state store and the intrinsic-gas header.
 - **The OTHER package:** `packages/benchmarks` reads it in its slim-node backend and in the bundle-size spec. It is in the same workspace and its build is part of the gate, so a rename that ignores it is a red gate, not a follow-up.
-- **Tests, nine helpers and five specs**, including the engine-seam, slim-node-checks, worker-roundtrip, conformance and revm-engine helpers.
+- **Tests:** several helpers and specs, including engine-seam, slim-node-checks, worker-roundtrip, conformance, affordability, cut and revm-engine.
 - **Documents:** `README.md` (which currently tells a consumer to say `node.readEngine` and not `node.engine`, and will be actively wrong the moment this lands), `CONTEXT.md`'s glossary, and `docs/adr/0006-the-engine-is-an-injected-object-not-a-named-string.md`.
+- **Also check `docs/spikes/*/measurements.md` and ADR 0008**, which mention the seam's type names in passing. They are measurement records of past runs: prefer leaving them and their numbers alone, and say which you touched and why.
 
 Two exclusions, both deliberate:
 

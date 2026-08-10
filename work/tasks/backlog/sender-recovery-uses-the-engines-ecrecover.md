@@ -22,7 +22,7 @@ The correctness bar is not the speed. Recovery decides WHO signed a transaction,
 - [ ] The two implementations agree on rejection cases too: a malformed signature, a high-`s` signature, and a wrong recovery id are refused by both, and a transaction carrying one is rejected rather than attributed to some address.
 - [ ] A recovered sender is asserted against a known signer for legacy, EIP-2930 and EIP-1559 transactions.
 - [ ] `senderMode:'trusted'` is untouched and still skips recovery entirely; its refusal when the mode is not enabled is unchanged.
-- [ ] Every place the repo quotes the recover-versus-trusted ratio is updated, so no stale 13x survives to justify a decision on numbers that moved.
+- [ ] Every LIVE place the repo quotes the recover-versus-trusted ratio is updated, so no stale figure survives to justify a decision on numbers that moved: the source JSDoc, the option's documentation, the trusted-sender test helper and the README. `CHANGELOG.md` is HISTORY and is not rewritten, and `docs/adr/0002-trusted-sender-is-a-primitive-impersonation-is-not-our-job.md` records a past decision and takes a dated amendment rather than an edit, exactly as the seam task treats `CHANGELOG.md` and ADR 0006.
 - [ ] The saving is MEASURED and recorded rather than asserted from the binding's documentation.
 - [ ] Reference gas is unchanged: `number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 returning `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`.
 
