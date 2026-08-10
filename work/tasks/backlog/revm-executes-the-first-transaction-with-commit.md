@@ -4,8 +4,14 @@ slug: revm-executes-the-first-transaction-with-commit
 spec: revm-engine-behind-runtx
 blockedBy: [re-widen-the-engine-seam-to-cover-transactions]
 covers: [1, 10, 16]
-needsAnswers: true
 ---
+
+> **RECOVERY HANDOFF 2026-08-10. The work on `work/task-revm-executes-the-first-transaction-with-commit` is GOOD and NEARLY DONE: continue from it, do not restart.** Gate 1 passed and Gate 2 blocked on exactly two one-line documentation misses in the read-engine sweep this task owns. Both are FALSE as of that branch's own commit, which is what makes them worth a bounce rather than a nit:
+>
+> 1. `packages/embedded-eth-node/src/revm.ts`, the JSDoc of the factory consumers actually call: "Build a revm-backed engine, serving the seam's READ half." It now serves both halves.
+> 2. `packages/benchmarks/README.md`: "Only READS move here ... has no write half yet, so a revm-backed node still executes its transactions on `@ethereumjs/vm`: `deploy` and `callAvg` are unaffected by design and any difference there is noise." Every clause of that is now wrong, and the last one is actively harmful: it tells a maintainer to DISMISS a difference in the `deploy` and `callAvg` rows as noise, when those rows are exactly what this change makes engine-sensitive. Rewrite the paragraph so those rows are named as meaningful, and check the row list that follows it (`read`, `compute`, `keccak`, `frame`, `floor`) for the same staleness. The same commit correctly updated the sibling comments in `test/helpers/cut.ts` and `test/helpers/backend-slim-node.ts`, so the README currently contradicts the code beside it.
+>
+> Nothing else was raised. Fix those, re-run the sweep across the whole surface once more (the phrase hides in row labels and config comments, not only in prose), and let the gates judge it again. Do NOT undo or redo anything else on the branch.
 
 ## What to build
 
