@@ -1,50 +1,51 @@
 ---
-title: Document the type-3 receipt gap on the path that would produce one
+title: Upgrade to revm-wasm 0.4.0 and CLOSE the type-3 gap, execution and receipt, instead of documenting it
 slug: document-the-type-3-receipt-gap-where-it-would-be-met
 spec: revm-engine-behind-runtx
 blockedBy: []
 covers: [15]
 ---
 
-> **WIDENED 2026-08-10, after `revm-executes-the-first-transaction-with-commit`: the gap is no longer only in the RECEIPT.** That change mapped the node's transaction onto the binding's execute WITHOUT the blob fields, so a type-3 transaction on a revm-backed node now EXECUTES as a 1559 one: `BLOBHASH` answers zero and blob gas is neither charged nor validated, where the default engine charges and validates it. That is an execution divergence between the two engines on a fork they both admit, not merely two absent receipt fields, and it makes the decision below sharper rather than different: a transaction that executes under the wrong rules and returns a plausible receipt is worse than one that is refused. The binding DOES accept `blobVersionedHashes` and `maxFeePerBlobGas`, so mapping them is available; what it does not surface is the blob gas the receipt wants. Cover both halves, and prefer REFUSING a type-3 transaction on a path that cannot cost it correctly over executing it under 1559 rules.
-
 ## What to build
 
-revm supports blob transactions fully: `BLOBHASH`, `BLOBBASEFEE`, the blob gas price and the versioned-hash checks all work, and the engine's own differential covers thousands of blob transactions. What is missing is an INTERFACE omission: the binding's outcome does not surface `blobGasUsed` or `blobGasPrice`, so a type-3 receipt cannot be fully reconstructed from it. Verified against `revm-wasm@0.3.1`: the outcome blob's documented layout carries gas used, total gas spent, refunded, return data, logs, the bloom, per-account changes and the effective gas price, and no blob gas fields.
+> **RE-SCOPED 2026-08-10, from "document the gap" to "close it", because the gap moved.** This task existed because the binding's result could not carry `blobGasUsed` / `blobGasPrice`, so a type-3 receipt could not be completed and the honest options were a refusal or a documented incompleteness. **`revm-wasm@0.4.0` is released and adds exactly those two fields**, so the receipt half is now closable in the ordinary way. The task's shape changes accordingly; story 15's requirement (a consumer must never receive a silently incomplete type-3 receipt) is unchanged and is now met by completing the receipt rather than by apologising for it.
 
-**The gap is NODE-WIDE, not revm-specific, and that is the part to get right.** `SerializedReceipt` carries no `blobGasUsed` / `blobGasPrice` on EITHER path, so a consumer on the DEFAULT engine already meets the silently incomplete receipt today. Scoping the honest edge to the revm path alone would leave the reachable half of story 15 open while appearing to close it. Cover both paths: whatever shape is chosen must be met by a consumer sending a type-3 transaction to this node, whichever engine is installed.
+Two halves, and both are now buildable.
 
-Type-3 transactions are not an intended use of this node, so the gap is ACCEPTED rather than closed. What is not acceptable is a silently incomplete receipt: a consumer who does reach for a blob transaction must find a STATED limitation at the point they meet it, in the honest-edge style this repo uses everywhere else. Say what is missing, why (an omission in the binding's result, not an engine limitation), and what closing it would take (a small addition to the binding).
+**1. Execution.** `revm-executes-the-first-transaction-with-commit` mapped the node's transaction onto the binding's execute WITHOUT the blob fields, so a type-3 transaction on a revm-backed node currently executes as a 1559 one: `BLOBHASH` answers zero, and blob gas is neither charged nor validated, where the default engine charges and validates it. That is a live cross-engine divergence on a fork both engines admit. The binding accepts `blobVersionedHashes` and `maxFeePerBlobGas`, so map them and the divergence closes.
 
-Decide and record which shape the honest edge takes here, because the two are meaningfully different and the choice is the substance of this task: REFUSE a type-3 transaction on the revm path with an error naming the missing fields, or ACCEPT it and document that those two receipt fields are absent. Refusing is more honest if a partially-populated receipt would be mistaken for a complete one; accepting is better if the transaction itself executes correctly and only two receipt fields are unavailable. Whichever is chosen, a consumer must not be able to receive a type-3 receipt that LOOKS complete and is not.
+**2. The receipt.** Upgrade `revm-wasm` to `^0.4.0` in both packages and update the lockfile, then populate `blobGasUsed` and `blobGasPrice` on a type-3 receipt from the outcome. Verified against the published 0.4.0 tarball before this task was written: the change from `0.3.1` is purely ADDITIVE — `Outcome` gains those two `bigint` fields and the outcome format goes to version 4, while `instance.d.ts`, `host.d.ts`, `request.d.ts` and `spec.d.ts` are byte-identical. Nothing that exists today changes meaning, so the upgrade on its own is expected to be a version bump and a lockfile line.
 
-Keep it small. This task is independent of every other task in this spec and can be done at any time.
+Two details the binding's own documentation gives you, worth taking rather than re-deriving. The two fields are **unconditional** in the outcome, zero for a non-blob transaction, deliberately unlike the logs bloom whose conditionality it documents as the shape that bites a hand-rolled decoder. And both are revm's OWN numbers (`Transaction::total_blob_gas` and `Block::blob_gasprice`, the same `fake_exponential` rule the engine charges with), so use them rather than computing blob gas in JavaScript, for the same single-implementation reason `effectiveGasPrice` comes from the engine.
+
+The node's own receipt type carries no blob fields on EITHER path, so this is node-wide work, not revm-specific: the default engine's type-3 receipts are equally incomplete today. Close both, or state plainly why one is left.
+
+**What remains genuinely unimplemented is the blob FEE MARKET**, and it must not be papered over: the node has a constant fee market and does not track excess blob gas across blocks, so `blobGasPrice` will be whatever the block environment it passes implies. Decide and record whether the node sets a blob base fee at all, and if the honest answer is that a blob transaction is still not properly costed by THIS node, then story 15's stated limitation survives in a narrower and more accurate form: not "the receipt is incomplete" but "the node does not run a blob fee market". Say which, at the code site.
 
 ## Acceptance criteria
 
-- [ ] A consumer sending a type-3 transaction meets a stated limitation at that point, on BOTH engine paths: either a refusal naming the missing fields, or a receipt whose incompleteness is documented where it is produced.
-- [ ] The choice between refusing and accepting is made explicitly, with the reasoning recorded at the code site.
-- [ ] No type-3 receipt can be received that appears complete while `blobGasUsed` / `blobGasPrice` are missing.
-- [ ] The documentation says what is missing, that it is an omission in the binding's RESULT rather than an engine limitation, and what closing it would take.
-- [ ] The default `@ethereumjs/evm` path is covered too, since the receipt type omits the blob fields regardless of engine; if the two paths are handled differently, the difference is deliberate and its reason is recorded.
+- [ ] `revm-wasm` is `^0.4.0` in `packages/embedded-eth-node` and `packages/benchmarks`, with the lockfile updated, and nothing else changes behaviour (the upgrade is additive; if anything moves, that is the finding).
+- [ ] A type-3 transaction on a revm-backed node EXECUTES as a type-3 one: the versioned hashes are passed, `BLOBHASH` answers them, and blob gas is charged, matching `@ethereumjs/vm`.
+- [ ] A type-3 receipt carries `blobGasUsed` and `blobGasPrice`, taken from the engine rather than computed in JavaScript, on both engine paths.
+- [ ] A non-blob transaction is unaffected: the two fields are absent from its receipt (or zero, matching what the default engine reports), and its outcome decoding is unchanged.
+- [ ] Whether the node runs a blob fee market is decided and recorded; if it does not, the remaining limitation is stated where a consumer meets it, in the honest-edge voice, and is about the FEE MARKET rather than about missing receipt fields.
+- [ ] A changeset. This changes a published dependency range and what a type-3 receipt contains.
 - [ ] Reference gas is unchanged: `number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 returning `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`.
 
 ## Blocked by
 
-- None — can start immediately, and is independent of the rest of this spec.
+- None. The upgrade is additive and the execution mapping is independent of the rest of the spec's spine.
 
 ## Prompt
 
-> Goal: make a consumer who reaches for a blob transaction find a stated limitation rather than a quietly incomplete receipt.
+> Goal: close the type-3 gap rather than document it. The binding gained the two fields that made it unclosable, so the reason for the old shape is gone.
 >
-> FIRST, check this task against current reality: it was written on 2026-08-09 against `revm-wasm@0.3.1` and may have DRIFTED. Re-read the binding's outcome format at the version the repo actually depends on: if it now surfaces the blob gas fields, the gap is CLOSED and this task becomes closing it rather than documenting it, which is a better outcome and should be said plainly.
+> FIRST, check this task against current reality: it was re-scoped on 2026-08-10 when `revm-wasm@0.4.0` shipped, and may have DRIFTED again. Confirm the version the repo depends on, confirm `Outcome` really carries `blobGasUsed` and `blobGasPrice`, and confirm the execution mapping still omits the blob inputs. If any of that has moved, say so before building.
 >
-> Read the binding's outcome format documentation (it lists every field the result carries; there are no blob gas fields), the node's receipt assembly, and the repo's honest-edge convention plus the refusals that already follow it, so this one matches their voice.
+> Read the binding's outcome documentation (the two fields are UNCONDITIONAL and it says why), its execute options (`blobVersionedHashes`, `maxFeePerBlobGas`), the node's receipt assembly, and the node's own `SerializedReceipt`, which carries no blob fields on either path.
 >
-> DECIDE, do not hedge. Refuse the transaction, or accept it and document the two absent fields. A middle state where a receipt is returned that looks complete is the one outcome this task exists to prevent.
+> TAKE THE ENGINE'S NUMBERS. Blob gas used and blob gas price are revm's own, computed by the same rule it charges with. Computing either in JavaScript would be a second implementation of protocol arithmetic, which is the drift `effectiveGasPrice` was already moved behind the engine to avoid.
 >
-> Check the DEFAULT path too before you scope this to revm. The receipt type omits those fields whichever engine ran the transaction, so the reachable half of this gap exists today and closing only the revm half would look like a fix while leaving it open.
+> DO NOT PAPER OVER THE FEE MARKET. This node has a constant fee market and does not track excess blob gas across blocks. Populating two receipt fields does not make it a node that costs blob transactions correctly, so decide what it does about a blob base fee and record it. An honest narrow limitation is worth more than a receipt that looks complete.
 >
-> This is an interface omission upstream, not an engine limitation, and saying so precisely is part of the deliverable: a future reader should be able to tell that closing it is a small addition to the binding rather than a redesign.
->
-> Keep it small and independent. It touches nothing the other tasks in this spec touch.
+> Done means: a blob transaction executes as one on both engines, its receipt carries the blob fields from the engine, and whatever is still not true about blob costing on this node is stated where someone meets it.
