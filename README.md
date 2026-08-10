@@ -170,6 +170,14 @@ an address that **already holds storage** (reachable via `evm_setStorageAt`, a
 - **`'trie'`** has a real `storageRoot`, so the EIP-7610 collision check fires and
   the creation **fails** with a revert. This is the spec-current behaviour.
 
+A DELETED account, by contrast, behaves the SAME in both modes: a `SELFDESTRUCT`
+(or an EIP-161 empty-account clearing) takes the account's storage with it, so a
+destroyed contract's slots read `0` and `dumpState` stops carrying them. That is
+free in `'trie'` (the account's storage trie goes with the account) and is our
+override in `'none'`, where upstream `SimpleStateManager.deleteAccount` leaves
+storage where it was — the same gap as the `clearStorage` no-op below, and
+recorded in the same ADR.
+
 Neither mode lets the new contract *inherit* the old storage, which is the part
 that would silently corrupt results. `'none'` cannot detect the collision at all,
 because detecting it means reading a `storageRoot` that mode does not have. Note

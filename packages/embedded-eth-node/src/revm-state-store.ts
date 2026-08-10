@@ -433,6 +433,15 @@ export class SimpleStateManagerStore implements StateStore {
 		// tombstone answers "absent", and `dumpState` skips both. The account's CODE is
 		// deliberately left where it is, again matching upstream, which never removes
 		// it either; nothing reads it, since revm asks for code by HASH.
+		//
+		// THE STORAGE HALF IS NOT DONE HERE and must not be: the binding sends
+		// `clearStorage` for this account IMMEDIATELY BEFORE this call, for a
+		// `SELFDESTRUCT` and for an EIP-161 clearing alike, so doing it again here
+		// would be the host re-deriving a rule the engine already applied. The DEFAULT
+		// engine reached the same end state only after `OverlayStorageStateManager`
+		// learned to clear storage on `deleteAccount` (ADR 0007's 2026-08-10
+		// amendment); before that it left a dead contract's slots readable, and the
+		// two engines' post-state differed on exactly this.
 		this.#accounts.set(addrKey(address), undefined);
 	}
 

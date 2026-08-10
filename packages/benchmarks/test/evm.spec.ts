@@ -90,7 +90,19 @@ const collected: Record<string, unknown>[] = [];
  * change that grows it, and say why in the changeset. A red assertion here means
  * either that or an accidental import into the core graph.
  *
- * RE-PINNED SIX TIMES SINCE. Most recent first:
+ * RE-PINNED SEVEN TIMES SINCE. Most recent first:
+ *
+ * 417.8 -> 417.9 KB raw (gzip unchanged at 126.0), by
+ * `revm-write-callbacks-reproduce-the-post-state`:
+ * `OverlayStorageStateManager.deleteAccount` now clears the account's storage as
+ * well, so a `SELFDESTRUCT` (or an EIP-161 empty-account clearing) in
+ * `stateMode:'none'` stops leaving a dead contract's slots readable at its
+ * address. The 0.1 KB is a two-line override; it is in the CORE graph for the
+ * same reason the two `state-manager.ts` re-pins below are (this IS the default
+ * state manager for `stateMode:'none'`, i.e. every consumer who passes no
+ * options), and it buys that consumer post-state that agrees with a trie and with
+ * the revm engine instead of disagreeing with both
+ * (`docs/adr/0007-...`, amended 2026-08-10). Still zero bytes of `revm-wasm`.
  *
  * 417.2 -> 417.8 KB raw / 125.7 -> 126.0 KB gzip, by
  * `the-block-gas-limit-relaxation-diverges-by-engine`: the node now REFUSES a
@@ -163,7 +175,7 @@ const collected: Record<string, unknown>[] = [];
  * carries 1% of slack because the zlib shipped with different Node builds does
  * not compress byte-identically, which is noise rather than growth.
  */
-const DEFAULT_ENTRY_BASELINE = {rawKB: 417.8, gzipKB: 126.0};
+const DEFAULT_ENTRY_BASELINE = {rawKB: 417.9, gzipKB: 126.0};
 const GZIP_SLACK = 1.01;
 
 // Build + serve once for the whole file (the cut contains all backends).

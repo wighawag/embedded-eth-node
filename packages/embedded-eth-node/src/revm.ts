@@ -744,10 +744,12 @@ function feesOf(tx: TransactionFields): {
  *     — which `@ethereumjs/util` already computes, and which is unambiguous
  *     because a transaction's own creation is always a plain CREATE.
  *
- * The nested case is only PARTIALLY discharged: it is asserted against
- * `@ethereumjs/vm` by `revm-write-callbacks-reproduce-the-post-state`, on a
- * transaction that actually performs one. This function is where that assertion
- * lands, rather than an expression inlined in the result mapping.
+ * The nested case is DISCHARGED, on a transaction that actually performs one:
+ * `test/revm-post-state.spec.ts` sends a creation whose init code CREATEs a
+ * child, so TWO account changes arrive flagged `created`, and asserts that the
+ * receipt's `contractAddress` is the top-level address on BOTH engines and is
+ * NOT the child's. Taking `created[0]` passes every simple deploy and fails
+ * there.
  */
 function createdAddressOf(
 	outcome: Outcome,

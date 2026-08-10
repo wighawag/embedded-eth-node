@@ -18,6 +18,11 @@
  *                      run with the revm engine installed — a tx submitted through
  *                      the `evm_*As` cheats executes as the CLAIMED sender, even
  *                      when the signature recovers to somebody else
+ *   - 'post-state'   : the SHARED post-state differential (helpers/post-state.ts)
+ *                      — five state-shaped transactions (creation, nested
+ *                      creation, nested-frame storage, an EIP-161 emptying, a
+ *                      selfdestruct) leaving state the default engine's cannot be
+ *                      told apart from, read through the node's public surface
  */
 import type {
 	CodeUnderTest,
@@ -28,6 +33,7 @@ import {captureEnv} from 'playwright-browser-harness/contract';
 import {runRevmEngineChecks} from './revm-engine.js';
 import {runRevmConformance} from './revm-conformance.js';
 import {runRevmTrustedSender} from './revm-trusted-sender.js';
+import {runRevmPostState} from './revm-post-state.js';
 
 const cut: CodeUnderTest = {
 	name: 'embedded-eth-node/revm',
@@ -68,6 +74,18 @@ const cut: CodeUnderTest = {
 		if (ctx.params.mode === 'trusted-sender') {
 			try {
 				results.revmTrustedSender = await runRevmTrustedSender();
+			} catch (e) {
+				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
+			}
+			return {results, timings, errors, env: captureEnv()};
+		}
+
+		// The SHARED post-state differential, with the revm engine installed. Gas
+		// equality says nothing about balances, code or storage, so this is the half of
+		// the correctness bar the cross-backend gate structurally cannot see.
+		if (ctx.params.mode === 'post-state') {
+			try {
+				results.revmPostState = await runRevmPostState();
 			} catch (e) {
 				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
 			}

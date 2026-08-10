@@ -14,6 +14,26 @@ The subclass was also cheaper than it looked: `topStorageStack()` is `protected`
 
 One irritation worth recording, because it will confuse the next person: the override's `address` parameter is OPTIONAL. TypeScript refuses an override that adds a REQUIRED parameter the base does not declare (TS2416), and the base declares zero. So the signature is `clearStorage(address?: Address)` and a no-argument call keeps the base's do-nothing behaviour rather than guessing an account. The bug's own signature is what prevents typing the fix properly.
 
+## Amendment, 2026-08-10: deleting an account also clears its storage
+
+The same gap has a SECOND mouth, and this one was found by pointing a second EVM at the same state. `SimpleStateManager.deleteAccount` sets the account key to `undefined` and never touches storage — for the same reason `clearStorage` is a no-op, namely that a flat `${address}_${slot}` map has no per-account clear to call. `@ethereumjs/evm`'s journal calls exactly that for BOTH a `SELFDESTRUCT` and an EIP-161 empty-account clearing, so in `stateMode:'none'` a destroyed contract's slots stayed READABLE at its address and `dumpState` kept serialising them.
+
+Measured through the node's own public surface, one transaction that writes slot 0 and selfdestructs in the same transaction (`docs/spikes/revm-write-callbacks-reproduce-the-post-state/`):
+
+| configuration | slot 0 of the destroyed contract |
+| --- | --- |
+| `'trie'` / `@ethereumjs/vm` | `0x…00` |
+| `'none'` / `@ethereumjs/vm` | **`0x…2a`** |
+| `'none'` / `revm-wasm` | `0x…00` |
+
+**So we clear storage on delete, in `OverlayStorageStateManager.deleteAccount`.** The decision is which side to move, and a trie settles it: deleting an account removes it from the trie and its storage trie goes with it, so `MerkleStateManager` needs no equivalent line and `'trie'` was already right. `revm-wasm` hands its host `clearStorage` then `removeAccount` for exactly these two cases — its own commit semantics, applied BEFORE the host is called — so it was right too. The odd one out was the DEFAULT engine in `'none'` mode. Moving revm to match it instead would have meant teaching our host to ignore what the binding documents, and re-deriving EVM rules on the host side is how a host ends up disagreeing with its engine about what a selfdestruct means.
+
+The rejected alternative was to leave both engines as they were and narrow the post-state assertion. It was rejected because the divergence is a real one a consumer can read (`eth_getStorageAt` on a dead contract, and every `dumpState` / IndexedDB snapshot taken after a selfdestruct), and because a documented mode difference is only affordable when the mode cannot do better. Here it can: ADR 0009's per-account overlays make the clear O(1) — one `delete` plus a tombstone on the top overlay, revert-safe beside the account tombstone the base class writes — which is precisely the cost that did not exist when the flat map was the layout.
+
+**What it changes for the DEFAULT engine**, since this is the one amendment here that is not purely additive: in `stateMode:'none'`, an account that is DELETED now takes its storage with it. A destroyed contract's slots read zero rather than their last value, and `dumpState` (hence IndexedDB persistence) no longer carries them. Nothing else moves. Asserted in `test/slim-node-checks.spec.ts` in BOTH state modes — the two modes AGREE here, unlike the EIP-7610 asymmetry below — and diffed engine-against-engine by `test/revm-post-state.spec.ts`.
+
+One thing this deliberately does NOT do: it does not remove the account's CODE. Neither does upstream, and neither does the revm host (`removeAccount` in `src/revm-state-store.ts`), so both engines answer `eth_getCode` on a destroyed contract identically — with stale bytes, where `'trie'` mode answers `0x`. That is a separate `'none'`-mode staleness with no cross-engine consequence, captured in `work/notes/observations/none-mode-keeps-a-deleted-accounts-code.md` rather than fixed here.
+
 ## What this does NOT fix, and the mode asymmetry it leaves
 
 The EIP-7610 collision guard directly above that call rejects creation outright when the target account has non-empty storage, and it decides by reading `account.storageRoot`. `SimpleStateManager` implements no state-root logic at all, so `storageRoot` never reflects its flat storage map and that guard CANNOT fire in `'none'` mode. Clearing is therefore the most we can do there.

@@ -9,6 +9,7 @@
  *      serve the node's configuration, takes construction DOWN — the node never
  *      quietly substitutes the default engine — and an engine handed to the
  *      Worker client is refused by name rather than by an opaque DataCloneError.
+ *   8. A DESTROYED account takes its storage with it, in BOTH state modes.
  */
 import {
 	createNode,
@@ -430,6 +431,77 @@ async function engineSeamHonestyChecks(): Promise<Record<string, unknown>> {
 				`threw:${String((e as Error)?.message ?? e)}`;
 			out[`numberAfterRedeploy.${mode}`] = 'n/a';
 		}
+		await n.dispose();
+	}
+
+	// 8) a SELFDESTRUCTED account's storage is GONE, in both state modes.
+	// `SimpleStateManager.deleteAccount` tombstones the account and never touches
+	// storage (it has no per-account index to clear with), so `stateMode:'none'`
+	// used to answer a destroyed contract's slot with its LAST VALUE while
+	// `stateMode:'trie'` — where deleting the account takes its storage trie with it
+	// — answered zero. Measured through this exact surface before the fix: `0x2a`
+	// versus `0x0`
+	// (docs/spikes/revm-write-callbacks-reproduce-the-post-state/measurements.md).
+	// `src/state-manager.ts` now clears on delete, so both modes say zero and the
+	// revm engine — whose host is handed `clearStorage` then `removeAccount` for
+	// exactly this case — agrees with the default one. Both modes are asserted so
+	// the AGREEMENT is pinned, the way the mode ASYMMETRY above is.
+	//
+	// EIP-6780 (Cancun) is why the contract destroys itself in the transaction that
+	// CREATED it: a `SELFDESTRUCT` on any older contract only moves its balance.
+	// The init code is `PUSH1 2a, PUSH1 00, SSTORE` (slot 0 = 42) then `PUSH20
+	// <beneficiary>, SELFDESTRUCT` — it writes storage and dies without deploying
+	// any code, so what is left to observe is the storage and nothing else.
+	const SD_BENEFICIARY = '0x0000000000000000000000000000000000004444';
+	const SD_INIT = `0x602a60005573${SD_BENEFICIARY.slice(2)}ff` as const;
+	for (const mode of ['none', 'trie'] as const) {
+		const n = await createNode({
+			chainId: CHAIN_ID,
+			stateMode: mode,
+			miningConfig: {type: 'auto'},
+			initialBalances: {[account.address]: 10n ** 24n},
+		});
+		const t = custom(
+			{request: ({method, params}: any) => n.request({method, params})},
+			{retryCount: 0},
+		);
+		const wallet = createWalletClient({account, chain, transport: t});
+		const pub = createPublicClient({chain, transport: t});
+		// An explicit gas limit rather than viem's estimate: the estimate is exact for
+		// the top frame, and this transaction has none to spare.
+		const hash = await wallet.deployContract({
+			abi: [],
+			bytecode: SD_INIT,
+			value: 1000n,
+			gas: 200_000n,
+		});
+		const rcpt = await pub.waitForTransactionReceipt({hash});
+		const destroyed = rcpt.contractAddress!;
+		out[`selfdestructStatus.${mode}`] = rcpt.status;
+		// It really was destroyed rather than merely emptied: no code, no balance, and
+		// the beneficiary holds what it carried.
+		out[`selfdestructCode.${mode}`] = String(
+			await n.request({method: 'eth_getCode', params: [destroyed, 'latest']}),
+		);
+		out[`selfdestructBalance.${mode}`] = String(
+			await n.request({
+				method: 'eth_getBalance',
+				params: [destroyed, 'latest'],
+			}),
+		);
+		out[`selfdestructBeneficiary.${mode}`] = String(
+			await n.request({
+				method: 'eth_getBalance',
+				params: [SD_BENEFICIARY, 'latest'],
+			}),
+		);
+		// THE ASSERTION THAT MATTERS: the slot the dead contract wrote reads ZERO.
+		out[`selfdestructSlot0.${mode}`] = String(
+			await n.request({
+				method: 'eth_getStorageAt',
+				params: [destroyed, '0x0', 'latest'],
+			}),
+		);
 		await n.dispose();
 	}
 

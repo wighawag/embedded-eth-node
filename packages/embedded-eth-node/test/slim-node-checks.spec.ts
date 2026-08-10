@@ -7,6 +7,7 @@
  *   - dump/load persistence round-trips into a fresh node.
  *   - State-root mode: `'none'` throws / zero block root; `'trie'` produces a REAL
  *     Merkle-Patricia root that matches the block header; both modes agree.
+ *   - A SELFDESTRUCTED account's storage is gone in BOTH state modes.
  *   - Engine seam: an engine that cannot start, cannot serve the node's
  *     configuration, or is not an engine at all fails LOUDLY at construction
  *     (never a silent fallback to the default engine), and an engine handed to
@@ -125,6 +126,25 @@ test('node honesty + correctness (receipts, gaps, persistence, state-root mode)'
 	// mode difference is deliberate and asserted so it cannot drift unnoticed.
 	expect(c['deployStatus.trie']).not.toBe('success');
 	expect(c['numberAfterRedeploy.trie']).toBe('n/a');
+
+	// (8) a DESTROYED account takes its storage with it, in BOTH modes. Upstream
+	// `SimpleStateManager.deleteAccount` tombstones the account and leaves storage
+	// where it was, so without our override (src/state-manager.ts) `'none'` answered
+	// `0x2a` for a slot belonging to a contract that no longer exists, while `'trie'`
+	// — where the account's storage trie goes with the account — answered `0x0`. That
+	// is the same class of upstream gap as (7) and the same fix site; here the two
+	// modes AGREE, and that agreement is the assertion.
+	for (const mode of ['none', 'trie'] as const) {
+		expect(c[`selfdestructStatus.${mode}`]).toBe('success');
+		// destroyed, not merely emptied: no code, no balance, beneficiary paid
+		expect(c[`selfdestructCode.${mode}`]).toBe('0x');
+		expect(BigInt(c[`selfdestructBalance.${mode}`])).toBe(0n);
+		expect(BigInt(c[`selfdestructBeneficiary.${mode}`])).toBe(1000n);
+		// ...and the slot it wrote before dying reads ZERO
+		expect(`${mode}: ${BigInt(c[`selfdestructSlot0.${mode}`])}`).toBe(
+			`${mode}: 0`,
+		);
+	}
 
 	await h.dispose();
 });

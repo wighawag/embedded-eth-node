@@ -357,6 +357,41 @@ export class OverlayStorageStateManager extends SimpleStateManager {
 	}
 
 	/**
+	 * Delete an account AND the storage that belonged to it.
+	 *
+	 * THE STORAGE HALF IS OURS, and it is the second gap in the same upstream
+	 * shape as the `clearStorage` no-op above. `SimpleStateManager.deleteAccount`
+	 * tombstones the account and never touches storage — it has no per-account
+	 * index to clear with — so a `SELFDESTRUCT` (or an EIP-161 empty-account
+	 * clearing) left every slot of the dead account READABLE at its address, and
+	 * `dumpState` kept serialising them. Measured through the node's own surface:
+	 * after a contract that writes slot 0 and selfdestructs in the same
+	 * transaction, `eth_getStorageAt` answered `0x2a` in `stateMode:'none'` and
+	 * `0x0` in `stateMode:'trie'`
+	 * (`docs/spikes/revm-write-callbacks-reproduce-the-post-state/measurements.md`).
+	 *
+	 * A DELETED ACCOUNT HAS NO STORAGE, in a trie by construction: the account is
+	 * removed and its storage trie goes with it, which is why
+	 * `MerkleStateManager` needs no equivalent line and why `'trie'` was already
+	 * right. This makes `'none'` say the same thing rather than leaving the two
+	 * modes disagreeing about a destroyed contract, and it is the reason the revm
+	 * engine — whose host is handed `clearStorage` then `removeAccount` for exactly
+	 * these two cases, with revm's commit semantics already applied — now leaves
+	 * post-state a diff cannot tell apart from `@ethereumjs/vm`'s. See
+	 * `docs/adr/0007-we-override-simplestatemanagers-no-op-clearstorage.md`, whose
+	 * amendment records this decision and what it changes for the DEFAULT engine.
+	 *
+	 * Still O(1), and revert-safe for the same reason {@link clearStorageAt} is:
+	 * the tombstone lands in the TOP overlay, beside the account tombstone the base
+	 * class writes into the top account frame, so both disappear together if the
+	 * frame is reverted.
+	 */
+	override async deleteAccount(address: Address): Promise<void> {
+		await super.deleteAccount(address);
+		this.clearStorageAt(address.toString());
+	}
+
+	/**
 	 * Every live storage slot, grouped by account, flattened across the whole
 	 * overlay stack — the view `dumpState` serialises.
 	 *
