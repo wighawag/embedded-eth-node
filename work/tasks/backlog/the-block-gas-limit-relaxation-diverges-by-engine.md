@@ -4,7 +4,6 @@ slug: the-block-gas-limit-relaxation-diverges-by-engine
 spec: revm-engine-behind-runtx
 blockedBy: []
 covers: []
-needsAnswers: true
 ---
 
 ## What to build
@@ -58,3 +57,15 @@ Whichever is chosen, the outcome is that the two engines answer the same questio
 > THE DIRECTION IS DECIDED: drop the flag, and let `blockGasLimit` (already in `NodeOptions`) buy the permissiveness back. Do not re-open it. What is left to you is doing it well: the refusal must say which limit was exceeded and which knob raises it, the configured-high-limit path must be proven end to end on BOTH engines, and the block-gas-limit-to-read-budget link must be decided rather than inherited.
 >
 > Do NOT reach for the shape where the node quietly widens the block it hands the engine to fit the transaction. That would make `GASLIMIT` lie to a contract, which is the exact class of dishonesty the block-environment work removed.
+
+## Recovery handoff (2026-08-10, conductor)
+
+**The `work/task-the-block-gas-limit-relaxation-diverges-by-engine` branch is GOOD. CONTINUE from its tip; do NOT restart and do NOT redo the work already on it.** Gate 1 (`pnpm format:check && pnpm build && pnpm test`) passed green on that branch, reference gas was exact, and acceptance criterion 4 was genuinely satisfied: `DEFAULT_READ_BUDGET` is a node-wide constant in `src/node.ts`, deliberately decided apart from `blockGasLimit`, with the reasoning recorded at its `evmCall` use site.
+
+Gate 2 blocked on ONE thing, and it is the only thing to fix:
+
+The `disableBlockGasLimit` stanza of the simulation-switch comment in `packages/embedded-eth-node/src/revm.ts` (in the read path, around the `disableBaseFee` / `disableBlockGasLimit` / `disableEip3607` block) still opens with `the node's default read budget IS the block gas limit`. That sentence was true before this branch and is false after it, because this same branch is what decided the two apart. On a node whose `blockGasLimit` has been raised (the very configuration this task introduces to buy back the relaxation) the 30,000,000 read budget is now BELOW the block limit, so the stated reason no longer holds and a later maintainer could reasonably conclude the switch is removable.
+
+**The switch must stay.** Re-state its rationale so it remains true on every node, rather than deleting it: the switch is required because a read may be given a gas budget equal to the block gas limit, either from `DEFAULT_READ_BUDGET` on a default node (where the two numbers coincide at 30,000,000) or from an explicit `gas` argument on any node, and revm charges intrinsic gas out of that same limit while `@ethereumjs/evm`'s `runCall` charges none, so the effective requirement is `gas + intrinsic`, which exceeds the block limit by exactly `intrinsic` (`CallerGasLimitMoreThanBlock`).
+
+Fix that comment, change nothing else, and leave the rest of the branch as it stands. The `work/notes/observations/adr-0008-calls-the-read-budget-the-block-gas-limit.md` note you filed is correct and should REMAIN as an open signal: it tracks the same stale phrasing in ADR 0008, which is a separate doc surface this task does not own.
