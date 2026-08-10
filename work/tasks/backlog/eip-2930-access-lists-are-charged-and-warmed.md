@@ -16,6 +16,8 @@ The binding takes the access list directly on its execute options, so the work i
 
 Cover an access list that names addresses only, one that names storage keys, and one whose entries are never actually touched during execution (which is a real shape: it is charged and buys nothing, and it is the case where "we dropped the list" is otherwise invisible).
 
+**Also in scope, found by Gate 2 on the rejections task (2026-08-10):** `eth_estimateGas` uses the shared `intrinsicGas()` with NO access-list term and ignores the request's `accessList`, so for a type-1 transaction it under-reports by 6,200 gas. That matters beyond estimation accuracy, because the node's intrinsic-gas refusal tells the caller to consult `eth_estimateGas` for the number a transaction needs, and for an access-list transaction it hands back a number that would be REFUSED again. Charge the access-list term in estimation too, or qualify the refusal's guidance, so the advice and the estimate cannot contradict each other.
+
 ## Acceptance criteria
 
 - [ ] A type-1 transaction's access list is passed to the engine and reflected in the gas charged on the revm path.
@@ -23,6 +25,7 @@ Cover an access list that names addresses only, one that names storage keys, and
 - [ ] The list is proven LOAD-BEARING: the same transaction with and without the list differs in gas by the EIP-2930 amount, so a dropped list fails the build rather than passing as agreement.
 - [ ] Address-only entries, storage-key entries, and entries never touched during execution are all covered.
 - [ ] The transaction type on the resulting receipt is correct for a type-1 transaction on both engines.
+- [ ] `eth_estimateGas` accounts for a request's access list, or the intrinsic-gas refusal's guidance is qualified so it never points a caller at a number that would be refused again.
 - [ ] Reference gas is unchanged: `number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 returning `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`.
 
 ## Blocked by
