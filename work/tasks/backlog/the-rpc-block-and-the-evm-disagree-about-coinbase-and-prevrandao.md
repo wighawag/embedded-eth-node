@@ -33,6 +33,8 @@ Prefer reporting the real values if the persistence change stays small, because 
 
 The conformance battery's `block environment through a contract` step diffs `COINBASE` and `PREVRANDAO` against **the configuration** rather than against the reported block, precisely because the RPC block reports neither. If this task makes the RPC honest, that step can diff all six values against the node's own block and stop special-casing two of them, which also simplifies the `conformance differential` glossary entry in `CONTEXT.md` that was just corrected to describe the split. Do not change that step's oracle as a side effect: if it becomes possible, note it for a follow-up so it is a deliberate change with its own reasoning.
 
+**Also in scope, folded in 2026-08-10 from Gate 2 on `logs-and-the-logs-bloom-come-from-the-engine`:** the block header's `logsBloom` is a hard-coded 256 zero bytes (`EMPTY_LOGS_BLOOM`, used by `blockToRpc`), and the README's list of zero-placeholder header fields names only `stateRoot`, `receiptsRoot` and `transactionsRoot`. So a consumer who does the standard thing, pre-filtering blocks by the header bloom before calling `eth_getLogs`, sees NO logs at all and has no way to learn why. This is the same defect class this task already covers for `COINBASE` and `PREVRANDAO`: a header field that reports a value the node does not really have. Either report a real bloom or state the omission where a consumer meets it, consistently with whatever you decide for the other two.
+
 ## Acceptance criteria
 
 - [ ] The decision is made and RECORDED at the code site: either `eth_getBlockByNumber` reports the block's real `miner` and `mixHash`, or the omission is documented where a consumer meets it, with the reason.
@@ -44,6 +46,8 @@ The conformance battery's `block environment through a contract` step diffs `COI
 - [ ] The `loadState` block-hash question is answered: either nothing depends on the reconstructed block's own hash, or it is a separate note.
 - [ ] A changeset if any RPC output or persisted format changes.
 - [ ] Reference gas is unchanged: `number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 returning `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`.
+
+- [ ] The header's `logsBloom` placeholder is either made real or documented alongside the other zero placeholders, so bloom pre-filtering cannot silently return nothing.
 
 ## Blocked by
 
