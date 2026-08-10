@@ -117,7 +117,17 @@ export interface ReadCallRequest {
 
 /** What an engine reports back for a read-only call. */
 export interface ReadCallResult {
-	/** Return data (or the revert data when `error` is set). */
+	/**
+	 * Return data (or the revert data when {@link error} is set) — the CALLEE's
+	 * bytes, and nothing else. `eth_call` surfaces exactly these as the `data` of
+	 * its `execution reverted` error, where a client decodes them as a revert
+	 * reason, so a failure that ran NO code (a call the engine refused before
+	 * execution: an unaffordable value, a gas budget below the intrinsic cost)
+	 * reports EMPTY here on every engine and puts its explanation in
+	 * {@link error}. An engine whose own diagnostics arrive in this field must
+	 * drop them rather than pass them on — `src/revm.ts` does, and
+	 * `test/helpers/revm-engine.ts` holds both engines to the same bytes.
+	 */
 	readonly returnValue: Uint8Array;
 	/**
 	 * EXECUTION gas only — NOT a transaction's total. `eth_estimateGas` adds the
@@ -125,7 +135,14 @@ export interface ReadCallResult {
 	 * on top, exactly as it did before the seam existed.
 	 */
 	readonly executionGasUsed: bigint;
-	/** Set iff execution failed (revert/halt); the EVM's own error string. */
+	/**
+	 * Set iff the call did not succeed (a revert, a halt, or a refusal BEFORE
+	 * execution); the EVM's own error string, which is where an engine's words for
+	 * a failure belong. The two engines differ here by design — `insufficient
+	 * balance` against revm's quoted `Transaction(LackOfFundForMaxFee { .. })` —
+	 * and `node.ts` flattens both into one `execution reverted`, so nothing above
+	 * the seam can tell the engines apart by it.
+	 */
 	readonly error?: string;
 }
 

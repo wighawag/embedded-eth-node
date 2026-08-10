@@ -33,8 +33,14 @@
  *      SUCCEEDS on both. The rejection is checked for its SHAPE, not merely for
  *      having happened: it starts at exactly `balance + 1`, carries no CALLEE
  *      answer, and NAMES a shortfall of funds in each engine's own words
- *      (`insufficient balance` / `LackOfFundForMaxFee`), read at the engine
- *      seam because the node flattens both into `execution reverted`.
+ *      (`insufficient balance` / revm's quoted `LackOfFundForMaxFee`), read at
+ *      the engine seam because the node flattens both into `execution reverted`.
+ *   5e. WHAT A FAILURE CARRIES AS `data` is the same on both engines: `0x` for a
+ *      refused transfer (revm's own validation text reaches the engine as return
+ *      data and `src/revm.ts` drops it, rather than handing a client bytes it
+ *      would decode as a revert reason), and the CALLEE's own bytes when a
+ *      contract really reverted — which is what stops that drop swallowing an
+ *      answer.
  *   6. Both wasm delivery shapes work: a bundler-resolved asset and a
  *      runtime-fetched URL, through the same code path.
  *   7. `stateMode:'trie'` is REFUSED at construction, naming the reason, rather
@@ -233,10 +239,54 @@ const UNFUNDED_CALLER = '0x00000000000000000000000000000000dead0001';
 const CALLDATA_SINK_ADDR = '0x00000000000000000000000000000000ca11da7a';
 /** A codeless address to send ether to, for the value-bearing reads. */
 const VALUE_SINK_ADDR = '0x0000000000000000000000000000000000005151';
+/**
+ * A callee that REVERTS WITH A REASON: `PUSH1 ff, PUSH0, MSTORE8, PUSH1 01,
+ * PUSH0, REVERT` — one byte of revert data, the CALLEE's own answer. It is the
+ * other side of the return-data check below: an engine that stopped forwarding
+ * its own validation text must still forward these bytes, on both engines.
+ *
+ * `PUSH0` needs Shanghai or later, which these nodes are (they run the node's
+ * pinned `cancun`, and nothing here varies the fork — the per-fork sections
+ * below build their own `Common` and execute no contract).
+ */
+const REVERT_WITH_REASON_ADDR = '0x000000000000000000000000000000000bad0bad';
+const REVERT_WITH_REASON_CODE = '0x60ff5f5360015ffd';
+/** ...and the bytes it reverts with, as `eth_call` surfaces them. */
+const REVERT_WITH_REASON_DATA = '0xff';
 /** The node's default block coinbase, which is credited the priority fee. */
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 /** What the funded caller starts with on both nodes (see {@link nodeWith}). */
 const FUNDED_BALANCE = 10n ** 24n;
+
+/**
+ * The `data` an `eth_call` FAILURE carried, or a sentence saying why there is
+ * none to report.
+ *
+ * A call that SUCCEEDED, or one that failed for a reason that is not the
+ * engine's (JSON-RPC code 3 is the node's execution-failure code — see
+ * ./affordability.ts), classifies as its own sentence rather than as `'0x'`:
+ * `'0x'` is one of the expected answers here, so a probe that reported it for a
+ * call that never failed would pass while measuring nothing.
+ */
+async function errorDataOf(
+	node: {request: (args: any) => Promise<unknown>},
+	params: Record<string, unknown>,
+): Promise<string> {
+	try {
+		const result = await node.request({method: 'eth_call', params: [params]});
+		return `SUCCEEDED (${String(result)})`;
+	} catch (err) {
+		const code = (err as {code?: unknown} | null)?.code;
+		if (code !== 3)
+			return `NOT an engine failure (code ${String(code)}): ${String(
+				(err as Error)?.message ?? err,
+			)}`;
+		const data = (err as {data?: unknown}).data;
+		return data === undefined
+			? '(engine failure with no data field)'
+			: String(data);
+	}
+}
 
 async function nodeWith(engine?: Engine, extra: Record<string, unknown> = {}) {
 	const node = await createNode({
@@ -640,6 +690,55 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 			valueOutcomes[`${name}.revm`] === valueExpected[name],
 	);
 
+	// ---------- WHAT THE FAILURE CARRIES AS `data`, engine against engine ------
+	// `data` on an `execution reverted` error means ONE thing to a client: the
+	// CALLEE's revert payload, which viem decodes as a revert reason. So it is not
+	// a free-form channel, and the two engines must put the same bytes there for
+	// the same call. Two calls, one of each kind, on both nodes:
+	//
+	//   an unaffordable transfer   NO callee ran, so `0x` on both. revm rejects it
+	//                              BEFORE execution and reuses the outcome's
+	//                              return-data slot for its own
+	//                              `Transaction(LackOfFundForMaxFee { .. })` text
+	//                              (measured in docs/spikes/stop-forwarding-revms-
+	//                              validation-error-text-as-eth-call-return-data/);
+	//                              `src/revm.ts` DROPS those bytes rather than
+	//                              forwarding them, and keeps the explanation in
+	//                              the seam result's `error` instead, where nothing
+	//                              can decode it as a contract's revert reason.
+	//   a callee that REVERTS      the callee's OWN bytes, identical on both. This
+	//                              is the half that stops the fix above being a
+	//                              deletion: a revert payload is an answer, not an
+	//                              engine artifact, and must survive.
+	//
+	// Both calls must FAIL to be measured at all: {@link errorDataOf} reports a
+	// success, or a failure that is not the engine's (code != 3), as its own
+	// sentence, which can never equal an expected `data`.
+	const errorData: Record<string, string> = {};
+	for (const [label, ctx] of [
+		['default', def],
+		['revm', revm],
+	] as const) {
+		await ctx.node.request({
+			method: 'evm_setCode',
+			params: [REVERT_WITH_REASON_ADDR, REVERT_WITH_REASON_CODE],
+		});
+		errorData[`unaffordable.${label}`] = await errorDataOf(ctx.node, {
+			from: account.address,
+			to: VALUE_SINK_ADDR,
+			value: '0x' + (fundedBalance[label] + 1n).toString(16),
+		});
+		errorData[`calleeRevert.${label}`] = await errorDataOf(ctx.node, {
+			from: account.address,
+			to: REVERT_WITH_REASON_ADDR,
+		});
+	}
+	out.errorData = errorData;
+	out.errorDataExpected = {
+		unaffordable: '0x',
+		calleeRevert: REVERT_WITH_REASON_DATA,
+	};
+
 	// ---------- WHAT THE REJECTION SAYS, at the seam where it still says it ----
 	// Above the seam the two engines are indistinguishable BY DESIGN: the node
 	// flattens every engine failure into one `RpcError(3, 'execution reverted')`,
@@ -655,8 +754,9 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 	// funded account, and both are held to the same predicate: the failure must
 	// NAME a shortfall of funds ({@link namesLackOfFunds} — a vocabulary, never
 	// one engine's string asserted on the other), must carry no CALLEE answer in
-	// its return data (revm puts its own message there, which ./affordability.ts
-	// tells apart from a contract's), and must start at exactly `balance + 1`.
+	// its return data (on EITHER engine: revm's own validation text is dropped by
+	// `src/revm.ts`, so an empty return value is the answer on both), and must
+	// start at exactly `balance + 1`.
 	// That is the difference between "this call did not succeed" and "the sender
 	// could not afford this transfer".
 	const seamCommon = new Common({

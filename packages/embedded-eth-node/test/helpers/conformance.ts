@@ -977,14 +977,17 @@ async function runBattery(
 	//     asserted.
 	//
 	//     What is NOT checkable here is the engine's own words for it
-	//     (`insufficient balance` / `LackOfFundForMaxFee`): the node flattens
-	//     every engine error into one `execution reverted`, so those are asserted
-	//     one layer down, at the seam, in ./revm-engine.ts. The one trace that
-	//     does survive is revm echoing its message as the error's `data` where
-	//     `@ethereumjs/evm` returns `0x` — a divergence ./affordability.ts admits
-	//     deliberately and
-	//     work/notes/observations/revm-validation-errors-surface-their-message-as-eth-call-return-data.md
-	//     records. See ./affordability.ts for the whole classification.
+	//     (`insufficient balance` / revm's quoted `LackOfFundForMaxFee`): the node
+	//     flattens every engine error into one `execution reverted`, so those are
+	//     asserted one layer down, at the seam, in ./revm-engine.ts. What DOES
+	//     survive is the error's `data`, and it is now the same on both engines
+	//     (`0x`): revm used to echo its validation message there, where a client
+	//     decodes a revert reason, and `src/revm.ts` drops those bytes instead of
+	//     forwarding them — which is why ./affordability.ts no longer needs a
+	//     tolerance for engine text and treats ANY return data as the callee's.
+	//     The two engines are held to the same bytes, for this call and for a real
+	//     revert, in ./revm-engine.ts. See ./affordability.ts for the whole
+	//     classification.
 	{
 		const m: string[] = [];
 		const node4 = await createNode({

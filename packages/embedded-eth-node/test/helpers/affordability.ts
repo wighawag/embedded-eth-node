@@ -31,9 +31,12 @@
  *     `Engine.call` result still carries the engine's own error, and the two
  *     engines are meant to differ there: `@ethereumjs/evm` reports
  *     `insufficient balance` (`EVMError`, thrown by `_reduceSenderBalance`),
- *     revm reports `Transaction(LackOfFundForMaxFee { fee, balance })`. The
+ *     revm reports its own refusal, carrying
+ *     `Transaction(LackOfFundForMaxFee { fee, balance })` verbatim. The
  *     predicate is a VOCABULARY both must use, never one engine's string
- *     asserted on the other.
+ *     asserted on the other. The words stay in the ERROR on both engines and
+ *     never in the return data, which is what lets {@link isCalleeAnswer} be
+ *     nothing but an emptiness test.
  *
  * CAN IT GO RED? Checked by MUTATION on 2026-08-02, chromium, every mutation
  * reverted afterwards:
@@ -106,21 +109,21 @@ function describeReadFailure(err: unknown): string {
  * Is this return data the CALLEE's answer — bytes a caller would decode as a
  * contract result or a revert reason?
  *
- * Empty is not. Neither, and this is the one wrinkle, is revm's own error text:
- * `revm-wasm` puts the message of a VALIDATION error into `returnData`, so the
- * node's `eth_call` surfaces `Transaction(LackOfFundForMaxFee { fee, balance })`
- * as hex where `@ethereumjs/evm` surfaces `0x`. That divergence is real and is
- * NOT this bar's business to fix (see
- * `work/notes/observations/revm-validation-errors-surface-their-message-as-eth-call-return-data.md`);
- * what matters here is that the bytes are the ENGINE explaining the shortfall
- * and not something the callee produced, which is exactly what
- * {@link namesLackOfFunds} decides — the same predicate, applied to both
- * engines, rather than either engine's string asserted on the other.
+ * ANY bytes are. Emptiness is the whole test, and it is that simple again
+ * because the engines now agree about what a refused transfer returns: nothing.
+ * This predicate used to carry a TOLERANCE — return data whose text named a
+ * shortfall of funds was read as the ENGINE talking rather than the callee —
+ * because `revm-wasm` reuses the outcome's return-data slot for a VALIDATION
+ * error's text and `src/revm.ts` forwarded it, so an unaffordable `eth_call`
+ * came back as the hex of `Transaction(LackOfFundForMaxFee { fee, balance })`
+ * where `@ethereumjs/evm` came back `0x`. `src/revm.ts` now DROPS those bytes
+ * (the explanation lives in the seam result's `error`), so the tolerance has
+ * nothing left to tolerate and is gone: with it goes the hole where a contract
+ * reverting with its own `insufficient funds` reason could have passed as a
+ * refused transfer.
  */
 export function isCalleeAnswer(data: unknown): boolean {
-	const text = asText(data);
-	if (text === '') return false;
-	return !namesLackOfFunds(text);
+	return asText(data) !== '';
 }
 
 /**
@@ -131,7 +134,8 @@ export function isCalleeAnswer(data: unknown): boolean {
  * same predicate:
  *
  *   `@ethereumjs/evm` : `insufficient balance`
- *   revm             : `Transaction(LackOfFundForMaxFee { fee: 1, balance: 0 })`
+ *   revm             : a refusal of its own quoting
+ *                      `Transaction(LackOfFundForMaxFee { fee: 1, balance: 0 })`
  *
  * Both name a LACK (`insufficient` / `lack of`) and the thing lacked (`fund` /
  * `balance`). No other failure either engine produces on the read path does:
@@ -148,8 +152,9 @@ export function namesLackOfFunds(error: unknown): boolean {
 
 /**
  * Whatever an engine or the RPC layer handed us, as text: a `0x`-prefixed hex
- * string is decoded as UTF-8 bytes (that is how revm's message arrives through
- * `eth_call`'s `data`), anything else is stringified.
+ * string is decoded as UTF-8 bytes (that is the shape `eth_call`'s `data` takes
+ * — `'0x'` decodes to the empty string, which is what makes an empty payload
+ * empty here whichever form it arrives in), anything else is stringified.
  */
 function asText(value: unknown): string {
 	if (value === undefined || value === null) return '';

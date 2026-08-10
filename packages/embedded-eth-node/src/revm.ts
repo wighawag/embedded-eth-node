@@ -418,16 +418,46 @@ export async function createRevmEngine(
 				? revm.create({...common, commit: false, checkNonce: false})
 				: revm.call({...common, to: request.to!.bytes});
 
+			// A REJECTION IS NOT A REVERT, and the difference decides what this read
+			// hands back. revm reports a transaction it refused BEFORE execution as
+			// `status: 'validation-error'` and REUSES the outcome's return-data slot for
+			// the `InvalidTransaction` variant's text, so `outcome.returnData` is then
+			// the UTF-8 of `Transaction(LackOfFundForMaxFee { fee: 1, balance: 0 })` —
+			// not bytes any callee produced, because no callee ran. Forwarding it made
+			// `node.ts` throw `RpcError(3, 'execution reverted', '0x5472616e…')`, and
+			// `data` on that error means ONE thing to a client: the callee's revert
+			// payload, which viem tries to decode as a revert reason. The default
+			// `@ethereumjs/evm` engine returns nothing for the same call, so this was
+			// also the last known behavioural divergence between the two engines on the
+			// forks this one admits.
+			//
+			// THE DISTINCTION IS REVM'S OWN, not a substring of its message: `status`
+			// separates a rejection (`validation-error`, zero gas, nothing executed)
+			// from a REVERT or a HALT, and `outcome.error` is defined for the first and
+			// only the first. Measured across all four statuses, including a callee that
+			// reverts WITH data while the transfer is unaffordable, in
+			// `docs/spikes/stop-forwarding-revms-validation-error-text-as-eth-call-return-data/`.
+			// A REVERT KEEPS ITS BYTES: a contract that reverted with a reason produced
+			// an ANSWER, and it must arrive on both engines alike.
+			//
+			// THE EXPLANATION IS NOT THROWN AWAY, it MOVES: revm is the only party that
+			// knows why it refused, so its text goes verbatim into the seam result's
+			// `error` — the same field the default engine puts `insufficient balance`
+			// in, and a place nothing can decode as a contract's revert reason.
+			const rejected = outcome.status === 'validation-error';
+
 			// EXECUTION gas, matching what `@ethereumjs/evm` reports: gas spent BEFORE
 			// refunds (revm's `gasUsed` is net of them, `totalGasSpent` is not), less
 			// the intrinsic gas the node adds back itself.
 			const spent = outcome.totalGasSpent;
 			return {
-				returnValue: outcome.returnData,
+				returnValue: rejected ? NO_RETURN_DATA : outcome.returnData,
 				executionGasUsed: spent > intrinsic ? spent - intrinsic : 0n,
 				error: outcome.success
 					? undefined
-					: (outcome.error ?? `revm ${outcome.status}`),
+					: rejected
+						? rejectionMessage(outcome.error)
+						: (outcome.error ?? `revm ${outcome.status}`),
 			};
 		},
 
@@ -572,8 +602,53 @@ export async function createRevmEngine(
 
 /** Calldata for a transaction that carries none. */
 const EMPTY_DATA = /* @__PURE__ */ new Uint8Array();
+/**
+ * What a read that was REJECTED before execution returns: nothing at all, which
+ * is what the default `@ethereumjs/evm` engine returns for the same call. Its
+ * own constant rather than {@link EMPTY_DATA} because the two say different
+ * things (calldata nobody sent, versus an answer nobody produced) and a later
+ * change to either must not silently move the other.
+ */
+const NO_RETURN_DATA = /* @__PURE__ */ new Uint8Array();
 /** The bloom of no logs, for the impossible case where the decoder omits it. */
 const EMPTY_BLOOM = /* @__PURE__ */ new Uint8Array(256);
+
+/**
+ * What a read REFUSED before execution says, in the node's own honest-edge voice
+ * with revm's reason quoted verbatim inside it.
+ *
+ * SAME SHAPE AS `transact`'s rejection message above, deliberately: both are
+ * "revm would not run this at all", and a reader who has met one should not have
+ * to learn a second sentence for the other.
+ *
+ * REVM'S WORDS ARE QUOTED, NOT TRANSLATED. Mapping each `InvalidTransaction`
+ * variant onto a phrase of the node's own (`insufficient funds for transfer`
+ * and friends) is a REAL vocabulary, and it is one this repo has already decided
+ * to build in ONE place, for the transaction path, matched against what the
+ * default engine says for the same rejection
+ * (`replayed-and-invalid-transactions-are-rejected-as-the-nodes-own-errors`, the
+ * same task the `transact` rejection above points at).
+ * Inventing a second, read-only half of that vocabulary here would fork it
+ * before it exists, and it is the engine — not this wrapper — that knows whether
+ * the shortfall was the value, the fee or the gas.
+ *
+ * IT DOES NOT BECOME AN RPC MESSAGE, and that is the point of the seam: `node.ts`
+ * flattens EVERY engine failure into `RpcError(3, 'execution reverted')` on both
+ * engines, so this text lives exactly where `@ethereumjs/evm`'s
+ * `insufficient balance` lives — on {@link ReadCallResult.error}, readable by
+ * anything holding the engine, and identical in KIND across engines. Surfacing
+ * it in the RPC message instead would put a per-engine sentence back on the wire
+ * and re-create, one field over, the divergence this change removes.
+ */
+function rejectionMessage(reason: string | undefined): string {
+	return (
+		`embedded-eth-node/revm: the call is invalid and was NOT executed: ` +
+		`${reason ?? 'revm reported no reason'}. Nothing ran, so this is a refusal ` +
+		`rather than a revert and there is no return data to decode — correct the ` +
+		`request itself (its sender, its value or its gas) rather than looking for a ` +
+		`revert reason.`
+	);
+}
 
 /**
  * The transaction fields this engine reads, named once.

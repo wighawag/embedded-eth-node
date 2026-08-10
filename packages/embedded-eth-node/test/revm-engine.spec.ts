@@ -14,6 +14,9 @@
  *     transfer itself — and the failure is checked for its SHAPE (it starts at
  *     exactly `balance + 1`, returns no callee answer, and names a shortfall of
  *     funds in each engine's own words), never merely for having happened
+ *   - the `data` an `eth_call` failure carries is IDENTICAL on both engines: `0x`
+ *     for a refused transfer (no engine text forwarded as a revert payload) and
+ *     the callee's own bytes when a contract really reverted
  *   - the BLOCK ENVIRONMENT a contract reads (BASEFEE / PREVRANDAO / COINBASE /
  *     NUMBER / TIMESTAMP / GASLIMIT) is the node's own, and identical on both
  *   - BLOCKHASH answers with the node's real block hashes
@@ -144,6 +147,24 @@ test('revm engine: same results + same gas as @ethereumjs/evm, on the node own s
 		),
 	);
 	expect(c.valueOutcomesCorrect).toBe(true);
+	// ...and the `data` the failure carries is the SAME on both engines, because
+	// `data` on an `execution reverted` error means one thing to a client: the
+	// CALLEE's revert payload. A refused transfer produces none on either engine
+	// (revm's own `Transaction(LackOfFundForMaxFee { .. })` text is NOT forwarded
+	// as return data), and a callee that really reverted still delivers its own
+	// bytes on both, so the fix that drops the engine's text swallows no answer.
+	expect(c.errorData['unaffordable.default']).toBe(
+		c.errorDataExpected.unaffordable,
+	);
+	expect(c.errorData['unaffordable.revm']).toBe(
+		c.errorDataExpected.unaffordable,
+	);
+	expect(c.errorData['calleeRevert.default']).toBe(
+		c.errorDataExpected.calleeRevert,
+	);
+	expect(c.errorData['calleeRevert.revm']).toBe(
+		c.errorDataExpected.calleeRevert,
+	);
 	// ...and the rejection is an AFFORDABILITY rejection, read at the engine seam
 	// (the node flattens every engine failure into one `execution reverted`, so
 	// the words only exist below it). Both engines are held to the same sentence:
