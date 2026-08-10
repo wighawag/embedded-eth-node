@@ -425,15 +425,15 @@ export async function createRevmEngine(
 			store.beginExecution();
 			const tx = request.tx as TransactionFields;
 
-			// THE SENDER CROSSES THE SEAM AS A VALUE, and this engine must never
-			// recover one of its own. `senderMode:'trusted'` exists so that the CLAIMED
-			// sender may differ from the recoverable one (it shadows
-			// `getSenderAddress()` on the parsed transaction — see `parseTx` in
-			// ./node.ts), so an engine calling `Revm#recoverSigner` here would execute
-			// a transaction as the WRONG address and hand back a plausible receipt.
-			// revm agrees by construction: `transact` takes `from` directly and never
-			// recovers anything.
-			const sender = request.tx.getSenderAddress().bytes;
+			// THE SENDER IS THE SEAM'S VALUE, and this engine must never derive one of
+			// its own — not by `Revm#recoverSigner`, and not by asking the transaction
+			// (`tx.getSenderAddress()`), which recovers too. `senderMode:'trusted'`
+			// exists so that the CLAIMED sender may differ from the recoverable one (see
+			// `parseTx` in ./node.ts and ADR 0002), so either would execute the
+			// transaction as the WRONG address, charge that account, advance its nonce
+			// and hand back a receipt that looks completely right. revm agrees by
+			// construction: `transact` takes `from` directly and recovers nothing.
+			const sender = request.sender.bytes;
 			const options: ExecuteOptions = {
 				from: sender,
 				data: tx.data ?? EMPTY_DATA,

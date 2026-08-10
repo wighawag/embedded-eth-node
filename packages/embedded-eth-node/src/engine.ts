@@ -20,6 +20,7 @@
  */
 import {runTx, type VM} from '@ethereumjs/vm';
 import type {StateManagerInterface} from '@ethereumjs/common';
+import type {Address} from '@ethereumjs/util';
 import type {TypedTransaction} from '@ethereumjs/tx';
 import type {
 	Engine,
@@ -118,7 +119,9 @@ export function createEthereumjsEngine(deps: {
 			// NOTE that the conformance battery's reference `runTx` passes the same two
 			// flags, so dropping one here would NOT show up as a battery failure.
 			const res = await runTx(vm, {
-				tx: request.tx,
+				// THE SEAM'S SENDER, PINNED FOR `runTx`. See {@link asSender}: this engine
+				// executes on behalf of `request.sender` and derives nothing.
+				tx: asSender(request.tx, request.sender),
 				block: request.block,
 				skipBlockGasLimitValidation: true,
 				skipHardForkValidation: true,
@@ -146,6 +149,40 @@ export function createEthereumjsEngine(deps: {
 			};
 		},
 	};
+}
+
+/**
+ * `tx` AS SEEN BY `runTx` WHEN IT ASKS WHO SENT IT: the seam's sender, and nothing
+ * else changed.
+ *
+ * WHY THIS EXISTS. The sender crosses the seam as a VALUE
+ * (`TransactionRequest.sender`) because it is only sometimes recoverable from the
+ * transaction: `senderMode:'trusted'` states it instead, and it may then differ
+ * from what the signature recovers to (ADR 0002). But `runTx` has no `sender`
+ * option — it reads the sender through exactly one call, `tx.getSenderAddress()`,
+ * and uses the result as `caller` for the whole transaction. So SOMETHING has to
+ * bridge the value onto that one call, and the right place is here: this is
+ * `@ethereumjs/vm`'s own vocabulary, exactly like the two `skip*Validation` flags
+ * above, and an engine with a real sender parameter (revm) needs none of it.
+ *
+ * WHY A VIEW RATHER THAN A PINNED INSTANCE. The node used to shadow
+ * `getSenderAddress()` on the transaction it parsed, which made the pin visible to
+ * everything downstream and made the guarantee a convention every engine had to
+ * know about. `Object.create` leaves the node's transaction untouched and frozen:
+ * the pin lives for exactly one `runTx` call, and nothing outside this function can
+ * read a fabricated sender back off the transaction. The prototype carries every
+ * field and method `runTx` reads (`type`, `nonce`, `to`, `value`, `data`,
+ * `gasLimit`, the fee fields, `supports`, `getIntrinsicGas`, `getUpfrontCost`,
+ * `hash`), so the only thing this changes is the answer to the sender question.
+ *
+ * It is applied UNCONDITIONALLY — never "only when it differs" — because comparing
+ * would mean calling `tx.getSenderAddress()`, i.e. paying the ~2 ms ecrecover that
+ * `senderMode:'trusted'` exists to skip.
+ */
+function asSender(tx: TypedTransaction, sender: Address): TypedTransaction {
+	return Object.create(tx, {
+		getSenderAddress: {value: () => sender},
+	}) as TypedTransaction;
 }
 
 /**

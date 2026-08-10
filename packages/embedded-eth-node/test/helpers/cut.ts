@@ -18,8 +18,10 @@
  * `embedded-eth-node/revm` has its OWN cut (./cut-revm.ts), because its bundle
  * carries the revm `.wasm` asset and no other spec should pay for it.
  *   - 'trusted-sender'     : senderMode:'trusted' (skip ecrecover) is byte-identical
- *                            to 'recover', the cheat is absent by default, and it
- *                            really does impersonate
+ *                            to 'recover', the cheat is absent by default, and a tx
+ *                            claiming a sender its signature does not recover to
+ *                            executes as the CLAIMED one. ENGINE-PARAMETERISED: the
+ *                            same suite runs on revm through ./cut-revm.ts
  *   - 'conformance'        : differential vs a trie-backed @ethereumjs/vm runTx
  *   - 'statetest'          : real ethereum/tests GeneralStateTests vs trie mode
  *   - 'viem-surface'       : a typical viem/wagmi lifecycle + method-gap report

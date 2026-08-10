@@ -139,15 +139,10 @@ export interface ReadCallResult {
  *
  * THE TRANSACTION CROSSES AS THE NODE PARSED IT, for the reason
  * {@link ReadCallRequest} carries `Address`/`Block`: the node already holds it in
- * that form and the default engine hands it straight to `runTx`. It is also the
- * only shape that is behaviour-preserving — `senderMode:'trusted'` pins the sender
- * by SHADOWING `tx.getSenderAddress()` on this very object (see `parseTx` in
- * node.ts), so an engine handed the wire bytes instead would re-recover and
- * execute as the wrong address with a perfectly plausible receipt.
+ * that form and the default engine hands it straight to `runTx`.
  *
- * WHICH IS THE SENDER RULE: `tx.getSenderAddress()` is the node's AUTHORITATIVE
- * sender and an engine must take it from here rather than recovering one of its
- * own.
+ * THE SENDER CROSSES AS A SEPARATE VALUE ({@link sender}) rather than as something
+ * an engine reads off {@link tx}, and that is the whole reason this field exists.
  *
  * WHAT IS DELIBERATELY ABSENT: any switch that relaxes this transaction's
  * VALIDITY. The read path's simulation switches (base fee, block gas limit,
@@ -159,6 +154,39 @@ export interface ReadCallResult {
 export interface TransactionRequest {
 	/** The signed transaction, parsed by the node (which owns parsing). */
 	readonly tx: TypedTransaction;
+	/**
+	 * WHO SENT IT, as a VALUE the node states: `msg.sender` of the top-level frame,
+	 * the account whose balance and nonce this transaction moves, and the `from` on
+	 * the receipt the node builds. AUTHORITATIVE. An engine executes on behalf of
+	 * THIS address and must never derive one of its own.
+	 *
+	 * WHY IT IS A FIELD AND NOT A CALL. Sender derivation is the NODE's (`ADR 0006`),
+	 * and in `senderMode:'trusted'` (the `evm_*As` cheats, ADR 0002) the node is TOLD
+	 * the sender and deliberately skips ecrecover — so the authoritative sender may
+	 * differ from whatever {@link tx}'s signature recovers to, and for a FABRICATED
+	 * signature there is no meaningful recoverable sender at all. An engine that
+	 * recovers the sender itself does not fail loudly on such a transaction: it
+	 * charges a different account, advances a different nonce, and hands back a
+	 * receipt that looks completely right. The only way that cannot happen is for the
+	 * sender to be DATA on the request, so that an engine which ignores it is
+	 * ignoring a stated input rather than merely disagreeing with a convention.
+	 *
+	 * It is therefore REQUIRED and non-optional: `{tx, block}` with no sender is not
+	 * a transaction request, and an engine written against this type cannot be handed
+	 * one. What an engine does with it is the engine's: the default `@ethereumjs/evm`
+	 * engine pins it onto the `runTx` call (`src/engine.ts` — `runTx` reads the sender
+	 * through exactly one method), and `embedded-eth-node/revm` passes it as revm's
+	 * `from`, which takes a sender directly and recovers nothing.
+	 *
+	 * `sender`, NOT `from`, deliberately — the two words are not synonyms here.
+	 * {@link ReadCallRequest.from} is `eth_call`'s own parameter: caller-supplied,
+	 * unauthenticated by nature, defaulted to the zero address. A transaction's
+	 * `from` is the RPC RENDERING of this value on the receipt. What crosses here is
+	 * the SENDER, which is this repo's word for the thing `senderMode` chooses how to
+	 * obtain (recover it, or be told it) — so the field name says which concept it is
+	 * rather than borrowing the read path's parameter name for something stronger.
+	 */
+	readonly sender: Address;
 	/** The block it is mined in (NUMBER, TIMESTAMP, COINBASE, BASEFEE, GASLIMIT). */
 	readonly block: Block;
 }

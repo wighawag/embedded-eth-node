@@ -29,6 +29,14 @@
  *      effective gas price, logs in emission order, the bloom. A stub returning
  *      values no EVM would produce is what tells "the node asked the engine" apart
  *      from "the node ran `runTx` itself and the numbers happen to match".
+ *   8. THE SENDER CROSSES THE SEAM AS A VALUE (`request.sender`), and it is the
+ *      node's authoritative one: for an ordinary tx the RECOVERED address, and in
+ *      `senderMode:'trusted'` the CLAIMED one even when the signature on the wire
+ *      recovers to somebody else. The stub records BOTH what the seam handed it
+ *      and what it would have got by re-recovering the transaction itself, so the
+ *      divergent case is visible rather than inferred: an engine that recovers its
+ *      own sender charges a different account, advances a different nonce, and
+ *      returns a receipt that looks perfectly right.
  */
 import {createNode} from '../../src/index.js';
 import type {
@@ -65,6 +73,8 @@ const STUB_EXECUTION_GAS = 12_345n;
 const INTRINSIC_EMPTY_CALL = 21_000n;
 
 const TARGET = '0x0000000000000000000000000000000000001234';
+/** The address check 8 CLAIMS to be, which is not the one that signed. */
+const TRUSTED_CLAIMED = '0x00000000000000000000000000000000000000cc';
 
 /**
  * The transacting stub's fixed answers — again, values no real EVM would produce
@@ -283,6 +293,7 @@ export async function runEngineSeamChecks() {
 	const transacted: {
 		hash: string;
 		sender: string;
+		reRecovered: string;
 		to?: string;
 		blockNumber: string;
 		gasLimit: string;
@@ -295,7 +306,13 @@ export async function runEngineSeamChecks() {
 		async transact(req: TransactionRequest): Promise<TransactionResult> {
 			transacted.push({
 				hash: bytesToHex(req.tx.hash()),
-				sender: req.tx.getSenderAddress().toString(),
+				// THE SEAM'S VALUE, not a property of the transaction this engine was
+				// handed: an engine never determines the sender (see check 8 below).
+				sender: req.sender.toString(),
+				// What this engine WOULD have executed as had it recovered one of its
+				// own. Equal to the above for a genuinely-signed tx; the whole point of
+				// check 8 is the case where it is not.
+				reRecovered: req.tx.getSenderAddress().toString(),
 				to: (req.tx as any).to?.toString(),
 				blockNumber: req.block.header.number.toString(),
 				gasLimit: (req.tx as any).gasLimit.toString(),
@@ -339,6 +356,8 @@ export async function runEngineSeamChecks() {
 	out.engineTxHashExpected = engineTxHash;
 	out.engineTxSenderSeen = transacted[0]?.sender;
 	out.engineTxSenderExpected = account.address.toLowerCase();
+	// An ordinary tx: the seam's sender IS the recovered one, so the two agree.
+	out.engineTxReRecoveredSender = transacted[0]?.reRecovered;
 	out.engineTxToSeen = transacted[0]?.to;
 	out.engineTxBlockNumberSeen = transacted[0]?.blockNumber;
 	out.engineTxGasLimitSeen = transacted[0]?.gasLimit;
@@ -374,6 +393,66 @@ export async function runEngineSeamChecks() {
 	).toString();
 
 	await txNode.dispose();
+
+	// ---------- 8) the SENDER is a VALUE the seam carries ----------
+	// The silent failure this pins: `senderMode:'trusted'` exists so that the
+	// CLAIMED sender may differ from the recoverable one, and an engine that
+	// recovers its own sender then executes as the WRONG address without erring —
+	// same gas, same status, a receipt naming somebody else. So the transaction
+	// below is signed by `account` and submitted claiming `TRUSTED_CLAIMED`, and the
+	// stub reports BOTH addresses: the one the seam handed it (which must be the
+	// claimed one) and the one it would have recovered (which must be the signer).
+	// The two DIFFERING is what makes the check meaningful.
+	const asTransacted: {sender: string; reRecovered: string}[] = [];
+	const asStub: Engine = {
+		id: 'test-sender-value-stub',
+		async call(): Promise<ReadCallResult> {
+			return {returnValue: new Uint8Array(), executionGasUsed: 0n};
+		},
+		async transact(req: TransactionRequest): Promise<TransactionResult> {
+			asTransacted.push({
+				sender: req.sender.toString(),
+				reRecovered: req.tx.getSenderAddress().toString(),
+			});
+			return {
+				status: 1,
+				gasUsed: STUB_TX_GAS_USED,
+				effectiveGasPrice: STUB_TX_EFFECTIVE_GAS_PRICE,
+				logs: [],
+				logsBloom: new Uint8Array(256),
+			};
+		},
+	};
+	const asNode = await createNode({
+		chainId: CHAIN_ID,
+		senderMode: 'trusted',
+		miningConfig: {type: 'auto'},
+		initialBalances: {
+			[account.address]: 10n ** 24n,
+			[TRUSTED_CLAIMED]: 10n ** 24n,
+		},
+		engine: asStub,
+	});
+	const asRaw = await account.signTransaction({
+		chainId: CHAIN_ID,
+		nonce: 0,
+		to: TARGET,
+		value: 1n,
+		gas: 21_000n,
+		maxFeePerGas: 2_000_000_000n,
+		maxPriorityFeePerGas: 1_000_000_000n,
+		type: 'eip1559',
+	} as any);
+	const asRcpt = (await asNode.request({
+		method: 'evm_sendRawTransactionSyncAs',
+		params: [asRaw, TRUSTED_CLAIMED],
+	})) as Record<string, unknown>;
+	out.asSenderSeen = asTransacted[0]?.sender;
+	out.asSenderExpected = TRUSTED_CLAIMED;
+	out.asReRecoveredSender = asTransacted[0]?.reRecovered;
+	out.asReRecoveredExpected = account.address.toLowerCase();
+	out.asReceiptFrom = String(asRcpt?.from).toLowerCase();
+	await asNode.dispose();
 
 	return out;
 }

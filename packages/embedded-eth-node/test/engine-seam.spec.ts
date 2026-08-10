@@ -98,6 +98,24 @@ test('engine seam (default @ethereumjs/evm, injected engine, reads and transacti
 	expect(c.engineRcptCumulativeGasUsed).toBe(c.engineRcptGasUsedExpected);
 	expect(c.engineRcptContractAddress).toBe(null);
 	expect(c.engineTxTargetBalance).toBe('0');
+	// For an ordinary tx the seam's sender IS the recoverable one, so an engine
+	// that re-recovered would agree here — which is exactly why that agreement
+	// proves nothing on its own, and why the next block exists.
+	expect(c.engineTxReRecoveredSender).toBe(c.engineTxSenderExpected);
+
+	// ---- the SENDER is a VALUE the seam carries, not a behaviour an engine
+	// reproduces ----
+	// A tx signed by one account and submitted through `evm_sendRawTransactionSyncAs`
+	// claiming ANOTHER (`senderMode:'trusted'`, the reason that mode exists). The
+	// engine must be handed the CLAIMED sender; the address it would have recovered
+	// for itself is the SIGNER, and the two must differ — otherwise this test cannot
+	// see the failure it exists for. A re-recovering engine charges the signer,
+	// advances the signer's nonce and returns a receipt that looks right.
+	expect(c.asSenderSeen).toBe(c.asSenderExpected);
+	expect(c.asReRecoveredSender).toBe(c.asReRecoveredExpected);
+	expect(c.asSenderSeen).not.toBe(c.asReRecoveredSender);
+	// ...and the node's own receipt names the claimed sender too.
+	expect(c.asReceiptFrom).toBe(c.asSenderExpected);
 
 	await h.dispose();
 });

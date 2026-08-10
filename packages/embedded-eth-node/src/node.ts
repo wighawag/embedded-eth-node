@@ -31,6 +31,7 @@ import {createTxFromRLP, createTx, type TypedTransaction} from '@ethereumjs/tx';
 import {
 	createAddressFromString,
 	createAccountFromRLP,
+	type Address,
 	Account,
 	hexToBytes as hexToBytesStrict,
 	bytesToHex,
@@ -106,6 +107,25 @@ interface StoredBlock {
 	block: Block;
 	header: SerializedBlock;
 	logs: SerializedLog[];
+}
+
+/**
+ * ONE SUBMITTED TRANSACTION, as the node carries it from `eth_sendRawTransaction*`
+ * (or the `evm_*As` cheats) to the block it is mined in: the parsed transaction,
+ * its wire bytes (`dumpState` and `eth_getTransactionByHash` report them) and
+ * WHO SENT IT.
+ *
+ * The sender is here — rather than being asked of `tx` at each of the three places
+ * that need it — because it is only sometimes recoverable FROM the transaction:
+ * `senderMode:'trusted'` states it instead (ADR 0002), and it may then differ from
+ * whatever the signature recovers to. `parseTx` decides it ONCE per transaction,
+ * and that one value becomes the engine's `TransactionRequest.sender`, the
+ * receipt's `from`, and the `from` on the stored transaction.
+ */
+interface SubmittedTx {
+	readonly tx: TypedTransaction;
+	readonly raw: Uint8Array;
+	readonly sender: Address;
 }
 
 export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
@@ -283,8 +303,10 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 	);
 	storeBlock(genesis, [], [], await currentStateRoot());
 
-	// Pending raw txs awaiting the next mined block (manual/interval modes).
-	const pending: {tx: TypedTransaction; raw: Uint8Array}[] = [];
+	// Pending raw txs awaiting the next mined block (manual/interval modes). Each
+	// carries its SENDER, decided once at parse time by `parseTx`: the node derives
+	// the sender (or is told it), never the engine.
+	const pending: SubmittedTx[] = [];
 
 	// newHeads subscribers.
 	const headSubs = new Set<(h: {number: number; hash: string}) => void>();
@@ -323,7 +345,7 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 	}
 
 	async function executeAndMine(
-		txs: {tx: TypedTransaction; raw: Uint8Array}[],
+		txs: SubmittedTx[],
 	): Promise<{blockNumber: number; blockHash: string; txHashes: string[]}> {
 		const number = blockEnv?.number ?? BigInt(latestNumber + 1);
 		const blockBaseFee = blockEnv?.baseFeePerGas ?? baseFeePerGas;
@@ -356,15 +378,19 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 		let cumulativeGasUsed = 0n;
 		let txIndex = 0;
 
-		for (const {tx, raw} of txs) {
+		for (const {tx, raw, sender} of txs) {
 			// THE MINING PATH GOES THROUGH THE ENGINE. What comes back is the neutral
 			// `TransactionResult` — everything a receipt needs from an EVM and nothing
 			// else — so every line below is the NODE's own half: the block it landed in,
 			// the running `cumulativeGasUsed`, log positions, and the receipt itself.
-			const res = await engine.transact({tx, block});
+			// THE SENDER IS PASSED, NOT LEFT TO BE FOUND. It is the node's own value
+			// (recovered, or claimed in `senderMode:'trusted'`), and the receipt's `from`
+			// below is the SAME value — so "who the engine executed as" and "who the
+			// receipt names" cannot drift apart by engine.
+			const res = await engine.transact({tx, sender, block});
 			cumulativeGasUsed += res.gasUsed;
 			const h = txHashOf(tx);
-			const from = tx.getSenderAddress().toString();
+			const from = sender.toString();
 			const to = (tx as any).to ? (tx as any).to.toString() : null;
 			const created = res.createdAddress ? hex(res.createdAddress) : null;
 			// Track touched accounts for the trie-mode dump (sender, recipient, created,
@@ -452,9 +478,18 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 	}
 
 	/**
-	 * Decode a raw tx. When `claimedFrom` is supplied (the `evm_*As` methods,
-	 * `senderMode:'trusted'` only) we SKIP ecrecover and pin the sender to the
-	 * caller-supplied address.
+	 * Decode a raw tx AND DECIDE ITS SENDER, once. When `claimedFrom` is supplied
+	 * (the `evm_*As` methods, `senderMode:'trusted'` only) we SKIP ecrecover and take
+	 * the caller-supplied address as the sender; otherwise we recover it, as a real
+	 * node does.
+	 *
+	 * THE SENDER IS A VALUE FROM HERE ON. It travels with the transaction (see
+	 * {@link SubmittedTx}) to the receipt's `from` and across the engine seam as
+	 * `TransactionRequest.sender`, so exactly ONE place in the node answers "who sent
+	 * this" and no engine is trusted to answer it again. Recovery is therefore EAGER
+	 * (at submit, not at mine): a transaction whose signature cannot be recovered is
+	 * rejected by the `eth_sendRawTransaction*` call that submitted it rather than by
+	 * a later `mine()`, which is where a `'recover'` node would have failed anyway.
 	 *
 	 * WHAT THIS PRIMITIVE IS: "execute this tx as this sender, do not recover".
 	 * That is all. It is deliberately NOT an impersonation feature — impersonation
@@ -477,11 +512,20 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 	 * (2.23ms -> 0.97ms/tx; the residual is the CLIENT's own signing, which only
 	 * case (b) avoids). Gas and status are byte-identical either way.
 	 *
-	 * HOW: `runTx` reads the sender through exactly one call, `tx.getSenderAddress()`.
-	 * We parse with `freeze:false` and shadow that one method. Everything else about
-	 * the tx stays REAL — same wire bytes, same `tx.hash()` — so receipts, block
-	 * contents and `eth_getTransactionByHash` are unchanged. The ONLY thing dropped
-	 * is the proof that the signer authorised this sender.
+	 * HOW: the claimed address becomes this transaction's sender, full stop — nothing
+	 * on the transaction is touched. Everything else about it stays REAL — same wire
+	 * bytes, same `tx.hash()`, same signature on the wire — so receipts, block
+	 * contents and `eth_getTransactionByHash` are unchanged. The ONLY thing dropped is
+	 * the proof that the signer authorised this sender.
+	 *
+	 * IT USED TO SHADOW `tx.getSenderAddress()` on the parsed instance, because
+	 * `runTx` reads the sender through exactly that one call. That worked only while
+	 * the node itself ran `runTx`: once transactions cross the engine seam, a pinned
+	 * method is an undocumented convention an engine has to interrogate the same way,
+	 * and an engine recovering its own sender would silently execute as the SIGNER —
+	 * charging that account, advancing its nonce, returning a plausible receipt. So
+	 * the sender is data now, and the shadowing is gone rather than kept as a second
+	 * mechanism saying the same thing.
 	 *
 	 * ---- CALLER CONTRACT, case (b) / fabricated signatures ONLY ----
 	 *
@@ -504,13 +548,11 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 	 * SAFETY: gated on `senderMode:'trusted'`. In the default `'recover'` mode these
 	 * methods do not exist and we throw -32601 rather than silently trusting input.
 	 */
-	function parseTx(
-		rawHex: unknown,
-		claimedFrom?: unknown,
-	): {tx: TypedTransaction; raw: Uint8Array} {
+	function parseTx(rawHex: unknown, claimedFrom?: unknown): SubmittedTx {
 		const raw = hexToBytes(String(rawHex));
 		if (claimedFrom === undefined) {
-			return {tx: createTxFromRLP(raw, {common}), raw};
+			const tx = createTxFromRLP(raw, {common});
+			return {tx, raw, sender: tx.getSenderAddress()};
 		}
 		if (senderMode !== 'trusted') {
 			throw new RpcError(
@@ -523,26 +565,22 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 		}
 		// Throws on a malformed address rather than executing as someone unexpected.
 		const from = createAddressFromString(String(claimedFrom));
-		// `freeze:false` so we can shadow getSenderAddress on the instance.
-		const tx = createTxFromRLP(raw, {
-			common,
-			freeze: false,
-		}) as TypedTransaction;
-		(tx as any).getSenderAddress = () => from;
-		return {tx, raw};
+		// The transaction is parsed FROZEN, like every other one: nothing about it is
+		// rewritten to carry the claimed sender, because the sender does not live on it.
+		const tx = createTxFromRLP(raw, {common});
+		return {tx, raw, sender: from};
 	}
 
-	/** Queue-or-execute a decoded tx; returns the hash, or the receipt if `sync`. */
+	/** Queue-or-execute a submitted tx; returns the hash, or the receipt if `sync`. */
 	async function submit(
-		tx: TypedTransaction,
-		raw: Uint8Array,
+		submitted: SubmittedTx,
 		sync: boolean,
 	): Promise<unknown> {
-		const h = txHashOf(tx);
+		const h = txHashOf(submitted.tx);
 		if (miningConfig.type === 'auto') {
-			await executeAndMine([{tx, raw}]);
+			await executeAndMine([submitted]);
 		} else {
-			pending.push({tx, raw});
+			pending.push(submitted);
 			if (sync) await mineBlock();
 		}
 		if (!sync) return h;
@@ -909,14 +947,12 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 			}
 
 			case 'eth_sendRawTransaction': {
-				const {tx, raw} = parseTx(params[0]);
-				return submit(tx, raw, false);
+				return submit(parseTx(params[0]), false);
 			}
 			case 'eth_sendRawTransactionSync': {
 				// The fast path: send + mine + return receipt in ONE call. Default
 				// behaviour pairs with auto mining (no receipt polling = the latency win).
-				const {tx, raw} = parseTx(params[0]);
-				return submit(tx, raw, true);
+				return submit(parseTx(params[0]), true);
 			}
 
 			// ---- Trusted-sender variants (senderMode:'trusted' ONLY) ----
@@ -924,12 +960,10 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 			// ecrecover. `evm_`-namespaced because they are a cheat, not a standard
 			// method: the signature on the wire is never verified.
 			case 'evm_sendRawTransactionAs': {
-				const {tx, raw} = parseTx(params[0], params[1]);
-				return submit(tx, raw, false);
+				return submit(parseTx(params[0], params[1]), false);
 			}
 			case 'evm_sendRawTransactionSyncAs': {
-				const {tx, raw} = parseTx(params[0], params[1]);
-				return submit(tx, raw, true);
+				return submit(parseTx(params[0], params[1]), true);
 			}
 
 			case 'eth_getTransactionReceipt': {

@@ -198,7 +198,19 @@ sender, so re-deriving it on a local chain is pure waste.
   isolation** (2.52ms → 0.19ms) and **~2.3× end-to-end** through a viem-style
   client (2.23ms → 0.97ms per tx — the residual is the *client's own* signing).
   Gas, status, logs, receipts and post-state are **byte-identical** to `'recover'`
-  (asserted field-by-field in `test/trusted-sender.spec.ts`).
+  (asserted field-by-field in `test/trusted-sender.spec.ts`, and again with the
+  revm engine installed in `test/revm-trusted-sender.spec.ts` — the same suite,
+  parameterised by engine).
+
+The sender you supply is the sender **on every engine**, including when the
+signature on the wire recovers to somebody else (which is the case the mode exists
+for). It is not a property an EVM works out: the node decides it once and passes it
+across the [engine](#engine-ethereumjsevm-default-vs-revm-wasm-opt-in) seam as
+`TransactionRequest.sender`, so the account charged, the nonce advanced and the
+receipt's `from` are the same address whichever EVM executed the transaction. Both
+engine specs assert that to the wei, from a transaction signed by one account and
+submitted claiming another
+([amendment 3](docs/adr/0006-the-engine-is-an-injected-object-not-a-named-string.md#amendment-3-the-sender-crosses-the-seam-as-a-value-not-as-a-method-an-engine-calls)).
 
 The primitive says exactly one thing: **execute this tx as this sender, do not
 recover**. It is *not* an impersonation feature. Two different callers want it:
@@ -303,7 +315,10 @@ implements the seam's read half AND its transaction half, so with it installed
 your `eth_call`s, your `eth_estimateGas` and your mined transactions all run on
 revm, against the node's own state. The node's own half never moves either way:
 block construction, `cumulativeGasUsed`, receipt assembly, the RPC layer,
-transaction parsing and sender recovery are the node's, on every engine.
+transaction parsing and sender derivation are the node's, on every engine — the
+sender crosses the seam as a required value on the request, so an engine executes
+on behalf of the address the node states rather than recovering one of its own (see
+[Sender mode](#sender-mode-recover-authenticated-default-vs-trusted-no-ecrecover)).
 
 One asymmetry worth knowing, because it is the binding's and not a choice: the
 node lets a client set a gas limit above the block's and tells `@ethereumjs/vm` to

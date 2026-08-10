@@ -14,6 +14,10 @@
  *   - 'conformance'  : the SHARED differential battery (helpers/conformance.ts)
  *                      run with the revm engine installed, in the one state mode
  *                      it serves
+ *   - 'trusted-sender': the SHARED trusted-sender suite (helpers/trusted-sender.ts)
+ *                      run with the revm engine installed — a tx submitted through
+ *                      the `evm_*As` cheats executes as the CLAIMED sender, even
+ *                      when the signature recovers to somebody else
  */
 import type {
 	CodeUnderTest,
@@ -23,6 +27,7 @@ import type {
 import {captureEnv} from 'playwright-browser-harness/contract';
 import {runRevmEngineChecks} from './revm-engine.js';
 import {runRevmConformance} from './revm-conformance.js';
+import {runRevmTrustedSender} from './revm-trusted-sender.js';
 
 const cut: CodeUnderTest = {
 	name: 'embedded-eth-node/revm',
@@ -51,6 +56,18 @@ const cut: CodeUnderTest = {
 		if (ctx.params.mode === 'conformance') {
 			try {
 				results.revmConformance = await runRevmConformance();
+			} catch (e) {
+				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
+			}
+			return {results, timings, errors, env: captureEnv()};
+		}
+
+		// The SHARED trusted-sender suite, with the revm engine installed. Same
+		// differential, same gating, same claimed-sender assertions — only the EVM that
+		// executes the transactions differs.
+		if (ctx.params.mode === 'trusted-sender') {
+			try {
+				results.revmTrustedSender = await runRevmTrustedSender();
 			} catch (e) {
 				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
 			}
