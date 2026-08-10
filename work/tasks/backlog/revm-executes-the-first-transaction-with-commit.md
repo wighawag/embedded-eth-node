@@ -4,6 +4,7 @@ slug: revm-executes-the-first-transaction-with-commit
 spec: revm-engine-behind-runtx
 blockedBy: [re-widen-the-engine-seam-to-cover-transactions]
 covers: [1, 10, 16]
+needsAnswers: true
 ---
 
 ## What to build
