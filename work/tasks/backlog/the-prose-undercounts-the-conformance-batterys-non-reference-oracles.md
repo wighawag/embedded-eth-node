@@ -18,12 +18,15 @@ The hazard is the one the parent task existed to close, left open for the newest
 
 Fix them together, since both are the same paragraph.
 
+**3. Added 2026-08-10: there are now TWO post-state differentials and nothing says which owns what.** `revm-write-callbacks-reproduce-the-post-state` added a second battery with a different oracle (a default-engine node in the same state mode, compared through a structural `dumpState`), alongside the conformance battery's existing post-state reads against the trie-backed reference. `CONTEXT.md`'s glossary still describes only the first. The new helper's header explains why it is not the gas gate, but not why it is not folded into the conformance helper, so the next author adding a post-state shape has no way to know where it goes. Pin which differential owns which question, in whichever of the two surfaces is the right home.
+
 ## Acceptance criteria
 
 - [ ] The prose account of the battery's oracles covers all THREE non-reference classes, on both surfaces that state it (the README and `CONTEXT.md`'s glossary), or states the count in a way that cannot go stale as steps are added.
 - [ ] The block-gas-limit step's reason for not using the reference is discoverable: that the reference itself passes `skipBlockGasLimitValidation` and is therefore blind to it.
 - [ ] The README's clause is trimmed to the consumer-voice size the parent task asked for, leaning on the `CONTEXT.md` pointer it already carries rather than restating the glossary's reasoning.
 - [ ] `CONTEXT.md`'s glossary remains the full definition, and the two surfaces do not contradict each other.
+- [ ] It is stated which of the two post-state differentials owns which question, so a new post-state shape has an obvious home.
 - [ ] No changeset: documentation only.
 
 ## Blocked by
