@@ -4,6 +4,7 @@ slug: document-the-type-3-receipt-gap-where-it-would-be-met
 spec: revm-engine-behind-runtx
 blockedBy: []
 covers: [15]
+needsAnswers: true
 ---
 
 ## What to build
