@@ -28,7 +28,7 @@
  *     site fails BOTH sides of it (and does not carry code 3), so it turns the
  *     step red.
  *  2. **At the engine seam** ({@link namesLackOfFunds}) — the WORDS. A
- *     `ReadEngine.call` result still carries the engine's own error, and the two
+ *     `Engine.call` result still carries the engine's own error, and the two
  *     engines are meant to differ there: `@ethereumjs/evm` reports
  *     `insufficient balance` (`EVMError`, thrown by `_reduceSenderBalance`),
  *     revm reports `Transaction(LackOfFundForMaxFee { fee, balance })`. The

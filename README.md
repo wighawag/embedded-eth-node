@@ -20,11 +20,12 @@ faking success.
   (Worker) are interchangeable one-liners — the consumer never hand-rolls comlink.
 - **IndexedDB persistence** (`createIndexedDBPersistence()`), verified to survive a
   real page reload (state + balances + `eth_getLogs`).
-- **Swappable READ engine:** `eth_call`/`eth_estimateGas` run on an injected
-  engine — `@ethereumjs/evm` by default, or
-  [revm-wasm](#read-engine-ethereumjsevm-default-vs-revm-wasm-opt-in) via the
+- **Swappable ENGINE:** reads (`eth_call`/`eth_estimateGas`) and transactions both
+  run on an injected engine — `@ethereumjs/evm` by default, or
+  [revm-wasm](#engine-ethereumjsevm-default-vs-revm-wasm-opt-in-reads-only) via the
   optional `embedded-eth-node/revm` subpath (measured **2.7× on Chromium /
-  3.3× on WebKit** for a 100-read frame, byte-identical gas). Transactions always
+  3.3× on WebKit** for a 100-read frame, byte-identical gas). The revm engine
+  serves the seam's READ half only today, so with it installed transactions still
   run on `@ethereumjs/vm`.
 - **Simple by design:** account/signing methods are NOT implemented; legacy
   (type-0) receipts work (legacy-safe `effectiveGasPrice`); `eth_estimateGas` is a
@@ -98,13 +99,13 @@ method-not-found (`-32601`) — it never fakes a result.
 | `eth_chainId`, `net_version` | from `chainId` option |
 | `eth_blockNumber` | latest mined block number |
 | `eth_getBlockByNumber`, `eth_getBlockByHash` | header + (optional) full txs; roots are zero in `'none'` mode |
-| `eth_call` | **runs on the [read engine](#read-engine-ethereumjsevm-default-vs-revm-wasm-opt-in)**; pure (never mutates); reverts throw `RpcError(3, 'execution reverted')` |
-| `eth_estimateGas` | **runs on the [read engine](#read-engine-ethereumjsevm-default-vs-revm-wasm-opt-in)**; honest run-and-measure (`executionGasUsed` + intrinsic incl. EIP-3860); verified == `runTx` `totalGasSpent` |
+| `eth_call` | **runs on the [engine](#engine-ethereumjsevm-default-vs-revm-wasm-opt-in-reads-only)**; pure (never mutates); reverts throw `RpcError(3, 'execution reverted')` |
+| `eth_estimateGas` | **runs on the [engine](#engine-ethereumjsevm-default-vs-revm-wasm-opt-in-reads-only)**; honest run-and-measure (`executionGasUsed` + intrinsic incl. EIP-3860); verified == `runTx` `totalGasSpent` |
 | `eth_getBalance`, `eth_getCode`, `eth_getStorageAt`, `eth_getTransactionCount` | state reads at a block tag |
 | `eth_gasPrice`, `eth_maxPriorityFeePerGas` | **constant** (faked fee market — local chain) |
 | `eth_feeHistory` | correct response **shape**, but **constant/faked values** — not for real fee prediction |
-| `eth_fillTransaction` | fills missing nonce/gas/fees of a tx request and returns `{tx, raw}` (the `raw` is **unsigned** — sign client-side); viem's `prepareTransactionRequest` uses it. Its gas estimate **runs on the [read engine](#read-engine-ethereumjsevm-default-vs-revm-wasm-opt-in)** |
-| **`eth_sendRawTransaction`** | accepts a **signed** raw tx; mines per `miningConfig`. Transactions always run on `@ethereumjs/vm` — **never** on the read engine |
+| `eth_fillTransaction` | fills missing nonce/gas/fees of a tx request and returns `{tx, raw}` (the `raw` is **unsigned** — sign client-side); viem's `prepareTransactionRequest` uses it. Its gas estimate **runs on the [engine](#engine-ethereumjsevm-default-vs-revm-wasm-opt-in-reads-only)** |
+| **`eth_sendRawTransaction`** | accepts a **signed** raw tx; mines per `miningConfig`. Executes on the [engine](#engine-ethereumjsevm-default-vs-revm-wasm-opt-in-reads-only) too, through its transaction operation — on `@ethereumjs/vm` unless the installed engine implements one |
 | **`eth_sendRawTransactionSync`** | the fast path: send + mine + return receipt in one call |
 | `eth_getTransactionReceipt`, `eth_getTransactionByHash` | from the in-memory store |
 | `eth_getLogs` | address + topic filtering over mined logs. **Perf note:** a full linear scan over all logs per call (O(total_logs), no index/cache) — fine for a local chain |
@@ -232,27 +233,32 @@ layer above.
 Both caveats apply *only* to fabricated signatures. Genuinely-signed txs (case 1)
 are unaffected: real signatures already differ per signer and validate anywhere.
 
-## Read engine: `@ethereumjs/evm` (default) vs revm-wasm (opt-in)
+## Engine: `@ethereumjs/evm` (default) vs revm-wasm (opt-in, reads only)
 
 ```ts
 import {createNode} from 'embedded-eth-node';
 import {createRevmEngine} from 'embedded-eth-node/revm';
 import {wasmUrl} from 'revm-wasm/wasm-url';
 
-const js = await createNode({}); // default — reads on @ethereumjs/evm
+const js = await createNode({}); // default — everything on @ethereumjs/evm
 const fast = await createNode({engine: await createRevmEngine({wasm: wasmUrl})});
 
-fast.readEngine.id; // 'revm-wasm' — which EVM answered your reads
+fast.engine.id; // 'revm-wasm' — which EVM this node was created with
 ```
 
-The **read engine** is the EVM behind `eth_call`, `eth_estimateGas` and
-`eth_fillTransaction`'s estimation, and **only** those. It is an injected
-**object**, never a name the core resolves, so the core imports no engine you did
-not ([ADR 0006](docs/adr/0006-the-engine-is-an-injected-object-not-a-named-string.md)).
+The **engine** is the EVM behind the node, and the seam it plugs into has two
+operations: a read-only **call** (`eth_call`, `eth_estimateGas` and
+`eth_fillTransaction`'s estimation) and a committing **transaction** (the mining
+path). It is an injected **object**, never a name the core resolves, so the core
+imports no engine you did not
+([ADR 0006](docs/adr/0006-the-engine-is-an-injected-object-not-a-named-string.md)).
+An engine may implement only the read half, and the shipped revm one does today —
+see the scope note below.
 
-- **`@ethereumjs/evm`** (default): the node's own EVM, exactly as it has always
-  behaved — including the pure-read checkpoint/revert and the EIP-2929
-  warm/access reset. Costs nothing: no option, no extra bytes, no wasm.
+- **`@ethereumjs/evm`** (default): the node's own EVM, on both operations, exactly
+  as it has always behaved — including the pure-read checkpoint/revert and the
+  EIP-2929 warm/access reset for a read, and full validation for a transaction.
+  Costs nothing: no option, no extra bytes, no wasm.
 - **revm-wasm** (opt-in, `embedded-eth-node/revm`): the same reads on
   [revm](https://github.com/bluealloy/revm) compiled to WebAssembly, charging
   **byte-identical gas**
@@ -287,10 +293,13 @@ frame): those compare interpreters with no node in the path, on a different, qui
 machine. Heavier calls (tight arithmetic, keccak loops) gain much more than this
 frame row, which is dominated by per-call overhead rather than by execution.
 
-**Scope, and it is narrow: READS only.** Transactions, mining, receipts and state
-ownership stay on `@ethereumjs/vm` whatever engine is installed — a receipt can
-never be attributed to the read engine. That is why the node reports
-`node.readEngine` and not `node.engine`.
+**Scope of the revm engine, and it is narrow: READS only.** It implements the
+seam's read half and not (yet) its transaction half, so with it installed your
+transactions, mining, receipts and state ownership stay on `@ethereumjs/vm` — such
+a node runs two EVMs, and a receipt cannot be attributed to `node.engine.id`. The
+node's own half never moves either way: block construction, `cumulativeGasUsed`,
+receipt assembly, the RPC layer, transaction parsing and sender recovery are the
+node's, on every engine.
 
 ```ts
 // both wasm delivery shapes are the SAME code path — `wasm` takes bytes, a URL,

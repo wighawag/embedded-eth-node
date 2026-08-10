@@ -15,11 +15,15 @@
  * is nevertheless a plain `dependency`: a JS-only consumer pays install bytes
  * and ZERO bundle bytes.
  *
- * SCOPE: reads only — `eth_call`, `eth_estimateGas` and `eth_fillTransaction`'s
- * estimation. Transactions run on `@ethereumjs/vm` whatever engine is installed,
- * which is why the node calls this its `readEngine`. `Revm#call` is structurally
- * incapable of committing, so this engine needs neither the checkpoint/revert
- * nor the EIP-2929 reset the default `@ethereumjs/evm` engine pays for.
+ * SCOPE: THE READ HALF OF THE SEAM ONLY — `eth_call`, `eth_estimateGas` and
+ * `eth_fillTransaction`'s estimation. It implements `Engine.call` and not (yet)
+ * `Engine.transact`, so a node with this engine installed still mines its
+ * transactions on its own `@ethereumjs/vm`, exactly as it did before the seam
+ * covered transactions; the write half is
+ * `work/tasks/backlog/revm-executes-the-first-transaction-with-commit.md`. `Revm#call`
+ * is structurally incapable of committing, so this engine needs neither the
+ * checkpoint/revert nor the EIP-2929 reset the default `@ethereumjs/evm` engine
+ * pays for.
  *
  * WASM DELIVERY IS ONE CODE PATH. `revm-wasm` accepts bytes, a `URL`, a string,
  * a `Response` or an already-compiled `WebAssembly.Module`, so whatever the
@@ -49,13 +53,13 @@ import type {Revm} from 'revm-wasm';
 import {intrinsicGas} from './intrinsic-gas.js';
 import {SimpleStateManagerStore} from './revm-state-store.js';
 import type {
+	Engine,
+	EngineContext,
 	ReadCallRequest,
 	ReadCallResult,
-	ReadEngine,
-	ReadEngineContext,
 } from './types.js';
 
-/** This engine's stable identifier, as reported by `node.readEngine.id`. */
+/** This engine's stable identifier, as reported by `node.engine.id`. */
 export const REVM_ENGINE_ID = 'revm-wasm';
 
 export interface RevmEngineOptions {
@@ -184,7 +188,7 @@ export const REVM_REFUSED_HARDFORKS: Readonly<Record<string, string>> =
 	});
 
 /**
- * Build a revm-backed read engine.
+ * Build a revm-backed engine, serving the seam's READ half.
  *
  * The wasm is fetched and compiled HERE, so a consumer can start the download
  * while the UI paints and hand the finished engine to `createNode()` afterwards.
@@ -201,7 +205,7 @@ export const REVM_REFUSED_HARDFORKS: Readonly<Record<string, string>> =
  */
 export async function createRevmEngine(
 	options: RevmEngineOptions,
-): Promise<ReadEngine> {
+): Promise<Engine> {
 	// The store is created UNBOUND: `createRevm` needs its store at instantiation
 	// time, and the node's state manager does not exist yet. It reads nothing
 	// until `connect` binds it, and throws if asked to.
@@ -222,7 +226,7 @@ export async function createRevmEngine(
 	return {
 		id: REVM_ENGINE_ID,
 
-		connect(context: ReadEngineContext): void {
+		connect(context: EngineContext): void {
 			// A MODE THIS ENGINE CANNOT SERVE, refused out loud and at construction.
 			// `MerkleStateManager` has no synchronous view of state at any depth, and
 			// revm's reads must be synchronous, so there is nothing to reach through

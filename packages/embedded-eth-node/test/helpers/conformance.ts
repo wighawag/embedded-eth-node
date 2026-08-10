@@ -22,13 +22,13 @@
  * 'trie') so the cheap default fast path is covered too.
  *
  * The battery is ENGINE-PARAMETERISED (see {@link runConformanceOnEngine}): the
- * same steps run with an injected read engine, so `embedded-eth-node/revm` faces
- * this bar rather than a softer one of its own. Only the READ path changes with
- * the engine — `eth_call` return data and `eth_estimateGas` — because
- * transactions run on `@ethereumjs/vm` whatever engine is installed. The engine
- * is built PER NODE by a factory, not shared: an engine instance serves exactly
- * one node (the revm engine refuses a second `createNode()` outright), and the
- * battery builds two.
+ * same steps run with an injected engine, so `embedded-eth-node/revm` faces this
+ * bar rather than a softer one of its own. With the engine shipped today only the
+ * READ path changes — `eth_call` return data and `eth_estimateGas` — because an
+ * engine that implements only the seam's read half leaves transactions on
+ * `@ethereumjs/vm`. The engine is built PER NODE by a factory, not shared: an
+ * engine instance serves exactly one node (the revm engine refuses a second
+ * `createNode()` outright), and the battery builds two.
  */
 import {createVM, runTx, type VM} from '@ethereumjs/vm';
 import {MerkleStateManager} from '@ethereumjs/statemanager';
@@ -49,7 +49,7 @@ import {encodeFunctionData, encodeDeployData, decodeFunctionResult} from 'viem';
 import {privateKeyToAccount} from 'viem/accounts';
 import {
 	createNode,
-	type ReadEngine,
+	type Engine,
 	type SlimNode,
 	type StateMode,
 } from '../../src/index.js';
@@ -356,11 +356,11 @@ async function sign2930(args: any): Promise<string> {
  * its default `@ethereumjs/evm` engine, which is what the unparameterised
  * battery runs.
  */
-export type EngineFactory = () => Promise<ReadEngine>;
+export type EngineFactory = () => Promise<Engine>;
 
 export interface BatteryReport {
 	stateMode: StateMode;
-	/** Which EVM answered the READ path, as the node itself reports it. */
+	/** Which EVM the node was created with, as the node itself reports it. */
 	engineId: string;
 	steps: {label: string; mismatches: string[]}[];
 	totalMismatches: number;
@@ -1110,7 +1110,7 @@ async function runBattery(
 		await node4.dispose();
 	}
 
-	const engineId = node.readEngine.id;
+	const engineId = node.engine.id;
 	await node.dispose();
 
 	const totalMismatches = steps.reduce((n, s) => n + s.mismatches.length, 0);

@@ -71,7 +71,7 @@ test('node honesty + correctness (receipts, gaps, persistence, state-root mode)'
 	// the configuration, not the engine.
 	expect(c.engineServedMode).toBe('DID_NOT_THROW:test-engine-none-only');
 
-	// an object that is not a ReadEngine is refused at construction, not at the
+	// an object that is not an Engine is refused at construction, not at the
 	// first read.
 	expect(c.engineNotAnEngine).not.toContain('DID_NOT_THROW');
 	expect(c.engineNotAnEngine).toContain('call');

@@ -11,6 +11,7 @@
  */
 import type {Address} from '@ethereumjs/util';
 import type {Block} from '@ethereumjs/block';
+import type {TypedTransaction} from '@ethereumjs/tx';
 import type {StateManagerInterface} from '@ethereumjs/common';
 import type {Common} from '@ethereumjs/common';
 
@@ -92,7 +93,7 @@ export type StateMode = 'none' | 'trie';
 export type SenderMode = 'recover' | 'trusted';
 
 /**
- * One read-only call for an {@link ReadEngine} to execute: exactly the inputs the
+ * One read-only call for an {@link Engine} to execute: exactly the inputs the
  * node's pure-read helper has always handed `runCall`, and nothing more.
  *
  * The value types are `@ethereumjs/*`'s own (`Address`, `Block`) rather than hex
@@ -129,13 +130,120 @@ export interface ReadCallResult {
 }
 
 /**
+ * One SIGNED transaction for an {@link Engine} to execute AND COMMIT, plus the
+ * block it is being mined in.
+ *
+ * NOT an RPC-level transaction request: there is nothing to fill in here and
+ * nothing optional. `eth_sendTransaction` does not exist on this node, and
+ * `eth_fillTransaction` returns its own object, one layer above the seam.
+ *
+ * THE TRANSACTION CROSSES AS THE NODE PARSED IT, for the reason
+ * {@link ReadCallRequest} carries `Address`/`Block`: the node already holds it in
+ * that form and the default engine hands it straight to `runTx`. It is also the
+ * only shape that is behaviour-preserving — `senderMode:'trusted'` pins the sender
+ * by SHADOWING `tx.getSenderAddress()` on this very object (see `parseTx` in
+ * node.ts), so an engine handed the wire bytes instead would re-recover and
+ * execute as the wrong address with a perfectly plausible receipt.
+ *
+ * WHICH IS THE SENDER RULE: `tx.getSenderAddress()` is the node's AUTHORITATIVE
+ * sender and an engine must take it from here rather than recovering one of its
+ * own.
+ *
+ * WHAT IS DELIBERATELY ABSENT: any switch that relaxes this transaction's
+ * VALIDITY. The read path's simulation switches (base fee, block gas limit,
+ * EIP-3607 — see the `call` side of `src/revm.ts`) have no counterpart here, and
+ * `@ethereumjs/vm`'s own `skip*Validation` flags stay INSIDE the default engine
+ * where they mean something (see `src/engine.ts`). A transaction that runs with
+ * relaxed validity is not a transaction.
+ */
+export interface TransactionRequest {
+	/** The signed transaction, parsed by the node (which owns parsing). */
+	readonly tx: TypedTransaction;
+	/** The block it is mined in (NUMBER, TIMESTAMP, COINBASE, BASEFEE, GASLIMIT). */
+	readonly block: Block;
+}
+
+/**
+ * One log, as the seam carries it: raw bytes, no `@ethereumjs/*` types, no
+ * position. Block/transaction position (`blockNumber`, `logIndex`, ...) is the
+ * NODE's — an engine executing one transaction cannot know where in a block it
+ * sits.
+ */
+export interface TransactionLog {
+	/** Emitting contract, 20 bytes. */
+	readonly address: Uint8Array;
+	/** 0-4 topics, 32 bytes each. */
+	readonly topics: readonly Uint8Array[];
+	readonly data: Uint8Array;
+}
+
+/**
+ * What an engine reports back for an executed transaction: EVERYTHING A RECEIPT
+ * NEEDS FROM AN EVM, and nothing else.
+ *
+ * THIS TYPE IS THE SEAM'S POINT. It is what makes two EVMs comparable field by
+ * field: the default engine fills it from a `runTx` result, another fills it from
+ * its own outcome, and the node builds the same receipt either way. So it is
+ * designed from the RECEIPT backwards, not from what `@ethereumjs/vm` happens to
+ * return — `amountSpent`, `gasRefund`, `minerValue`, `accessList` and the
+ * `execResult` are all absent because no receipt reads them.
+ *
+ * WHAT STAYS THE NODE'S, and is therefore not here: `cumulativeGasUsed` (a
+ * block-level accumulation over several transactions), the transaction hash,
+ * index, type, `from`/`to`, the block it landed in, and log positions. An engine
+ * executes one transaction; it does not build blocks.
+ *
+ * THE VALUES ARE RAW BYTES AND BIGINTS on purpose. An engine that is not
+ * `@ethereumjs/*` (revm-wasm, next) produces bytes, and a seam typed in one
+ * engine's classes would make every other engine convert into a vocabulary it
+ * does not speak.
+ */
+export interface TransactionResult {
+	/**
+	 * `1` succeeded, `0` failed — the receipt's own status, and the only thing a
+	 * receipt says about failure. A revert REASON is deliberately absent: a receipt
+	 * has no field for it (the read path's {@link ReadCallResult.error} is what
+	 * surfaces engine words, to `eth_call`).
+	 */
+	readonly status: 0 | 1;
+	/**
+	 * Gas the sender PAYS FOR: NET of refunds, which is what the receipt reports
+	 * and what `cumulativeGasUsed` accumulates. Not the gross gas spent before
+	 * refunds — an engine reporting both must map the net one here (the read path
+	 * wants the gross one, because a read has no refund).
+	 */
+	readonly gasUsed: bigint;
+	/**
+	 * Wei per gas actually charged — `min(maxFeePerGas, baseFee + tip)` for a 1559
+	 * transaction, `gasPrice` for a legacy one. It comes from the engine that
+	 * executed the transaction because that engine is what CHARGED it, so there is
+	 * exactly one implementation of the fee arithmetic per engine and none in the
+	 * node.
+	 */
+	readonly effectiveGasPrice: bigint;
+	/**
+	 * Logs in EMISSION order, and only the ones that SURVIVED: a log emitted inside
+	 * a reverted sub-call is not here.
+	 */
+	readonly logs: readonly TransactionLog[];
+	/** The 256-byte bloom over {@link logs} (all zero when there are none). */
+	readonly logsBloom: Uint8Array;
+	/**
+	 * The address a top-level CREATE produced, 20 bytes; absent for a call, and
+	 * absent for the nested creations a transaction performs (they are not the
+	 * receipt's `contractAddress`).
+	 */
+	readonly createdAddress?: Uint8Array;
+}
+
+/**
  * What the node hands an engine once, at construction, so the engine can reach
  * the node's AUTHORITATIVE state. Deliberately minimal: a later engine that needs
  * more adds a field here rather than the node guessing now (ADR 0006 names this
  * additive widening as the sanctioned way to grow the seam — `getBlockHash`
  * arrived that way, for `embedded-eth-node/revm`).
  */
-export interface ReadEngineContext {
+export interface EngineContext {
 	/** The node's live state manager. The node keeps ownership; do not fork it. */
 	readonly stateManager: StateManagerInterface;
 	/** Chain params (chain id, hardfork, custom crypto) the node runs under. */
@@ -163,10 +271,17 @@ export interface ReadEngineContext {
 }
 
 /**
- * An EVM behind the node's READ path — `eth_call`, `eth_estimateGas` and
- * `eth_fillTransaction`'s gas estimation. Transactions are NOT routed through it
- * (they run on `@ethereumjs/vm`), which is why the node exposes it as
- * {@link SlimNode.readEngine} rather than as "the engine".
+ * THE EVM BEHIND THE NODE, in ONE interface with TWO operations: execute a
+ * read-only {@link call} (`eth_call`, `eth_estimateGas`, `eth_fillTransaction`'s
+ * estimation) and execute a committing {@link transact} (the mining path).
+ *
+ * ONE INTERFACE, NOT TWO, and not a capability bolted onto a read seam. What
+ * differs between the two operations is a transaction's VALIDITY rules, not their
+ * engine-ness: a read RELAXES them (base fee, block gas limit, EIP-3607) and
+ * cannot commit, a transaction relaxes nothing and commits. That asymmetry belongs
+ * to the operations, and stating it in one place where both are visible beats
+ * splitting it across two interfaces that could be pointed at two different EVMs
+ * (two identifiers that can disagree, for no gain).
  *
  * An engine is an INJECTED OBJECT, never a name the core resolves — see
  * `docs/adr/0006-the-engine-is-an-injected-object-not-a-named-string.md`.
@@ -177,10 +292,10 @@ export interface ReadEngineContext {
  * both and pays for both, an engine that is structurally incapable of committing
  * pays for neither.
  */
-export interface ReadEngine {
+export interface Engine {
 	/**
 	 * Stable identifier for bug reports (`'@ethereumjs/evm'` for the default).
-	 * Surfaced verbatim as `node.readEngine.id`.
+	 * Surfaced verbatim as `node.engine.id`.
 	 */
 	readonly id: string;
 	/**
@@ -188,13 +303,32 @@ export interface ReadEngine {
 	 * `createNode()`, before any call. Optional: an engine the node itself builds
 	 * already has what it needs. Throwing here fails node construction.
 	 */
-	connect?(context: ReadEngineContext): void | Promise<void>;
+	connect?(context: EngineContext): void | Promise<void>;
 	/** Execute one read-only call against the node's CURRENT state. */
 	call(request: ReadCallRequest): Promise<ReadCallResult>;
+	/**
+	 * Execute one signed transaction against the node's state AND COMMIT it,
+	 * reporting what a receipt needs. Full validity: nonce checked, fees charged,
+	 * no simulation switch anywhere near it.
+	 *
+	 * OPTIONAL ONLY WHILE AN ENGINE HAS NOT GROWN ITS WRITE HALF, and that is a
+	 * transitional state rather than a design: an engine that omits it leaves the
+	 * node's transactions on the node's OWN `@ethereumjs/vm`, which is exactly what
+	 * every non-default engine did before this seam covered transactions. The
+	 * shipped `embedded-eth-node/revm` engine is in that state today (its write
+	 * half is `work/tasks/backlog/revm-executes-the-first-transaction-with-commit.md`),
+	 * so requiring the method here would have meant either refusing every
+	 * transaction on a revm-backed node or changing what one does — and this seam's
+	 * whole bar is that nothing changes. `node.engine.id` names the engine the seam
+	 * is bound to, so a node whose engine implements only `call` reports an engine
+	 * that answered its reads and none of its transactions; that is the pre-existing
+	 * two-EVM shape, and it disappears when the engine implements this method.
+	 */
+	transact?(request: TransactionRequest): Promise<TransactionResult>;
 }
 
-/** Which engine a node is running its reads on (see {@link SlimNode.readEngine}). */
-export interface ReadEngineInfo {
+/** Which EVM a node is running on (see {@link SlimNode.engine}). */
+export interface EngineInfo {
 	/** The engine's stable identifier, e.g. `'@ethereumjs/evm'`. */
 	readonly id: string;
 }
@@ -241,18 +375,21 @@ export interface NodeOptions {
 	 */
 	blockEnv?: BlockEnv;
 	/**
-	 * EVM engine for the READ path (`eth_call`, `eth_estimateGas` and
-	 * `eth_fillTransaction`'s estimation). Default: `@ethereumjs/evm`, i.e. exactly
-	 * what the node has always run. Transactions run on `@ethereumjs/vm`
-	 * regardless, so a node with a non-default engine runs TWO EVMs — read
-	 * `node.readEngine` to know which one produced a read.
+	 * The EVM this node runs on: reads (`eth_call`, `eth_estimateGas`,
+	 * `eth_fillTransaction`'s estimation) and, when the engine implements
+	 * {@link Engine.transact}, its transactions too. Default: `@ethereumjs/evm`,
+	 * i.e. exactly what the node has always run, on both halves.
+	 *
+	 * An engine that implements only `call` leaves transactions on the node's own
+	 * `@ethereumjs/vm`, so such a node runs TWO EVMs — read `node.engine` to know
+	 * which one was installed.
 	 *
 	 * An engine is passed as an OBJECT, never named by a string: the core must not
 	 * reference engines it does not use, or a consumer of the JS-only path would
 	 * pay (in bundle size) for an engine they never import. See
 	 * `docs/adr/0006-the-engine-is-an-injected-object-not-a-named-string.md`.
 	 */
-	engine?: ReadEngine;
+	engine?: Engine;
 }
 
 /** A full genesis account (all fields optional except an implicit zero default). */
@@ -296,12 +433,13 @@ export interface SlimNode {
 	/** The sender mode this node was created with. */
 	readonly senderMode: SenderMode;
 	/**
-	 * The engine this node runs READS on (`eth_call`, `eth_estimateGas`,
-	 * `eth_fillTransaction`'s estimation) — `{id: '@ethereumjs/evm'}` unless an
-	 * engine was injected. It is NOT what executed transactions: those always run
-	 * on `@ethereumjs/vm`, so a receipt can never be attributed to this engine.
+	 * The engine this node was created with — `{id: '@ethereumjs/evm'}` unless one
+	 * was injected. It answers this node's reads, and its transactions too when it
+	 * implements {@link Engine.transact}; an engine that implements only the read
+	 * half leaves transactions on the node's own `@ethereumjs/vm`, so on such a node
+	 * a receipt cannot be attributed to this id.
 	 */
-	readonly readEngine: ReadEngineInfo;
+	readonly engine: EngineInfo;
 	/** Stop timers / release resources. */
 	dispose(): Promise<void>;
 }

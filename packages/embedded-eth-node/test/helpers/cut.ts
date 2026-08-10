@@ -180,7 +180,7 @@ const cut: CodeUnderTest = {
 					Number(ctx.params.sumTo ?? 200000),
 				);
 				results.number = out.number;
-				results.readEngineId = out.readEngineId;
+				results.engineId = out.engineId;
 				// Every plain field the worker-entry proxy must forward, read back
 				// through comlink so an omission fails here instead of silently
 				// reading `undefined` in a consumer.

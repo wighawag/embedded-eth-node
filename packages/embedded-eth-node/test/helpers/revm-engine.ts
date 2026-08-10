@@ -4,7 +4,7 @@
  *
  * What this pins:
  *   1. A node built with `createRevmEngine({wasm})` runs its reads on revm and
- *      says so (`node.readEngine.id`).
+ *      says so (`node.engine.id`).
  *   2. `eth_call` and `eth_estimateGas` return the SAME return data and the SAME
  *      gas as the default engine, for the same calls on the same state — and the
  *      execution gas matches the reference numbers (`number()` 2446,
@@ -42,7 +42,7 @@
  *   7b. An engine asked for a READ before a node bound it refuses, rather than
  *      guessing a fork and costing the read under rules the caller never chose.
  *      `createNode()` connects first, so only a consumer hand-driving a
- *      `ReadEngine` reaches it, and only this assertion keeps it alive.
+ *      `Engine` reaches it, and only this assertion keeps it alive.
  *   8. One engine instance serves ONE node: handing the same engine to a second
  *      `createNode()` is refused, rather than silently re-pointing the first
  *      node's reads at the second node's state.
@@ -90,14 +90,14 @@ import {SimpleStateManagerStore} from '../../src/revm-state-store.js';
 // whether the node's own arithmetic gates EIP-3860 by fork, so a mirror would
 // only measure the mirror. See ../../src/intrinsic-gas.ts.
 import {intrinsicGas} from '../../src/intrinsic-gas.js';
-import {createEthereumjsReadEngine} from '../../src/engine.js';
-import type {ReadEngine} from '../../src/index.js';
+import {createEthereumjsEngine} from '../../src/engine.js';
+import type {Engine} from '../../src/index.js';
 import {Common, Mainnet} from '@ethereumjs/common';
 // The node's OWN 'none'-mode state manager, not a stock `SimpleStateManager`: the
 // revm store reads storage through its per-account OVERLAY representation and
 // refuses anything else, loudly, rather than reporting every slot as zero.
 import {OverlayStorageStateManager} from '../../src/state-manager.js';
-import {createEVM} from '@ethereumjs/evm';
+import {createVM} from '@ethereumjs/vm';
 import {createBlock} from '@ethereumjs/block';
 import {createLegacyTx} from '@ethereumjs/tx';
 import {Account, createAddressFromString} from '@ethereumjs/util';
@@ -138,6 +138,30 @@ const chain = {
 	nativeCurrency: {name: 'E', symbol: 'E', decimals: 18},
 	rpcUrls: {default: {http: []}},
 } as const;
+
+/**
+ * The DEFAULT engine, built by hand on a given state manager for the seam-level
+ * probes below (the ones that drive an engine DIRECTLY, with no node above it).
+ *
+ * It wraps a whole `VM` rather than a bare `EVM` because the engine seam now covers
+ * transactions as well as reads, and the transaction half is `runTx`, which takes
+ * the VM. The mock blockchain is the node's own shape (`src/node.ts`); no probe here
+ * executes `BLOCKHASH`, and none of them transacts.
+ */
+async function defaultEngineOn(
+	stateManager: OverlayStorageStateManager,
+	common: Common,
+): Promise<Engine> {
+	const blockchain: any = {
+		getBlock: async () => undefined,
+		putBlock: async () => {},
+		shallowCopy: () => blockchain,
+	};
+	return createEthereumjsEngine({
+		vm: await createVM({common, stateManager, blockchain}),
+		stateManager,
+	});
+}
 
 /**
  * Restates the node's intrinsic-gas formula for a CALL, so decomposing an
@@ -194,10 +218,7 @@ const VALUE_SINK_ADDR = '0x0000000000000000000000000000000000005151';
 /** What the funded caller starts with on both nodes (see {@link nodeWith}). */
 const FUNDED_BALANCE = 10n ** 24n;
 
-async function nodeWith(
-	engine?: ReadEngine,
-	extra: Record<string, unknown> = {},
-) {
+async function nodeWith(engine?: Engine, extra: Record<string, unknown> = {}) {
 	const node = await createNode({
 		chainId: CHAIN_ID,
 		miningConfig: {type: 'auto'},
@@ -228,8 +249,8 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 
 	const def = await nodeWith();
 	const revm = await nodeWith(fromAsset);
-	out.defaultEngineId = def.node.readEngine.id;
-	out.revmEngineId = revm.node.readEngine.id;
+	out.defaultEngineId = def.node.engine.id;
+	out.revmEngineId = revm.node.engine.id;
 	out.revmEngineIdExpected = REVM_ENGINE_ID;
 
 	// Deploy the SAME contract on both nodes, through viem — which estimates gas
@@ -564,7 +585,7 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 	// Above the seam the two engines are indistinguishable BY DESIGN: the node
 	// flattens every engine failure into one `RpcError(3, 'execution reverted')`,
 	// so the section above can check the SHAPE of a rejection but never its
-	// words. The words exist one layer down, on `ReadEngine.call`'s result, and
+	// words. The words exist one layer down, on `Engine.call`'s result, and
 	// the two engines are meant to differ there:
 	//
 	//   `@ethereumjs/evm` : `insufficient balance` (EVMError, thrown by
@@ -599,12 +620,9 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 			createAddressFromString(account.address),
 			new Account(0n, SEAM_BALANCE),
 		);
-		let engine: ReadEngine;
+		let engine: Engine;
 		if (engineKind === 'default') {
-			engine = createEthereumjsReadEngine({
-				evm: await createEVM({common: seamCommon, stateManager}),
-				stateManager,
-			});
+			engine = await defaultEngineOn(stateManager, seamCommon);
 		} else {
 			engine = await createRevmEngine({wasm: bundlerResolvedWasm});
 			await engine.connect!({
@@ -784,7 +802,7 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 		method: 'evm_setCode',
 		params: [BLOCKHASH_PROBE_ADDR, BLOCKHASH_PROBE_CODE],
 	});
-	out.runtimeUrlEngineId = urlNode.node.readEngine.id;
+	out.runtimeUrlEngineId = urlNode.node.engine.id;
 	// One block, so `blockhash(number - 1)` names the genesis block rather than
 	// underflowing past the start of the chain.
 	await urlNode.node.mine();
@@ -818,7 +836,7 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 	// `call()` needs the node's `Common` to compute the intrinsic gas it SUBTRACTS
 	// from revm's `totalGasSpent`, and `connect()` is what binds it. The seam always
 	// connects first, so this is unreachable through `createNode()` and only a
-	// consumer hand-driving a `ReadEngine` reaches it — which is exactly why it is
+	// consumer hand-driving an `Engine` reaches it — which is exactly why it is
 	// asserted rather than merely written: a refusal nothing measures is one
 	// refactor away from becoming a read costed at a fork the caller never chose.
 	// Same shape as the store's own unbound guard (../../src/revm-state-store.ts),
@@ -1339,10 +1357,7 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 		// Each engine on its OWN empty state, because a CREATE derives its address
 		// from the sender's nonce and neither engine may see the other's deploy.
 		const defaultState = new OverlayStorageStateManager();
-		const defaultEngine = createEthereumjsReadEngine({
-			evm: await createEVM({common, stateManager: defaultState}),
-			stateManager: defaultState,
-		});
+		const defaultEngine = await defaultEngineOn(defaultState, common);
 		const revmEngine = await createRevmEngine({wasm: sharedModule});
 		await revmEngine.connect!({
 			stateManager: new OverlayStorageStateManager(),

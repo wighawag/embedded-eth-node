@@ -9,7 +9,7 @@ import {wrap, proxy} from 'comlink';
 import type {WorkerApi} from './worker-entry.js';
 import type {
 	NodeOptions,
-	ReadEngineInfo,
+	EngineInfo,
 	SenderMode,
 	SlimNode,
 	RequestArguments,
@@ -39,7 +39,7 @@ export async function createWorkerNode(
 	const {worker, ...nodeOptions} = opts;
 	// AN ENGINE CANNOT CROSS THIS BOUNDARY, and says so. `WorkerNodeOptions`
 	// extends `NodeOptions`, so `engine` is structurally in scope here, but these
-	// options are STRUCTURED-CLONED into the Worker and a `ReadEngine` is a
+	// options are STRUCTURED-CLONED into the Worker and an `Engine` is a
 	// function-bearing object: comlink would throw an opaque `DataCloneError` from
 	// deep inside its own postMessage, which is exactly the plausible-looking
 	// failure this package's honest-edge convention exists to prevent. Cloning
@@ -62,18 +62,18 @@ export async function createWorkerNode(
 	// precisely what ADR 0006 refuses (a JS-only consumer would pay for revm).
 	if ((nodeOptions as NodeOptions).engine !== undefined) {
 		throw new Error(
-			"embedded-eth-node/worker-client: `engine` is not supported by createWorkerNode(). The node's options are structured-cloned into the Worker and a ReadEngine is a function-bearing object, so it cannot be cloned across the thread boundary (comlink would report only a DataCloneError). " +
+			"embedded-eth-node/worker-client: `engine` is not supported by createWorkerNode(). The node's options are structured-cloned into the Worker and an Engine is a function-bearing object, so it cannot be cloned across the thread boundary (comlink would report only a DataCloneError). " +
 				'Build the engine INSIDE the Worker instead: write your own worker module that calls createNode({engine: await createRevmEngine({wasm})}) and comlink-exposes the node, then drive it with the same client code. ' +
 				'Or run the engine on the main thread with createNode().',
 		);
 	}
 	const api = wrap<WorkerApi>(worker);
 	const remote = await api.createNode(nodeOptions);
-	// stateMode/senderMode/readEngine are plain values on the node; over comlink
+	// stateMode/senderMode/engine are plain values on the node; over comlink
 	// they read as promises.
 	const stateMode = (await (remote as any).stateMode) as 'none' | 'trie';
 	const senderMode = (await (remote as any).senderMode) as SenderMode;
-	const readEngine = (await (remote as any).readEngine) as ReadEngineInfo;
+	const engineInfo = (await (remote as any).engine) as EngineInfo;
 
 	return {
 		request: (args: RequestArguments) =>
@@ -83,7 +83,7 @@ export async function createWorkerNode(
 		loadState: (s: SerializedState) => remote.loadState(s as any),
 		stateMode,
 		senderMode,
-		readEngine,
+		engine: engineInfo,
 		getStateRoot: () => (remote as any).getStateRoot() as Promise<string>,
 		onNewHead(cb) {
 			// The callback must cross the thread boundary as a comlink proxy.

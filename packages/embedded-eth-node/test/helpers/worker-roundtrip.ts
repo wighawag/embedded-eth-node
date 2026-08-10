@@ -5,7 +5,7 @@
  *      returns the same {request, mine, ...} shape as createNode).
  *   2. Round-trip latency over comlink (send raw tx sync + read) is measured.
  *   2b. The node's IDENTITY fields survive the boundary as plain values — in
- *      particular `readEngine`, which is what a bug report quotes to say which
+ *      particular `engine`, which is what a bug report quotes to say which
  *      EVM produced a result. It is proxied by worker-entry.ts and nothing else
  *      asserts it round-trips (the same omission silently dropped `senderMode`;
  *      see work/notes/observations/worker-entry-drops-sendermode.md).
@@ -141,14 +141,14 @@ export async function workerRoundtrip(workerUrl: string, sumTo: number) {
 
 	// Read back THROUGH comlink: every plain SlimNode field the worker-entry
 	// proxy is supposed to forward. An omission here reads as `undefined`.
-	const readEngineId = node.readEngine?.id;
+	const engineId = node.engine?.id;
 	const senderMode = node.senderMode;
 	const stateMode = node.stateMode;
 
 	await node.dispose();
 	return {
 		number,
-		readEngineId,
+		engineId,
 		senderMode,
 		stateMode,
 		roundtripAvgMs,

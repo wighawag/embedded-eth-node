@@ -2,9 +2,9 @@
  * node.ts — the execution-only EIP-1193 node.
  *
  * Design: sits BETWEEN bare `EVM.runCall` (no blocks/receipts/logs) and a full
- * node (heavy). Uses `@ethereumjs/vm`'s `runTx` + a minimal mock blockchain with
- * `SimpleStateManager` (plain Maps, NO trie, NO state-root) and NONE of the
- * node / RPC / mempool / signing bloat.
+ * node (heavy). Runs on `@ethereumjs/vm` through the engine seam (see ./engine.ts)
+ * + a minimal mock blockchain with `SimpleStateManager` (plain Maps, NO trie, NO
+ * state-root) and NONE of the node / RPC / mempool / signing bloat.
  *
  * It is EXECUTION-ONLY:
  *   - NO account methods (eth_sendTransaction, eth_accounts, eth_sign,
@@ -12,21 +12,17 @@
  *   - Unsupported methods throw a real JSON-RPC method-not-found (-32601) — it
  *     NEVER fakes a success.
  *
- * Correctness fixes baked in from day one:
- *   - Legacy-safe `effectiveGasPrice`
- *     (tx.maxFeePerGas ? min(maxPriorityFeePerGas, maxFeePerGas-baseFee)+baseFee
- *      : tx.gasPrice) — reading maxFeePerGas unconditionally throws on legacy txs.
- *
- * The READ path (`eth_call`, `eth_estimateGas`, `eth_fillTransaction`'s
- * estimation) runs on a swappable ENGINE (see ./engine.ts), defaulting to this
- * VM's own `@ethereumjs/evm`. Transactions are NOT routed through it — they run
- * on `@ethereumjs/vm` whatever engine is installed, which is why the node reports
- * `readEngine` rather than "the engine".
+ * BOTH halves of execution run on a swappable ENGINE (see ./engine.ts), defaulting
+ * to this VM's own `@ethereumjs/evm`: the READ path (`eth_call`,
+ * `eth_estimateGas`, `eth_fillTransaction`'s estimation) through `engine.call`,
+ * and the MINING path through `engine.transact`. What stays the node's either way:
+ * block construction, `cumulativeGasUsed`, receipt assembly, the RPC layer,
+ * transaction parsing and sender recovery.
  *
  * Transport-agnostic: just `request()` (async) + mine/dump/load. Knows nothing
  * about Workers — see ./worker-entry.ts for the optional comlink wrapper.
  */
-import {createVM, runTx, type VM} from '@ethereumjs/vm';
+import {createVM, type VM} from '@ethereumjs/vm';
 import {MerkleStateManager} from '@ethereumjs/statemanager';
 import {OverlayStorageStateManager} from './state-manager.js';
 import {Common, Mainnet, Hardfork} from '@ethereumjs/common';
@@ -51,8 +47,13 @@ function hexToBytes(s: string): Uint8Array {
 	return hexToBytesStrict((s.startsWith('0x') ? s : '0x' + s) as `0x${string}`);
 }
 import {keccak_256} from '@noble/hashes/sha3.js';
-import {connectReadEngine, createEthereumjsReadEngine} from './engine.js';
-// The read engine reports EXECUTION gas and the node adds intrinsic gas on top;
+import {
+	connectEngine,
+	createEthereumjsEngine,
+	transacts,
+	type TransactingEngine,
+} from './engine.js';
+// The engine reports EXECUTION gas for a read and the node adds intrinsic gas on top;
 // an engine that charges intrinsic gas itself (revm) subtracts the SAME formula,
 // so it has exactly one home. See ./intrinsic-gas.ts.
 import {intrinsicGas as intrinsicGasOf} from './intrinsic-gas.js';
@@ -60,7 +61,7 @@ import {
 	RpcError,
 	type NodeOptions,
 	type ReadCallResult,
-	type ReadEngine,
+	type Engine,
 	type SenderMode,
 	type SlimNode,
 	type RequestArguments,
@@ -91,7 +92,7 @@ function txHashOf(tx: TypedTransaction): string {
  * get the REAL estimate (verified against runTx totalGasSpent — exact, no fudge).
  *
  * `common` is threaded rather than captured, and it is THE node's `Common` — the
- * same instance the read engine is handed at `connect`, so the two callers of the
+ * same instance the engine is handed at `connect`, so the two callers of the
  * shared formula cannot name different forks. See ./intrinsic-gas.ts.
  */
 function intrinsicGas(
@@ -175,8 +176,9 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 		await commitIfTrie();
 	}
 
-	// Minimal mock blockchain: runTx only needs getBlock (for BLOCKHASH) +
-	// shallowCopy. In 'none' mode we never compute a canonical state root.
+	// Minimal mock blockchain: `runTx` (inside the default engine) only needs
+	// getBlock (for BLOCKHASH) + shallowCopy. In 'none' mode we never compute a
+	// canonical state root.
 	const blockStore = new Map<number, StoredBlock>();
 	const blockByHash = new Map<string, number>();
 	const receipts = new Map<string, SerializedReceipt>();
@@ -203,20 +205,31 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 		blockchain: mockBlockchain,
 	});
 
-	// The READ engine: what `eth_call` / `eth_estimateGas` / `eth_fillTransaction`
-	// execute on. Default = this VM's own `@ethereumjs/evm`. An injected engine is
-	// connected HERE, during construction, so an engine that cannot serve this
-	// node's configuration throws now rather than at the first opcode. Note the
-	// scope: transactions run on `@ethereumjs/vm` whatever engine is installed.
+	// THE ENGINE: what `eth_call` / `eth_estimateGas` / `eth_fillTransaction` read
+	// on AND what the mining path executes transactions on. Default = this VM's own
+	// `@ethereumjs/evm`, on both halves. An injected engine is connected HERE, during
+	// construction, so an engine that cannot serve this node's configuration throws
+	// now rather than at the first opcode.
 	//
 	// `??` is the ONLY place the default is chosen, and it reads an ABSENT option,
 	// never a failure: an engine that was supplied and cannot come up fails the
-	// construction (see connectReadEngine). There is deliberately no path from
+	// construction (see connectEngine). There is deliberately no path from
 	// "your engine did not work" to "here is a node on the default engine".
-	const readEngine: ReadEngine =
-		options.engine ??
-		createEthereumjsReadEngine({evm: vm.evm, stateManager: sm});
-	await connectReadEngine(readEngine, {
+	const defaultEngine = createEthereumjsEngine({vm, stateManager: sm});
+	const engine: Engine = options.engine ?? defaultEngine;
+	// THE TRANSACTION HALF, when the installed engine has not grown one. This is NOT
+	// the silent fallback `connectEngine` exists to refuse: that one would answer a
+	// consumer's chosen operation on an engine they did not choose. An engine with no
+	// `transact` never claimed the operation, and leaving its transactions on
+	// `@ethereumjs/vm` is exactly what every non-default engine did before the seam
+	// covered transactions — which is why it is what preserves behaviour. See
+	// `Engine.transact` in ./types.ts for why the method is optional at all, and note
+	// that a PRESENT-but-broken `transact` is refused at construction rather than
+	// landing here.
+	const transactionEngine: TransactingEngine = transacts(engine)
+		? engine
+		: defaultEngine;
+	await connectEngine(engine, {
 		stateManager: sm,
 		common,
 		stateMode,
@@ -321,26 +334,6 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 		parentHash = block.hash();
 	}
 
-	/**
-	 * Legacy-safe effective gas price. Type-0 (legacy) txs have no maxFeePerGas, so
-	 * reading it unconditionally throws ("Cannot mix BigInt and other types"). Branch
-	 * on tx type so legacy receipts compute their effectiveGasPrice correctly.
-	 */
-	function effectiveGasPrice(
-		tx: TypedTransaction,
-		blockBaseFee: bigint = baseFeePerGas,
-	): bigint {
-		const anyTx = tx as any;
-		if (anyTx.maxFeePerGas !== undefined && anyTx.maxFeePerGas !== null) {
-			const maxFee: bigint = anyTx.maxFeePerGas;
-			const maxPrio: bigint = anyTx.maxPriorityFeePerGas ?? 0n;
-			const tip =
-				maxFee - blockBaseFee < maxPrio ? maxFee - blockBaseFee : maxPrio;
-			return tip + blockBaseFee;
-		}
-		return anyTx.gasPrice as bigint;
-	}
-
 	async function executeAndMine(
 		txs: {tx: TypedTransaction; raw: Uint8Array}[],
 	): Promise<{blockNumber: number; blockHash: string; txHashes: string[]}> {
@@ -376,40 +369,36 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 		let txIndex = 0;
 
 		for (const {tx, raw} of txs) {
-			const res = await runTx(vm, {
-				tx,
-				block,
-				skipBlockGasLimitValidation: true,
-				skipHardForkValidation: true,
-			});
-			cumulativeGasUsed += res.totalGasSpent;
+			// THE MINING PATH GOES THROUGH THE ENGINE. What comes back is the neutral
+			// `TransactionResult` — everything a receipt needs from an EVM and nothing
+			// else — so every line below is the NODE's own half: the block it landed in,
+			// the running `cumulativeGasUsed`, log positions, and the receipt itself.
+			const res = await transactionEngine.transact({tx, block});
+			cumulativeGasUsed += res.gasUsed;
 			const h = txHashOf(tx);
 			const from = tx.getSenderAddress().toString();
 			const to = (tx as any).to ? (tx as any).to.toString() : null;
-			const created = res.createdAddress ? res.createdAddress.toString() : null;
-			const egp = effectiveGasPrice(tx, blockBaseFee);
+			const created = res.createdAddress ? hex(res.createdAddress) : null;
 			// Track touched accounts for the trie-mode dump (sender, recipient, created,
 			// and any account that emitted a log — that set covers what changed).
 			touchedAccounts.add(from);
 			if (to) touchedAccounts.add(to);
 			if (created) touchedAccounts.add(created);
-			for (const log of res.execResult.logs ?? [])
-				touchedAccounts.add(hex(log[0]));
+			for (const log of res.logs) touchedAccounts.add(hex(log.address));
 
-			const rcptLogs: SerializedLog[] =
-				res.execResult.logs?.map((log, i) => {
-					const sl: SerializedLog = {
-						address: hex(log[0]),
-						topics: log[1].map((t) => hex(t)),
-						data: hex(log[2]),
-						blockNumber,
-						blockHash,
-						transactionHash: h,
-						transactionIndex: txIndex,
-						logIndex: blockLogs.length + i,
-					};
-					return sl;
-				}) ?? [];
+			const rcptLogs: SerializedLog[] = res.logs.map((log, i) => {
+				const sl: SerializedLog = {
+					address: hex(log.address),
+					topics: log.topics.map((t) => hex(t)),
+					data: hex(log.data),
+					blockNumber,
+					blockHash,
+					transactionHash: h,
+					transactionIndex: txIndex,
+					logIndex: blockLogs.length + i,
+				};
+				return sl;
+			});
 			blockLogs.push(...rcptLogs);
 
 			const receipt: SerializedReceipt = {
@@ -421,12 +410,12 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 				to,
 				contractAddress: created,
 				cumulativeGasUsed: numHex(cumulativeGasUsed),
-				gasUsed: numHex(res.totalGasSpent),
-				effectiveGasPrice: numHex(egp),
-				status: (res.receipt as any).status === 0 ? 0 : 1,
+				gasUsed: numHex(res.gasUsed),
+				effectiveGasPrice: numHex(res.effectiveGasPrice),
+				status: res.status,
 				type: (tx as any).type ?? 0,
 				logs: rcptLogs,
-				logsBloom: hex(res.bloom.bitvector),
+				logsBloom: hex(res.logsBloom),
 			};
 			receipts.set(h, receipt);
 
@@ -670,10 +659,11 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 		};
 	}
 
-	// ---------- eth_call / estimateGas through the READ ENGINE (no signing) ----------
+	// ---------- eth_call / estimateGas through the ENGINE's READ half (no signing) ----
 	/**
-	 * The node's single pure-read helper, and the engine seam: it normalises RPC
-	 * params into a {@link ReadCallRequest} and hands them to the read engine.
+	 * The node's single pure-read helper, and the read half of the engine seam: it
+	 * normalises RPC params into a {@link ReadCallRequest} and hands them to the
+	 * engine's `call`.
 	 * Three dispatcher cases use it (`eth_call`, `eth_estimateGas` and
 	 * `eth_fillTransaction`'s estimation).
 	 *
@@ -694,7 +684,7 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 				: new Uint8Array();
 		const value = params.value ? BigInt(params.value) : 0n;
 		const gasLimit = params.gas ? BigInt(params.gas) : 30_000_000n;
-		return readEngine.call({
+		return engine.call({
 			from,
 			to,
 			data,
@@ -1198,7 +1188,7 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 		senderMode,
 		// Identity only: the engine object itself stays internal, so the reading is a
 		// plain value that survives a Worker/comlink boundary unchanged.
-		readEngine: {id: readEngine.id},
+		engine: {id: engine.id},
 		async getStateRoot() {
 			if (stateMode !== 'trie') {
 				throw new RpcError(

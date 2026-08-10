@@ -1,11 +1,13 @@
 /**
  * engine-seam.spec.ts — the EVM engine seam, in real browsers:
- *   - the DEFAULT engine is `@ethereumjs/evm`, exposed as the node's READ engine
+ *   - the DEFAULT engine is `@ethereumjs/evm`, exposed as the node's `engine`
  *   - an injected engine serves ALL THREE read-path callers (eth_call,
  *     eth_estimateGas, eth_fillTransaction's estimation)
  *   - the engine reports EXECUTION gas; the node adds intrinsic gas
- *   - transactions do NOT go through the read engine
+ *   - an engine with no transaction half leaves transactions on @ethereumjs/vm
  *   - the default engine keeps the EIP-2929 reset + pure-read checkpoint/revert
+ *   - an engine that DOES transact owns the mining path, and the receipt is built
+ *     from the neutral transaction result it returned
  */
 import {test, expect} from '@playwright/test';
 import {fileURLToPath} from 'node:url';
@@ -15,7 +17,7 @@ import {mountHarness} from 'playwright-browser-harness';
 const here = dirname(fileURLToPath(import.meta.url));
 const cut = resolve(here, './helpers/cut.ts');
 
-test('engine seam (default @ethereumjs/evm, injected engine, read-only scope)', async ({
+test('engine seam (default @ethereumjs/evm, injected engine, reads and transactions)', async ({
 	page,
 }) => {
 	const h = await mountHarness(page, {
@@ -31,15 +33,15 @@ test('engine seam (default @ethereumjs/evm, injected engine, read-only scope)', 
 
 	expect(r.errors).toEqual([]);
 
-	// the default engine, named as the READ engine
-	expect(c.defaultReadEngineId).toBe('@ethereumjs/evm');
+	// the default engine, named as THE engine
+	expect(c.defaultEngineId).toBe('@ethereumjs/evm');
 	// the pure-read invariants the default engine owns
 	expect(c.estimateIncrementStable).toBe(true);
 	expect(c.callDidNotMutateState).toBe(true);
 	expect(c.number).toBe('0');
 
 	// an injected engine is what the read path actually runs on
-	expect(c.stubReadEngineId).toBe('test-stub');
+	expect(c.stubEngineId).toBe('test-stub');
 	expect(c.stubConnectCount).toBe(1);
 	expect(c.stubConnectedStateMode).toBe('none');
 	expect(c.stubConnectedStateManagerUsable).toBe(true);
@@ -50,7 +52,8 @@ test('engine seam (default @ethereumjs/evm, injected engine, read-only scope)', 
 	// eth_call + eth_estimateGas + eth_fillTransaction = three engine calls
 	expect(c.stubCallsSeen).toBe(3);
 
-	// transactions run on @ethereumjs/vm, NOT on the read engine
+	// an engine implementing only the READ half leaves transactions on
+	// @ethereumjs/vm: no extra engine `call`, and a real receipt all the same
 	expect(c.stubCallsAfterTx).toBe(3);
 	expect(c.stubTxStatus).toBe('success');
 	expect(c.stubTxGasUsed).toBe('21000');
@@ -58,6 +61,37 @@ test('engine seam (default @ethereumjs/evm, injected engine, read-only scope)', 
 
 	// a reverting engine result is still an honest execution-reverted error
 	expect(c.revertingCall).toBe('threw:3:0xdeadbeef');
+
+	// ---- the MINING PATH runs on the engine ----
+	// The engine was asked to execute the transaction the node parsed, once, with
+	// the block it is mined in and the node's own sender.
+	expect(c.engineTxSeen).toBe(1);
+	expect(c.engineTxHashSeen).toBe(c.engineTxHashExpected);
+	expect(c.engineTxSenderSeen).toBe(c.engineTxSenderExpected);
+	expect(c.engineTxToSeen).toBe('0x0000000000000000000000000000000000001234');
+	expect(c.engineTxBlockNumberSeen).toBe('1');
+	expect(c.engineTxGasLimitSeen).toBe('21000');
+	// ...and the receipt is assembled from what the ENGINE reported. None of these
+	// numbers is one @ethereumjs/vm would produce for a 21000-gas transfer, so a
+	// node that still ran `runTx` itself would fail here rather than pass quietly.
+	expect(c.engineRcptStatus).toBe('success');
+	expect(c.engineRcptGasUsed).toBe(c.engineRcptGasUsedExpected);
+	expect(c.engineRcptEffectiveGasPrice).toBe(
+		c.engineRcptEffectiveGasPriceExpected,
+	);
+	expect(c.engineRcptLogsBloom).toBe(c.engineRcptLogsBloomExpected);
+	expect(c.engineRcptLogCount).toBe(1);
+	expect(c.engineRcptLogAddress).toBe(c.engineRcptLogAddressExpected);
+	expect(c.engineRcptLogTopics).toEqual(c.engineRcptLogTopicsExpected);
+	expect(c.engineRcptLogData).toBe(c.engineRcptLogDataExpected);
+	expect(c.engineRcptLogCount).toBe(c.engineBlockLogCount);
+	// ...while the node keeps its own half: `cumulativeGasUsed` is the node's
+	// accumulation over the block (one tx here, so the engine's gas used), the
+	// created address is absent for a plain transfer, and this engine moved no
+	// ether, so the node's state says the recipient got none.
+	expect(c.engineRcptCumulativeGasUsed).toBe(c.engineRcptGasUsedExpected);
+	expect(c.engineRcptContractAddress).toBe(null);
+	expect(c.engineTxTargetBalance).toBe('0');
 
 	await h.dispose();
 });

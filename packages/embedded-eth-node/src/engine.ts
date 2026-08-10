@@ -1,40 +1,67 @@
 /**
- * engine.ts — the node-side half of the engine seam: the DEFAULT read engine
- * (`@ethereumjs/evm` via `runCall`), plus {@link connectReadEngine}, the one
- * place an engine is brought up.
+ * engine.ts — the node-side half of the engine seam: the DEFAULT engine
+ * (`@ethereumjs/evm` via `runCall` for reads, `@ethereumjs/vm`'s `runTx` for
+ * transactions), plus {@link connectEngine}, the one place an engine is brought
+ * up.
  *
  * This is the engine the node uses when the consumer supplies none, and it is
- * exactly what the node's pure-read helper used to do inline. Everything
- * `@ethereumjs/evm` needs in order to make a call READ-ONLY lives HERE rather
- * than in the node above the seam — the checkpoint/revert and the EIP-2929
+ * exactly what the node's pure-read helper and its mining loop used to do inline.
+ * Everything `@ethereumjs/vm` needs in order to make a call READ-ONLY lives HERE
+ * rather than in the node above the seam — the checkpoint/revert and the EIP-2929
  * warm/access reset are both requirements of this EVM, not of "a read". An engine
  * that is structurally incapable of committing (revm's `call`) needs neither, and
  * the checkpoint is not free: `SimpleStateManager.checkpointSync()` copies all
  * three state maps and clones every account (0.384 ms per call at 2002 accounts,
  * larger than the whole revm read it would be wrapping). See
  * `docs/adr/0005-revm-reads-the-nodes-state-through-simplestatemanagers-stacks.md`.
+ *
+ * The same rule decides where the TRANSACTION half's ethereumjs-specific settings
+ * live: inside this module, at `transact` below.
  */
-import type {EVMInterface} from '@ethereumjs/evm';
+import {runTx, type VM} from '@ethereumjs/vm';
 import type {StateManagerInterface} from '@ethereumjs/common';
+import type {TypedTransaction} from '@ethereumjs/tx';
 import type {
+	Engine,
+	EngineContext,
 	ReadCallRequest,
 	ReadCallResult,
-	ReadEngine,
-	ReadEngineContext,
+	TransactionRequest,
+	TransactionResult,
 } from './types.js';
 
-/** The default engine's stable identifier, as reported by `node.readEngine.id`. */
+/** The default engine's stable identifier, as reported by `node.engine.id`. */
 export const ETHEREUMJS_ENGINE_ID = '@ethereumjs/evm';
 
 /**
- * Wrap the node's own `@ethereumjs/evm` as a read engine. Built by the node (it
- * needs the VM's EVM and the node's state manager), so it never needs `connect`.
+ * An {@link Engine} that implements BOTH operations, i.e. one the node can mine on.
+ * The default engine always is one; an injected engine is one only if it brought a
+ * `transact` (see {@link transacts}).
  */
-export function createEthereumjsReadEngine(deps: {
-	evm: EVMInterface;
+export type TransactingEngine = Engine & {
+	transact: NonNullable<Engine['transact']>;
+};
+
+/**
+ * Can this engine execute transactions? The same test `connectEngine` validates
+ * with, so "absent" and "broken" cannot be confused here: a non-function
+ * `transact` never reaches this point.
+ */
+export function transacts(engine: Engine): engine is TransactingEngine {
+	return typeof engine.transact === 'function';
+}
+
+/**
+ * Wrap the node's own `@ethereumjs/vm` as an engine, covering BOTH operations.
+ * Built by the node (it needs the VM and the node's state manager), so it never
+ * needs `connect`.
+ */
+export function createEthereumjsEngine(deps: {
+	vm: VM;
 	stateManager: StateManagerInterface;
-}): ReadEngine {
-	const {evm, stateManager} = deps;
+}): TransactingEngine {
+	const {vm, stateManager} = deps;
+	const evm = vm.evm;
 	return {
 		id: ETHEREUMJS_ENGINE_ID,
 		async call(request: ReadCallRequest): Promise<ReadCallResult> {
@@ -74,7 +101,93 @@ export function createEthereumjsReadEngine(deps: {
 				await stateManager.revert();
 			}
 		},
+
+		async transact(request: TransactionRequest): Promise<TransactionResult> {
+			// THE TWO SKIP FLAGS LIVE HERE, and nowhere else. They are what the node has
+			// always passed `runTx`, they are load-bearing (a mined transaction is
+			// validated differently without them), and they are `@ethereumjs/vm`'s OWN
+			// vocabulary:
+			//
+			//   skipBlockGasLimitValidation  the node mines one block per transaction and
+			//                                lets a client set any gas limit it likes;
+			//                                `runTx` otherwise refuses a transaction whose
+			//                                gas limit exceeds the block's.
+			//   skipHardForkValidation       skips re-checking the transaction's own
+			//                                hardfork-activation rules; the node builds
+			//                                every block on the ONE `Common` it created,
+			//                                so there is no second fork for a transaction
+			//                                to be valid under.
+			//
+			// WHY NOT A NEUTRAL REQUEST FIELD. Two reasons, and the second is the one
+			// that decides it. (1) They are one EVM's concepts: an engine that is not
+			// `@ethereumjs/*` has no `runTx` to hand them to, so a field on
+			// `TransactionRequest` would be a field every other engine must read and
+			// ignore. (2) Worse, it would be a PROMISE the next engine cannot keep:
+			// `revm-wasm` expresses the block-gas-limit relaxation as `disableBlockGasLimit`
+			// and REFUSES to combine it with committing, so an engine asked to honour a
+			// neutral `skipBlockGasLimitValidation` could only throw. A request field that
+			// one engine must refuse is not a neutral request field.
+			//
+			// The node loses nothing by their living here: it builds blocks at
+			// `blockGasLimit` and pins the fork itself, so what these buy is
+			// `@ethereumjs/vm`'s validation matching the node's own configuration. An
+			// engine with no equivalent simply does not have the checks to skip.
+			//
+			// NOTE that the conformance battery's reference `runTx` passes the same two
+			// flags, so dropping one here would NOT show up as a battery failure.
+			const res = await runTx(vm, {
+				tx: request.tx,
+				block: request.block,
+				skipBlockGasLimitValidation: true,
+				skipHardForkValidation: true,
+			});
+			return {
+				status: (res.receipt as any).status === 0 ? 0 : 1,
+				// `totalGasSpent` is NET of refunds (`gasRefund` is already subtracted),
+				// which is what a receipt reports and what the sender paid for.
+				gasUsed: res.totalGasSpent,
+				// The base fee of the block this transaction is IN, which is the node's
+				// own (it builds every block with one). `?? 0n` covers a pre-London header,
+				// where there is no base fee to add and a legacy transaction's price is its
+				// `gasPrice` regardless.
+				effectiveGasPrice: effectiveGasPrice(
+					request.tx,
+					request.block.header.baseFeePerGas ?? 0n,
+				),
+				logs: (res.execResult.logs ?? []).map(([address, topics, data]) => ({
+					address,
+					topics,
+					data,
+				})),
+				logsBloom: res.bloom.bitvector,
+				createdAddress: res.createdAddress?.bytes,
+			};
+		},
 	};
+}
+
+/**
+ * Legacy-safe effective gas price: what THIS engine charged the sender per gas.
+ *
+ * It lives behind the seam because the engine that executed the transaction is the
+ * engine that charged it, so the fee arithmetic has one implementation per engine
+ * and none in the node — an engine reporting a price it did not charge is a bug in
+ * that engine, not a disagreement between the node and itself.
+ *
+ * Type-0 (legacy) txs have no `maxFeePerGas`, so reading it unconditionally throws
+ * ("Cannot mix BigInt and other types"). Branch on the field so legacy receipts
+ * compute their `effectiveGasPrice` correctly.
+ */
+function effectiveGasPrice(tx: TypedTransaction, blockBaseFee: bigint): bigint {
+	const anyTx = tx as any;
+	if (anyTx.maxFeePerGas !== undefined && anyTx.maxFeePerGas !== null) {
+		const maxFee: bigint = anyTx.maxFeePerGas;
+		const maxPrio: bigint = anyTx.maxPriorityFeePerGas ?? 0n;
+		const tip =
+			maxFee - blockBaseFee < maxPrio ? maxFee - blockBaseFee : maxPrio;
+		return tip + blockBaseFee;
+	}
+	return anyTx.gasPrice as bigint;
 }
 
 /**
@@ -92,7 +205,7 @@ export function createEthereumjsReadEngine(deps: {
  *
  * Two ways an injected engine fails, both landing here at construction rather
  * than at the first opcode:
- *  1. it is not a `ReadEngine` at all (a stray object, a module namespace, a
+ *  1. it is not an `Engine` at all (a stray object, a module namespace, a
  *     forgotten `await` on `createRevmEngine()`) — otherwise the node comes up
  *     and dies at the first `eth_call` with a `not a function` TypeError that
  *     reads like a node bug;
@@ -105,22 +218,37 @@ export function createEthereumjsReadEngine(deps: {
  * message (not only as `cause`), because the engine is the only party that
  * knows WHY, and browser consoles routinely show a message without its cause.
  */
-export async function connectReadEngine(
-	engine: ReadEngine,
-	context: ReadEngineContext,
+export async function connectEngine(
+	engine: Engine,
+	context: EngineContext,
 ): Promise<void> {
 	if (typeof engine?.call !== 'function' || typeof engine?.id !== 'string') {
 		throw new Error(
-			`embedded-eth-node: the value passed as \`engine\` is not a ReadEngine — it must have a string \`id\` and a \`call(request)\` method (got ${describe(engine)}). ` +
+			`embedded-eth-node: the value passed as \`engine\` is not an Engine — it must have a string \`id\` and a \`call(request)\` method (got ${describe(engine)}). ` +
 				`The node does NOT fall back to the default @ethereumjs/evm engine, because a node running an engine you did not ask for is indistinguishable from one that works. ` +
 				`If you built it with an async factory (e.g. \`createRevmEngine()\`), await it first.`,
+		);
+	}
+	// `transact` is OPTIONAL (an engine may not have grown its write half yet) but a
+	// non-function `transact` is not that: it is a typo or a half-built engine, and
+	// treating it as "absent" would silently mine every transaction on
+	// `@ethereumjs/vm` while the consumer believes their engine is executing them.
+	// Same reasoning as the guard above, one method along.
+	if (
+		engine.transact !== undefined &&
+		typeof (engine as Engine).transact !== 'function'
+	) {
+		throw new Error(
+			`embedded-eth-node: the engine '${engine.id}' has a \`transact\` that is not a function (got ${typeof engine.transact}). ` +
+				`An engine may legitimately OMIT \`transact\` (its transactions then run on the node's own @ethereumjs/vm), but a broken one is not the same as an absent one: ` +
+				`the node would mine every transaction on @ethereumjs/vm while you believed this engine was executing them.`,
 		);
 	}
 	try {
 		await engine.connect?.(context);
 	} catch (err) {
 		throw new Error(
-			`embedded-eth-node: the read engine '${engine.id}' could not be connected, so the node was NOT created. ` +
+			`embedded-eth-node: the engine '${engine.id}' could not be connected, so the node was NOT created. ` +
 				`It is deliberately NOT replaced by the default @ethereumjs/evm engine: that node would work, return correct results, and run at a completely different speed from the one you asked for, silently. ` +
 				`Fix the configuration (this node is stateMode:'${context.stateMode}') or pass a different engine. Cause: ${message(err)}`,
 			{cause: err},
@@ -132,8 +260,8 @@ export async function connectReadEngine(
 function describe(value: unknown): string {
 	if (value === null) return 'null';
 	if (typeof value !== 'object') return typeof value;
-	if (typeof (value as ReadEngine).id === 'string') {
-		return `an object with id '${(value as ReadEngine).id}' and no call()`;
+	if (typeof (value as Engine).id === 'string') {
+		return `an object with id '${(value as Engine).id}' and no call()`;
 	}
 	return `an object with keys [${Object.keys(value as object).join(', ')}]`;
 }

@@ -7,13 +7,15 @@
  * This is the apples-to-apples comparison row vs ethereumjs-tuned and tevm: same
  * Counter, same 20 increments, same read + compute scenario.
  *
- * It also owns the row for the node with the REVM READ ENGINE installed — the
+ * It also owns the row for the node with the REVM ENGINE installed — the
  * configuration this feature recommends and the one nobody was measuring. Same
  * file because it is the same backend: same package, same send path, same
- * scenario, one option different (`createNode({engine})`). See
- * {@link ReadEngineChoice} below.
+ * scenario, one option different (`createNode({engine})`). That engine implements
+ * the seam's READ half only, so the row measures reads on revm and transactions on
+ * `@ethereumjs/vm`, which is why its label says "read engine". See
+ * {@link EngineChoice} below.
  */
-import {createNode, type ReadEngine, type SlimNode} from 'embedded-eth-node';
+import {createNode, type Engine, type SlimNode} from 'embedded-eth-node';
 import {createRevmEngine} from 'embedded-eth-node/revm';
 import {
 	createWalletClient,
@@ -79,7 +81,7 @@ type SendMode = 'recover' | 'trusted' | 'fabricated';
  * own dispatch, state adapter and RPC layer, which is what a consumer actually
  * ships and therefore what the README should cite.
  */
-type ReadEngineChoice = 'default' | 'revm';
+type EngineChoice = 'default' | 'revm';
 
 /**
  * A dummy signature for the 'fabricated' path.
@@ -101,7 +103,7 @@ const dummySignature = (from: `0x${string}`) =>
 
 function makeBackend(
 	mode: SendMode,
-	readEngine: ReadEngineChoice = 'default',
+	engineChoice: EngineChoice = 'default',
 ): EvmBackend {
 	let node: SlimNode;
 	let wallet: WalletClient;
@@ -146,14 +148,14 @@ function makeBackend(
 	 * shared across all of them, which is what the `wasm` option accepting a
 	 * compiled module is for: the wasm is compiled once per page, not per run.
 	 */
-	async function makeReadEngine(): Promise<ReadEngine | undefined> {
-		if (readEngine === 'default') return undefined;
+	async function makeEngine(): Promise<Engine | undefined> {
+		if (engineChoice === 'default') return undefined;
 		return createRevmEngine({wasm: await compiledRevmModule()});
 	}
 
 	return {
 		name:
-			readEngine === 'revm'
+			engineChoice === 'revm'
 				? 'embedded-eth-node + revm read engine (signed eth_sendRawTransactionSync, auto-mine)'
 				: {
 						recover:
@@ -171,7 +173,7 @@ function makeBackend(
 				miningConfig: {type: 'auto'},
 				initialBalances: {[account.address]: 10n ** 24n},
 				// `undefined` on the default rows, so they construct exactly as before.
-				engine: await makeReadEngine(),
+				engine: await makeEngine(),
 			});
 			const transport = custom(
 				{request: ({method, params}) => node.request({method, params})},

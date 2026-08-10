@@ -82,7 +82,7 @@ const collected: Record<string, unknown>[] = [];
  * WHAT THEY SAY, precisely: the same measurement immediately BEFORE that change
  * was 412.3 KB raw / 124.0 KB gzip, so adding a whole second EVM engine to the
  * package cost the default entry 0.1 KB — and that 0.1 KB is not revm. It is the
- * node-side `getBlockHash` accessor added to `ReadEngineContext` (real core code,
+ * node-side `getBlockHash` accessor added to `EngineContext` (real core code,
  * a few lines in `node.ts`). Zero bytes of `revm-wasm` are in this graph, which
  * is what the metafile check below states directly.
  *
@@ -90,7 +90,19 @@ const collected: Record<string, unknown>[] = [];
  * change that grows it, and say why in the changeset. A red assertion here means
  * either that or an accidental import into the core graph.
  *
- * RE-PINNED THREE TIMES SINCE. Most recent first:
+ * RE-PINNED FOUR TIMES SINCE. Most recent first:
+ *
+ * 416.3 -> 417.1 KB raw / 125.4 -> 125.7 KB gzip, by
+ * `re-widen-the-engine-seam-to-cover-transactions`: the engine seam widened from
+ * reads to reads AND transactions, so `src/engine.ts` now also holds the default
+ * engine's transaction operation (the `runTx` call the node used to make inline,
+ * its result mapped into the seam's neutral `TransactionResult`, and the
+ * legacy-safe `effectiveGasPrice` that moved down from `node.ts`) plus one more
+ * construction refusal (an engine whose `transact` is present but is not a
+ * function). The 0.8 KB is that mapping and that prose; the `runTx` import itself
+ * is not new to the graph, because `node.ts` already had it. It is paid by every
+ * consumer including the JS-only one, and it buys them the seam a second EVM plugs
+ * into. Still zero bytes of `revm-wasm`.
  *
  * 413.7 -> 416.3 KB raw / 124.6 -> 125.4 KB gzip, by
  * `re-layer-storage-as-per-account-maps-with-per-frame-diffs`:
@@ -115,7 +127,7 @@ const collected: Record<string, unknown>[] = [];
  *
  * `engine-seam-docs-and-honest-edges`: 412.4 -> 413.5 KB
  * raw / 124.1 -> 124.6 KB gzip. The 1.1 KB is the text of the node's engine
- * refusals (`connectReadEngine` in `src/engine.ts`: a bad engine object, and an
+ * refusals (`connectEngine` in `src/engine.ts`: a bad engine object, and an
  * engine whose `connect` throws, both fail construction rather than silently
  * falling back to the default engine). It is prose in the core bundle, paid by
  * every consumer including the JS-only one, and it is the feature: an error that
@@ -126,7 +138,7 @@ const collected: Record<string, unknown>[] = [];
  * carries 1% of slack because the zlib shipped with different Node builds does
  * not compress byte-identically, which is noise rather than growth.
  */
-const DEFAULT_ENTRY_BASELINE = {rawKB: 416.3, gzipKB: 125.4};
+const DEFAULT_ENTRY_BASELINE = {rawKB: 417.1, gzipKB: 125.7};
 const GZIP_SLACK = 1.01;
 
 // Build + serve once for the whole file (the cut contains all backends).
@@ -330,7 +342,7 @@ test('bundle size per backend (raw + gzip)', async () => {
 	console.log('\n=== bundle sizes ===\n', JSON.stringify(sizes, null, 2));
 
 	// THE DEFAULT ENTRY HAS NOT GROWN. `embedded-eth-node/revm` is a separate
-	// entry point and the core references only the `ReadEngine` TYPE (erased at
+	// entry point and the core references only the `Engine` TYPE (erased at
 	// build time), so a consumer who does not opt in ships exactly what they
 	// shipped before revm existed.
 	expect(

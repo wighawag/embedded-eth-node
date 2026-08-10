@@ -192,7 +192,7 @@ export class SimpleStateManagerStore implements StateStore {
 	 * rebinding would re-point an ALREADY-RUNNING node's reads at a different
 	 * node's state — the first node would then answer every `eth_call` from the
 	 * second node's accounts, with plausible values and no error. The seam
-	 * documents `connect` as called exactly once (see `ReadEngine.connect` in
+	 * documents `connect` as called exactly once (see `Engine.connect` in
 	 * ./types.ts), so a second call is a consumer sharing one engine across nodes,
 	 * and it fails at the second construction rather than at the first wrong read.
 	 */

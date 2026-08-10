@@ -17,7 +17,7 @@
  * fork-dependent term, so both callers have to name the same fork — and the
  * cheapest way to guarantee that is not to compare two names but to pass ONE
  * OBJECT. `node.ts` builds the node's `Common` and hands that very instance to
- * the engine through the seam (`ReadEngineContext.common`), so the two callers
+ * the engine through the seam (`EngineContext.common`), so the two callers
  * are asking the SAME `Common` the same question and cannot disagree even in
  * principle. It is also the right authority rather than merely a convenient one:
  * `common.isActivatedEIP()` is the table `@ethereumjs/vm`'s `runTx` consults, so

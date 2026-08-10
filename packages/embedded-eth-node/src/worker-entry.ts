@@ -31,7 +31,7 @@ export const workerApi = {
 			// (senderMode was missing until 2026-08-01 and nothing caught it,
 			// because worker-client's read is behind an `as any`).
 			senderMode: node.senderMode,
-			readEngine: node.readEngine,
+			engine: node.engine,
 			// newHeads over comlink: the callback must be a comlink-proxied function.
 			onNewHead: (cb: (h: {number: number; hash: string}) => void) =>
 				proxy(node.onNewHead(cb)),

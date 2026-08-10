@@ -7,7 +7,7 @@
  *     unchanged (signed eth_sendRawTransactionSync, eth_call);
  *   - the main thread stays NON-BLOCKING while the Worker runs heavy compute
  *     (heavy EVM compute that would otherwise stall the main thread);
- *   - the node's `readEngine` identity ROUND-TRIPS across the boundary (it is a
+ *   - the node's `engine` identity ROUND-TRIPS across the boundary (it is a
  *     plain value on purpose, and nothing else asserted it survived).
  *
  * The harness bundles the page (the `cut`) AND the package's worker-entry (the
@@ -46,7 +46,7 @@ test('slim-node over a comlink Worker: same API + main-thread non-blocking', asy
 	// 20 increments across the Worker boundary landed:
 	expect(r.results.number).toBe('20');
 	// the engine identity survived the comlink boundary as a plain value
-	expect(r.results.readEngineId).toBe('@ethereumjs/evm');
+	expect(r.results.engineId).toBe('@ethereumjs/evm');
 	// ...and so did every OTHER plain SlimNode field the worker-entry proxy
 	// forwards. `senderMode` was silently absent from that proxy until
 	// 2026-08-01, reading as `undefined` on a property typed

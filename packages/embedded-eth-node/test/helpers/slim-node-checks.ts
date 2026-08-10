@@ -15,7 +15,7 @@ import {
 	createMemoryPersistence,
 	RpcError,
 } from '../../src/index.js';
-import type {ReadCallResult, ReadEngine} from '../../src/index.js';
+import type {Engine, ReadCallResult} from '../../src/index.js';
 import {createWorkerNode} from '../../src/worker-client.js';
 import {
 	createWalletClient,
@@ -210,7 +210,7 @@ export async function slimNodeHonestyChecks() {
 const ENGINE_INIT_CAUSE = 'test-engine: the wasm module never arrived';
 
 /** An engine that dies during `connect` — the "failed to initialise" case. */
-const engineThatCannotStart: ReadEngine = {
+const engineThatCannotStart: Engine = {
 	id: 'test-engine-that-cannot-start',
 	connect() {
 		throw new Error(ENGINE_INIT_CAUSE);
@@ -227,7 +227,7 @@ const engineThatCannotStart: ReadEngine = {
  * `'trie'`, asserted in revm-engine.spec.ts); what is pinned here is the
  * node-side mechanism, which any third-party engine relies on.
  */
-function makeNoneOnlyEngine(): ReadEngine {
+function makeNoneOnlyEngine(): Engine {
 	return {
 		id: 'test-engine-none-only',
 		connect(ctx) {
@@ -252,7 +252,7 @@ async function engineSeamHonestyChecks(): Promise<Record<string, unknown>> {
 	const probeCreate = async (options: any): Promise<string> => {
 		try {
 			const n = await createNode(options);
-			const id = n.readEngine.id;
+			const id = n.engine.id;
 			await n.dispose();
 			return `DID_NOT_THROW:${id}`;
 		} catch (e) {
@@ -281,7 +281,7 @@ async function engineSeamHonestyChecks(): Promise<Record<string, unknown>> {
 		engine: makeNoneOnlyEngine(),
 	});
 
-	// 6c) an object that is not a ReadEngine is refused at construction too —
+	// 6c) an object that is not an Engine is refused at construction too —
 	// otherwise the node comes up and dies at the first `eth_call` with a
 	// `not a function` TypeError, which reads like a node bug.
 	out.engineNotAnEngine = await probeCreate({
@@ -307,7 +307,7 @@ async function engineSeamHonestyChecks(): Promise<Record<string, unknown>> {
 			// time; the cast is how a JS consumer (who has no compile step) arrives.
 			engine: makeNoneOnlyEngine() as never,
 		});
-		out.workerEngine = `DID_NOT_THROW:${wnode.readEngine.id}`;
+		out.workerEngine = `DID_NOT_THROW:${wnode.engine.id}`;
 	} catch (e) {
 		out.workerEngine = `threw:${(e as Error)?.name}:${String(
 			(e as Error)?.message ?? e,

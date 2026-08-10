@@ -184,7 +184,7 @@ test('revm engine: same results + same gas as @ethereumjs/evm, on the node own s
 
 	// ...and an engine asked to READ before a node bound it refuses too, naming
 	// what is missing and what to do. `createNode()` always connects first, so this
-	// edge is reachable only by hand-driving a `ReadEngine` — which is why nothing
+	// edge is reachable only by hand-driving an `Engine` — which is why nothing
 	// but this assertion keeps it alive through a refactor. Guessing a fork here
 	// would answer with an estimate computed under rules the caller never chose.
 	expect(c.unboundCallRefusal).not.toBe('DID_NOT_THROW');
