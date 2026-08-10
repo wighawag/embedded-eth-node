@@ -137,10 +137,10 @@ export class OverlayStorageStateManager extends SimpleStateManager {
 	 * checkpoint). Always non-empty: the base constructor's `checkpointSync()`
 	 * seeds it.
 	 *
-	 * Public for the same reason `accountStack` and `codeStack` are: the revm read
-	 * store needs a SYNCHRONOUS view of state and `StateManagerInterface` is async
-	 * throughout (ADR 0005). Prefer {@link storageAt} / {@link liveStorage} over
-	 * walking this by hand.
+	 * Public for the same reason `accountStack` and `codeStack` are: the revm store
+	 * reads AND WRITES state SYNCHRONOUSLY and `StateManagerInterface` is async
+	 * throughout (ADR 0005). Prefer {@link storageAt} / {@link liveStorage} /
+	 * {@link setStorageAt} / {@link clearStorageAt} over walking this by hand.
 	 *
 	 * NO INITIALISER — see the header's field-initialiser trap.
 	 */
@@ -277,6 +277,46 @@ export class OverlayStorageStateManager extends SimpleStateManager {
 		return undefined;
 	}
 
+	/**
+	 * Write one slot SYNCHRONOUSLY, by key, into the TOP overlay — the write-side
+	 * twin of {@link storageAt}, and for the same reason it exists: revm's commit
+	 * runs inside a synchronous wasm callback and every method on
+	 * `StateManagerInterface` returns a `Promise` (ADR 0005). `putStorage` below is
+	 * this function plus an `Address`.
+	 *
+	 * THE VALUE MUST ALREADY BE IN SHORTEST FORM, because that is what this
+	 * representation holds and what `dumpState` serialises: `@ethereumjs/evm`
+	 * strips leading zeros before `putStorage` (a zeroed slot arrives as a
+	 * ZERO-LENGTH array, which {@link storageAt} treats as "explicitly empty" and
+	 * stops the walk at). A caller handing over 32 padded bytes would write state
+	 * that reads back correctly and dumps differently from the same state written
+	 * by the default engine.
+	 */
+	setStorageAt(
+		addressKey: AddressKey,
+		slotKey: SlotKey,
+		value: Uint8Array,
+	): void {
+		const top = this.topOverlay();
+		let inner = top.written.get(addressKey);
+		if (inner === undefined) {
+			inner = new Map();
+			top.written.set(addressKey, inner);
+		}
+		inner.set(slotKey, value);
+	}
+
+	/**
+	 * Clear one account's storage SYNCHRONOUSLY, by key — {@link clearStorage}
+	 * without an `Address`, for the same synchronous-callback reason as
+	 * {@link setStorageAt}. Still O(1): one `delete` plus one tombstone.
+	 */
+	clearStorageAt(addressKey: AddressKey): void {
+		const top = this.topOverlay();
+		top.written.delete(addressKey);
+		top.cleared.add(addressKey);
+	}
+
 	override async getStorage(
 		address: Address,
 		key: Uint8Array,
@@ -291,14 +331,7 @@ export class OverlayStorageStateManager extends SimpleStateManager {
 		key: Uint8Array,
 		value: Uint8Array,
 	): Promise<void> {
-		const top = this.topOverlay();
-		const addressKey = address.toString();
-		let inner = top.written.get(addressKey);
-		if (inner === undefined) {
-			inner = new Map();
-			top.written.set(addressKey, inner);
-		}
-		inner.set(bytesToHex(key), value);
+		this.setStorageAt(address.toString(), bytesToHex(key), value);
 	}
 
 	/**
@@ -320,10 +353,7 @@ export class OverlayStorageStateManager extends SimpleStateManager {
 	 */
 	override async clearStorage(address?: Address): Promise<void> {
 		if (address === undefined) return;
-		const top = this.topOverlay();
-		const addressKey = address.toString();
-		top.written.delete(addressKey);
-		top.cleared.add(addressKey);
+		this.clearStorageAt(address.toString());
 	}
 
 	/**

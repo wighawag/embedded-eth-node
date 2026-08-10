@@ -5,10 +5,12 @@
  * The battery itself is the one `conformance.spec.ts` runs (helpers/conformance.ts):
  * the same signed transactions through the node AND through a trie-backed
  * `@ethereumjs/vm` `runTx` reference, diffed field by field plus post-state. What
- * changes here is only WHICH EVM answers the READ path — `eth_call` return data
- * and `eth_estimateGas` — because that is the whole of what THIS engine owns
- * today: the seam covers transactions, and `createRevmEngine()` has no write half
- * yet, so a revm-backed node still executes its transactions on `@ethereumjs/vm`.
+ * changes here is WHICH EVM answers, and it answers everything: `eth_call` return
+ * data, `eth_estimateGas`, and every mined transaction — deploys, storage writes,
+ * logs, a real EIP-2930 access list, a legacy fee, a revert, two transactions in
+ * one block — executed and COMMITTED by revm against the node's own state. So
+ * this file is where a revm-executed chain is asserted to be the SAME chain as an
+ * `@ethereumjs/vm` one, receipt for receipt and account for account.
  *
  * STATE-MODE COVERAGE IS EXPLICIT, and it is the shipped engine's refusal that
  * decides the split, not a convenience:
@@ -77,8 +79,18 @@ test('differential conformance with the revm engine installed (stateMode:none)',
 	// `conformance.spec.ts` uses for each of its two modes.
 	expect(served.steps.length).toBeGreaterThanOrEqual(15);
 
-	// The read assertions the engine actually owns are in there, and passed.
+	// The steps that pin the halves the engine owns are in there, and passed.
 	const labels = served.steps.map((s: any) => s.label);
+	// The TRANSACTION half: a value transfer's receipt and its post-state, a
+	// creation, a storage-writing call and a legacy fee, each diffed against the
+	// reference. These are the steps that were being answered by `@ethereumjs/vm`
+	// while this engine had no write half.
+	expect(labels).toContain('1559-value-transfer');
+	expect(labels).toContain('1559-value-transfer post-state');
+	expect(labels).toContain('1559-deploy(Counter)');
+	expect(labels).toContain('legacy-value-transfer');
+	expect(labels).toContain('2930-call(increment, access-list)');
+	// ...and the READ half.
 	expect(labels).toContain('1559-call(increment) view number()');
 	expect(labels).toContain('estimateGas exactness (increment)');
 	expect(labels).toContain('estimateGas CREATE incl. EIP-3860 initcode');

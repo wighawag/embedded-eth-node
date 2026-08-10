@@ -23,12 +23,13 @@
  *
  * The battery is ENGINE-PARAMETERISED (see {@link runConformanceOnEngine}): the
  * same steps run with an injected engine, so `embedded-eth-node/revm` faces this
- * bar rather than a softer one of its own. With the engine shipped today only the
- * READ path changes — `eth_call` return data and `eth_estimateGas` — because an
- * engine that implements only the seam's read half leaves transactions on
- * `@ethereumjs/vm`. The engine is built PER NODE by a factory, not shared: an
- * engine instance serves exactly one node (the revm engine refuses a second
- * `createNode()` outright), and the battery builds two.
+ * bar rather than a softer one of its own — and it faces the WHOLE of it, because
+ * an engine implements both halves of the seam: every signed transaction below is
+ * executed and committed by the installed engine, and every receipt and
+ * post-state read is diffed against the reference all the same. The engine is
+ * built PER NODE by a factory, not shared: an engine instance serves exactly one
+ * node (the revm engine refuses a second `createNode()` outright), and the
+ * battery builds two.
  */
 import {createVM, runTx, type VM} from '@ethereumjs/vm';
 import {MerkleStateManager} from '@ethereumjs/statemanager';
@@ -1141,8 +1142,8 @@ export interface EngineConformanceReport {
 }
 
 /**
- * Run the SAME battery with an injected read engine, in the one state mode that
- * engine serves, and record its refusal of the others.
+ * Run the SAME battery with an injected engine, in the one state mode that engine
+ * serves, and record its refusal of the others.
  *
  * Deliberately NOT "run every mode on every engine": an engine that cannot serve
  * a mode must say so at construction, and covering it anyway would mean either

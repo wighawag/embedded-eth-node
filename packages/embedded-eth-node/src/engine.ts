@@ -34,24 +34,6 @@ import type {
 export const ETHEREUMJS_ENGINE_ID = '@ethereumjs/evm';
 
 /**
- * An {@link Engine} that implements BOTH operations, i.e. one the node can mine on.
- * The default engine always is one; an injected engine is one only if it brought a
- * `transact` (see {@link transacts}).
- */
-export type TransactingEngine = Engine & {
-	transact: NonNullable<Engine['transact']>;
-};
-
-/**
- * Can this engine execute transactions? The same test `connectEngine` validates
- * with, so "absent" and "broken" cannot be confused here: a non-function
- * `transact` never reaches this point.
- */
-export function transacts(engine: Engine): engine is TransactingEngine {
-	return typeof engine.transact === 'function';
-}
-
-/**
  * Wrap the node's own `@ethereumjs/vm` as an engine, covering BOTH operations.
  * Built by the node (it needs the VM and the node's state manager), so it never
  * needs `connect`.
@@ -59,7 +41,7 @@ export function transacts(engine: Engine): engine is TransactingEngine {
 export function createEthereumjsEngine(deps: {
 	vm: VM;
 	stateManager: StateManagerInterface;
-}): TransactingEngine {
+}): Engine {
 	const {vm, stateManager} = deps;
 	const evm = vm.evm;
 	return {
@@ -203,13 +185,15 @@ function effectiveGasPrice(tx: TypedTransaction, blockBaseFee: bigint): bigint {
  * (honest edge — see `docs/adr/0004-no-account-or-signing-methods.md` for the
  * same convention on the RPC surface).
  *
- * Two ways an injected engine fails, both landing here at construction rather
+ * Three ways an injected engine fails, all landing here at construction rather
  * than at the first opcode:
  *  1. it is not an `Engine` at all (a stray object, a module namespace, a
  *     forgotten `await` on `createRevmEngine()`) — otherwise the node comes up
  *     and dies at the first `eth_call` with a `not a function` TypeError that
  *     reads like a node bug;
- *  2. its `connect(context)` throws, either because it cannot initialise (no
+ *  2. it implements only HALF the seam: no usable `transact`. There is no second
+ *     engine to mine on, so this is a missing capability the node cannot supply;
+ *  3. its `connect(context)` throws, either because it cannot initialise (no
  *     wasm, no memory) or because it refuses this node's configuration (the
  *     revm engine refuses `stateMode:'trie'`, having no synchronous view of a
  *     `MerkleStateManager` to read through).
@@ -229,19 +213,22 @@ export async function connectEngine(
 				`If you built it with an async factory (e.g. \`createRevmEngine()\`), await it first.`,
 		);
 	}
-	// `transact` is OPTIONAL (an engine may not have grown its write half yet) but a
-	// non-function `transact` is not that: it is a typo or a half-built engine, and
-	// treating it as "absent" would silently mine every transaction on
-	// `@ethereumjs/vm` while the consumer believes their engine is executing them.
-	// Same reasoning as the guard above, one method along.
-	if (
-		engine.transact !== undefined &&
-		typeof (engine as Engine).transact !== 'function'
-	) {
+	// `transact` IS REQUIRED, and this is the guard that says so at construction.
+	// It was briefly optional — for exactly as long as the shipped revm engine had
+	// no write half — and an engine that omitted it had its transactions mined on
+	// the node's own `@ethereumjs/vm`. That fallback is GONE: a node must run ONE
+	// EVM, so `node.engine` names the engine that answered its reads AND executed
+	// its transactions, and a receipt can be attributed to it.
+	//
+	// MISSING and BROKEN are refused together, in the same words, because they are
+	// the same mistake from the node's point of view (a half-built engine) and
+	// neither can be served: there is no second engine to fall back to, and one
+	// substituted silently is the lie `connectEngine` exists to refuse.
+	if (typeof (engine as Engine).transact !== 'function') {
 		throw new Error(
-			`embedded-eth-node: the engine '${engine.id}' has a \`transact\` that is not a function (got ${typeof engine.transact}). ` +
-				`An engine may legitimately OMIT \`transact\` (its transactions then run on the node's own @ethereumjs/vm), but a broken one is not the same as an absent one: ` +
-				`the node would mine every transaction on @ethereumjs/vm while you believed this engine was executing them.`,
+			`embedded-eth-node: the engine '${engine.id}' has no usable \`transact\` method (got ${typeof engine.transact}). ` +
+				`An Engine implements BOTH operations — \`call\` for reads and \`transact\` to execute and commit a signed transaction — because the node executes its transactions on the engine you passed. ` +
+				`It is deliberately NOT filled in with the default @ethereumjs/evm engine: a node running one EVM for reads and another for transactions has two chances to disagree with itself, and a receipt from it cannot be attributed to the engine ${'`node.engine`'} names.`,
 		);
 	}
 	try {

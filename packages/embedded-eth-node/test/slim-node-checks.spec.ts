@@ -76,6 +76,25 @@ test('node honesty + correctness (receipts, gaps, persistence, state-root mode)'
 	expect(c.engineNotAnEngine).not.toContain('DID_NOT_THROW');
 	expect(c.engineNotAnEngine).toContain('call');
 
+	// HALF AN ENGINE IS REFUSED TOO, both ways it can be half, because the node
+	// executes its transactions on the engine it was given and has nothing to fall
+	// back to. An engine with only `call` used to be legal and left the node running
+	// TWO EVMs; a `transact` that is present but not callable was legal-looking and
+	// untested. Both now fail construction, naming the missing operation.
+	for (const probe of [
+		c.engineWithoutTransact,
+		c.engineWithBrokenTransact,
+	] as string[]) {
+		expect(probe).not.toContain('DID_NOT_THROW');
+		expect(probe).toContain('transact');
+		expect(probe).toContain('test-engine-none-only');
+		// ...and it says out loud that the default engine is NOT substituted, which is
+		// the fallback this contraction deleted.
+		expect(probe).toContain('@ethereumjs/evm');
+	}
+	expect(c.engineWithoutTransact).toContain('got undefined');
+	expect(c.engineWithBrokenTransact).toContain('got string');
+
 	// the Worker path refuses an engine by NAME (an engine cannot be
 	// structured-cloned into a Worker) rather than surfacing comlink's opaque
 	// DataCloneError. The probe reports `threw:<name>:<message>`, so the ERROR

@@ -34,12 +34,12 @@ const BACKENDS = [
 	'embedded-eth-node',
 	'embedded-eth-node-trusted',
 	'embedded-eth-node-fabricated',
-	// The node WITH the optional `embedded-eth-node/revm` read engine installed:
-	// the configuration a consumer actually ships when they opt into revm, and
-	// therefore the one the README's frame number has to come from. Distinct from
-	// both neighbours: `embedded-eth-node` is the same node on `@ethereumjs/evm`
-	// (so the delta between them IS the engine swap), and `revm` below is RAW revm
-	// owning its own state with no node in the path at all.
+	// The node WITH the optional `embedded-eth-node/revm` engine installed, on BOTH
+	// halves of the seam: the configuration a consumer actually ships when they opt
+	// into revm, and therefore the one the README's frame number has to come from.
+	// Distinct from both neighbours: `embedded-eth-node` is the same node on
+	// `@ethereumjs/evm` (so the delta between them IS the engine swap), and `revm`
+	// below is RAW revm owning its own state with no node in the path at all.
 	'embedded-eth-node-revm-engine',
 	'revm',
 ] as const;
@@ -90,7 +90,19 @@ const collected: Record<string, unknown>[] = [];
  * change that grows it, and say why in the changeset. A red assertion here means
  * either that or an accidental import into the core graph.
  *
- * RE-PINNED FOUR TIMES SINCE. Most recent first:
+ * RE-PINNED FIVE TIMES SINCE. Most recent first:
+ *
+ * 417.1 -> 417.2 KB raw (gzip unchanged at 125.7), by
+ * `revm-executes-the-first-transaction-with-commit`: `Engine.transact` became
+ * REQUIRED, so `src/engine.ts` lost the `transacts()` capability test and the
+ * `TransactingEngine` type while `connectEngine` gained the refusal that replaces
+ * them, and `src/node.ts` lost its `transacts(engine) ? engine : defaultEngine`
+ * fallback. The 0.1 KB is net: deleted code minus a longer refusal message, which
+ * is prose in the core bundle and is the feature (a node now runs ONE EVM, so
+ * `node.engine` names the engine that answered its reads AND executed its
+ * transactions). `src/state-manager.ts`'s two new synchronous storage-write
+ * accessors are in the same graph and are a few lines each. Still zero bytes of
+ * `revm-wasm`.
  *
  * 416.3 -> 417.1 KB raw / 125.4 -> 125.7 KB gzip, by
  * `re-widen-the-engine-seam-to-cover-transactions`: the engine seam widened from
@@ -138,7 +150,7 @@ const collected: Record<string, unknown>[] = [];
  * carries 1% of slack because the zlib shipped with different Node builds does
  * not compress byte-identically, which is noise rather than growth.
  */
-const DEFAULT_ENTRY_BASELINE = {rawKB: 417.1, gzipKB: 125.7};
+const DEFAULT_ENTRY_BASELINE = {rawKB: 417.2, gzipKB: 125.7};
 const GZIP_SLACK = 1.01;
 
 // Build + serve once for the whole file (the cut contains all backends).

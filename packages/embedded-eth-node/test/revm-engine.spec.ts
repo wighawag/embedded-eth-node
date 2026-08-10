@@ -3,7 +3,10 @@
  *   - the node runs its READ path on revm-wasm and says so
  *   - results and gas are IDENTICAL to the default `@ethereumjs/evm` engine
  *   - revm reads the node's own state (a mined tx is visible with no sync step)
- *   - an `eth_call` on revm cannot mutate state
+ *   - an `eth_call` on revm cannot mutate state (it reaches no write callback)
+ *   - a signed value transfer EXECUTES ON REVM and COMMITS, with a receipt and a
+ *     post-state `@ethereumjs/evm` cannot be told apart from, no simulation
+ *     switch anywhere near it, and the nonce check on
  *   - a read from an UNFUNDED address and from an address HOLDING CODE works on
  *     both engines, with the same result and the same gas
  *   - a VALUE-BEARING read succeeds or fails IDENTICALLY on both engines: the
@@ -107,11 +110,13 @@ test('revm engine: same results + same gas as @ethereumjs/evm, on the node own s
 	expect(c.txStatus).toBe('success');
 	expect(c.numberAfterTx).toBe('1');
 
-	// a read cannot mutate: eth_call increment() left slot 0 alone, and the store
-	// revm reads through refuses every write
+	// a read cannot mutate: eth_call increment() left slot 0 alone, and it is
+	// STRUCTURAL rather than careful — a `Revm#call` asked to commit reaches no write
+	// callback at all. An unbound store additionally refuses every write out loud.
 	expect(c.callDidNotMutateState).toBe(true);
 	expect(BigInt(c.storageAfterCall)).toBe(1n);
-	expect(c.writeMethodsThrow).toBe(true);
+	expect(c.readWriteCallbacks).toEqual([]);
+	expect(c.unboundWriteMethodsThrow).toBe(true);
 
 	// every caller a SIMULATION must serve works, on both engines: funded,
 	// unfunded (what the zeroed base fee used to buy), and holding code (EIP-3607,
@@ -391,6 +396,65 @@ test('revm engine: same results + same gas as @ethereumjs/evm, on the node own s
 		node: '53296',
 		protocol: '53296',
 	});
+
+	// ---- THE TRANSACTION HALF: one transfer, on revm, COMMITTED ----
+	// The same signed transfer, sent to a revm-backed node and to a default-engine
+	// node built on identical state. Every receipt field the seam's
+	// `TransactionResult` feeds must be indistinguishable, and so must the
+	// post-state a consumer can read back.
+	expect(c.transferReceiptFields).toBeDefined();
+	for (const [field, both] of Object.entries(
+		c.transferReceiptFields as Record<string, {default: string; revm: string}>,
+	)) {
+		expect(`${field}=${both.revm}`).toBe(`${field}=${both.default}`);
+	}
+	expect(c.transferReceipts.revm.status).toBe('0x1');
+	expect(BigInt(c.transferReceipts.revm.gasUsed)).toBe(21_000n);
+	expect(c.transferReceipts.revm.contractAddress ?? null).toBe(null);
+	expect(c.transferLogCounts).toEqual({default: 0, revm: 0});
+	// ...and the MONEY moved, on the node's own state: an engine that reported a
+	// perfect receipt and committed nothing would leave every balance untouched.
+	for (const [what, both] of Object.entries(
+		c.transferPostState as Record<string, {default: string; revm: string}>,
+	)) {
+		expect(`${what}=${BigInt(both.revm)}`).toBe(
+			`${what}=${BigInt(both.default)}`,
+		);
+	}
+	expect(BigInt(c.transferPostState.sinkBalance.revm)).toBe(12_345n);
+	expect(BigInt(c.transferPostState.senderNonce.revm)).toBe(1n);
+	expect(String(BigInt(c.transferPostState.senderBalance.revm))).toBe(
+		c.transferSenderBalanceExpected,
+	);
+	// ...and the coinbase was credited the priority fee by revm, not by the node.
+	expect(BigInt(c.transferPostState.coinbaseBalance.revm)).toBe(
+		21_000n * 1_000_000_000n,
+	);
+
+	// IT RAN ON REVM, and on the committing path: exactly one `Revm#transact`, for
+	// the sender the NODE established (never one the engine recovered for itself),
+	// with NO simulation switch anywhere near it and nothing said about the nonce.
+	// The switches relax a transaction's VALIDITY, so a transaction that runs with
+	// them is not a transaction; `checkNonce` is left to the binding's committing
+	// default because a value passed here is a value a later refactor can flip.
+	expect(c.transactCalls).toBe(1);
+	expect(c.transactFrom).toBe(c.transactFromExpected);
+	expect(c.transactSwitchesPresent).toEqual([]);
+	expect(c.transactCheckNonceOption).toBe('undefined');
+	expect(c.transactCommitOption).toBe('undefined');
+	expect(c.transactReturnStateOption).toBe('undefined');
+
+	// NONCE CHECKING IS ON: the replay is REJECTED on both engines, and the
+	// sender's nonce is untouched by the attempt.
+	expect(c.replay_revm).not.toBe('DID_NOT_THROW');
+	expect(c.replay_default).not.toBe('DID_NOT_THROW');
+	expect(c.nonceAfterReplay).toEqual({default: '0x1', revm: '0x1'});
+
+	// the node's own features still work over state a revm transaction wrote
+	expect(BigInt(c.cheatBalance)).toBe(42n);
+	expect(BigInt(c.cheatNonce)).toBe(7n);
+	expect(c.dumpHasSink).toBe(true);
+	expect(BigInt(c.reloadedSinkBalance)).toBe(12_345n);
 
 	// one engine, one node: re-using a connected engine is refused rather than
 	// silently re-pointing the first node's reads at the second node's state

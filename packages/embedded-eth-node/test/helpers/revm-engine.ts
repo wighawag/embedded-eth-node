@@ -14,9 +14,9 @@
  *      the node is visible to the next revm `eth_call` with no sync step.
  *   4. `eth_call` on revm cannot mutate state: a call that WOULD write leaves the
  *      node's storage untouched, and the store's write methods throw.
- *   5. `BLOCKHASH` answers with the node's real block hashes (the read engine
- *      context carries block access; an unwired `getBlockHash` would silently
- *      answer zero).
+ *   5. `BLOCKHASH` answers with the node's real block hashes (the engine's
+ *      `EngineContext` carries block access; an unwired `getBlockHash` would
+ *      silently answer zero).
  *   5b. The BLOCK ENVIRONMENT is the node's own and is IDENTICAL on both
  *      engines: a contract reading `BASEFEE` / `PREVRANDAO` / `COINBASE` /
  *      `NUMBER` / `TIMESTAMP` / `GASLIMIT` inside an `eth_call` gets the same
@@ -70,6 +70,17 @@
  *      is measured on the specs either side of it instead. Evidence:
  *      `docs/spikes/clause-b-covers-only-eip-3860-not-the-rest-of-the-formula/`
  *      and `docs/spikes/intrinsic-gas-charges-eip-3860-on-forks-that-predate-it/`.
+ *  12. THE TRANSACTION HALF: a signed value transfer EXECUTES ON REVM and
+ *      COMMITS, producing a receipt and a post-state the default engine cannot
+ *      be told apart from, with the sender charged `value + gasUsed *
+ *      effectiveGasPrice` and the coinbase credited the tip. Two properties no
+ *      receipt field can show are measured at the binding instead, by wrapping
+ *      `Revm.prototype.transact`: the transaction path carries NONE of the read
+ *      path's simulation switches, and it says NOTHING about `checkNonce` (the
+ *      binding's committing default is ON, and a value passed here is a value a
+ *      refactor can flip). A replayed nonce is REJECTED on both engines, and the
+ *      node's `evm_set*` cheats, `dumpState` and `loadState` still work over
+ *      state a revm transaction wrote.
  *  11. A CREATE-shaped `eth_estimateGas` returns the SAME number on BOTH
  *      engines at EVERY admitted fork, INCLUDING the pre-Shanghai ones — and
  *      that number is what the protocol charges. This is the one place the fork
@@ -101,7 +112,13 @@ import {createVM} from '@ethereumjs/vm';
 import {createBlock} from '@ethereumjs/block';
 import {createLegacyTx} from '@ethereumjs/tx';
 import {Account, createAddressFromString} from '@ethereumjs/util';
-import {createRevm, MemoryStore, type SpecName} from 'revm-wasm';
+import {
+	createRevm,
+	MemoryStore,
+	Revm,
+	type ExecuteOptions,
+	type SpecName,
+} from 'revm-wasm';
 // The BUNDLER-RESOLVED delivery shape: the build resolves the `.wasm` out of the
 // `revm-wasm` package and puts it IN the build (esbuild's `binary` loader here;
 // Vite's `?arraybuffer`, webpack's `asset/inline`), so the page fetches nothing
@@ -114,6 +131,7 @@ import {
 	encodeFunctionData,
 	decodeFunctionResult,
 	hexToBytes,
+	bytesToHex,
 } from 'viem';
 import {privateKeyToAccount} from 'viem/accounts';
 import {counterAbi, counterBytecode} from './counter.js';
@@ -215,6 +233,8 @@ const UNFUNDED_CALLER = '0x00000000000000000000000000000000dead0001';
 const CALLDATA_SINK_ADDR = '0x00000000000000000000000000000000ca11da7a';
 /** A codeless address to send ether to, for the value-bearing reads. */
 const VALUE_SINK_ADDR = '0x0000000000000000000000000000000000005151';
+/** The node's default block coinbase, which is credited the priority fee. */
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 /** What the funded caller starts with on both nodes (see {@link nodeWith}). */
 const FUNDED_BALANCE = 10n ** 24n;
 
@@ -362,10 +382,45 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 	});
 	out.callDidNotMutateState = storageBefore === storageAfter;
 	out.storageAfterCall = String(storageAfter);
-	// ...and the store revm reads through cannot write AT ALL: all five write
-	// methods throw, so a commit could never be silent.
-	const readOnlyStore = new SimpleStateManagerStore();
-	out.writeMethodsThrow = (
+	// ...and it cannot mutate for a STRUCTURAL reason, not a careful one: `Revm#call`
+	// is incapable of committing whatever its options say, so a read never reaches a
+	// write method at all. Counted rather than argued, by a store that records every
+	// write it is asked for and forwards nothing.
+	{
+		const writes: string[] = [];
+		const counting = new SimpleStateManagerStore();
+		counting.bind(new OverlayStorageStateManager());
+		for (const m of [
+			'setAccount',
+			'setCode',
+			'setStorage',
+			'clearStorage',
+			'removeAccount',
+		] as const) {
+			(counting as unknown as Record<string, unknown>)[m] = () =>
+				writes.push(m);
+		}
+		const readOnlyRevm = await createRevm({
+			wasm: bundlerResolvedWasm,
+			state: counting,
+		});
+		readOnlyRevm.call({
+			from: hexToBytes(account.address),
+			to: hexToBytes(VALUE_SINK_ADDR),
+			value: 0n,
+			gasLimit: 100_000n,
+			// Every option a caller could reach for to make a read commit, set the wrong
+			// way on purpose: `call` ignores both.
+			commit: true,
+			checkNonce: true,
+		});
+		out.readWriteCallbacks = writes;
+	}
+	// ...and an UNBOUND store refuses every write out loud rather than half-writing
+	// somewhere, which is what a write reaching an engine no node ever connected
+	// would otherwise do.
+	const unboundStore = new SimpleStateManagerStore();
+	out.unboundWriteMethodsThrow = (
 		[
 			'setAccount',
 			'setCode',
@@ -375,7 +430,11 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 		] as const
 	).every((m) => {
 		try {
-			(readOnlyStore[m] as () => void)();
+			(unboundStore[m] as (...args: unknown[]) => void)(
+				new Uint8Array(20),
+				new Uint8Array(32),
+				new Uint8Array(32),
+			);
 			return false;
 		} catch {
 			return true;
@@ -1423,6 +1482,221 @@ export async function runRevmEngineChecks(params: {runtimeWasmUrl: string}) {
 	out.createIntrinsicMatchesProtocol = Object.values(createIntrinsic).every(
 		(i) => i.node === i.protocol,
 	);
+
+	// ---------- THE TRANSACTION HALF: one transfer, on revm, COMMITTED ----------
+	// The tracer bullet for the write half. A plain value transfer through
+	// `eth_sendRawTransaction` must EXECUTE ON REVM, commit, and produce a receipt
+	// and a post-state the default `@ethereumjs/evm` engine cannot be told apart
+	// from — so the same signed transaction is sent to a revm-backed node and to a
+	// default-engine node built on identical state, and both halves are diffed.
+	//
+	// WHAT THE ENGINE HANDS REVM IS RECORDED, not assumed. Two of this task's
+	// properties are invisible in a receipt:
+	//
+	//   * the transaction path must carry NONE of the read path's simulation
+	//     switches (`disableBaseFee` / `disableBlockGasLimit` / `disableEip3607` /
+	//     `disableBalanceCheck`). `revm-wasm` REFUSES to combine any of them with
+	//     committing, so a builder who copied the read path's options object
+	//     would get a throw — but one who copied them onto a `commit:false`
+	//     simulation would silently execute a transaction with relaxed VALIDITY,
+	//     and no receipt field would show it;
+	//   * nonce checking must be chosen BY THE CALL PATH. `Revm#transact` defaults
+	//     `checkNonce` ON precisely because a caller who forgets it gets a silently
+	//     replayable transaction, so the engine must pass NOTHING for it — an
+	//     explicit `checkNonce: true` would be one refactor away from `false`.
+	//
+	// Wrapping `Revm.prototype.transact` measures both against the real code path,
+	// without adding an inspection surface to the shipped engine.
+	{
+		const txModule = await WebAssembly.compile(bundlerResolvedWasm);
+		const txDef = await nodeWith();
+		const txRevm = await nodeWith(await createRevmEngine({wasm: txModule}));
+
+		const seen: Record<string, unknown>[] = [];
+		const realTransact = Revm.prototype.transact;
+		Revm.prototype.transact = function (
+			this: Revm,
+			options: ExecuteOptions = {},
+		) {
+			seen.push({...options});
+			return realTransact.call(this, options);
+		};
+
+		try {
+			const raw = await account.signTransaction({
+				chainId: CHAIN_ID,
+				type: 'eip1559',
+				nonce: 0,
+				to: VALUE_SINK_ADDR,
+				value: 12_345n,
+				gas: 21_000n,
+				maxFeePerGas: 2_000_000_000n,
+				maxPriorityFeePerGas: 1_000_000_000n,
+			} as any);
+
+			const receipts: Record<string, any> = {};
+			for (const [label, ctx] of [
+				['default', txDef],
+				['revm', txRevm],
+			] as const) {
+				receipts[label] = await ctx.node.request({
+					method: 'eth_sendRawTransactionSync',
+					params: [raw],
+				});
+			}
+			out.transferReceipts = receipts;
+			// Field for field, as a receipt is read off the wire.
+			out.transferReceiptFields = Object.fromEntries(
+				[
+					'status',
+					'gasUsed',
+					'cumulativeGasUsed',
+					'effectiveGasPrice',
+					'type',
+					'logsBloom',
+					'contractAddress',
+					'transactionHash',
+					'from',
+					'to',
+				].map((f) => [
+					f,
+					{
+						default: receipts.default[f] ?? null,
+						revm: receipts.revm[f] ?? null,
+					},
+				]),
+			);
+			out.transferLogCounts = {
+				default: receipts.default.logs.length,
+				revm: receipts.revm.logs.length,
+			};
+
+			// POST-STATE, through the node's own surface: what the sender paid, what
+			// the recipient got, and the nonce that must have moved.
+			const postState: Record<string, {default: string; revm: string}> = {};
+			for (const [what, method, addr] of [
+				['senderBalance', 'eth_getBalance', account.address],
+				['senderNonce', 'eth_getTransactionCount', account.address],
+				['sinkBalance', 'eth_getBalance', VALUE_SINK_ADDR],
+				['coinbaseBalance', 'eth_getBalance', ZERO_ADDRESS],
+			] as const) {
+				postState[what] = {
+					default: String(
+						await txDef.node.request({method, params: [addr, 'latest']}),
+					),
+					revm: String(
+						await txRevm.node.request({method, params: [addr, 'latest']}),
+					),
+				};
+			}
+			out.transferPostState = postState;
+			// The sender really paid: value + gasUsed * effectiveGasPrice, off the
+			// node's own genesis balance. An engine that committed nothing would leave
+			// this at FUNDED_BALANCE and still hand back a plausible receipt.
+			out.transferSenderBalanceExpected = (
+				FUNDED_BALANCE -
+				12_345n -
+				BigInt(receipts.revm.gasUsed) * BigInt(receipts.revm.effectiveGasPrice)
+			).toString();
+
+			// THE ENGINE EXECUTED IT: exactly one committing execute, for the node's
+			// own sender, with no simulation switch and nothing said about the nonce.
+			out.transactCalls = seen.length;
+			out.transactFrom =
+				seen[0]?.from === undefined
+					? undefined
+					: bytesToHex(seen[0].from as Uint8Array);
+			out.transactFromExpected = account.address.toLowerCase();
+			out.transactSwitchesPresent = (
+				[
+					'disableBaseFee',
+					'disableBalanceCheck',
+					'disableBlockGasLimit',
+					'disableEip3607',
+				] as const
+			).filter((k) => seen[0]?.[k] !== undefined);
+			out.transactCheckNonceOption = String(seen[0]?.checkNonce);
+			out.transactCommitOption = String(seen[0]?.commit);
+			out.transactReturnStateOption = String(seen[0]?.returnState);
+
+			// NONCE CHECKING IS ON, demonstrated by a REPLAY. The depth of the invalid
+			// -transaction case belongs to a later task; that it is checked at all is
+			// this one's, because the check is what the call path chose for the caller.
+			for (const [label, ctx] of [
+				['default', txDef],
+				['revm', txRevm],
+			] as const) {
+				try {
+					await ctx.node.request({
+						method: 'eth_sendRawTransaction',
+						params: [raw],
+					});
+					out[`replay_${label}`] = 'DID_NOT_THROW';
+				} catch (e) {
+					out[`replay_${label}`] =
+						`threw:${String((e as Error)?.message ?? e)}`;
+				}
+			}
+			// ...and the replay changed nothing: the sender's nonce is still 1 on both.
+			out.nonceAfterReplay = {
+				default: String(
+					await txDef.node.request({
+						method: 'eth_getTransactionCount',
+						params: [account.address, 'latest'],
+					}),
+				),
+				revm: String(
+					await txRevm.node.request({
+						method: 'eth_getTransactionCount',
+						params: [account.address, 'latest'],
+					}),
+				),
+			};
+
+			// THE NODE'S OWN FEATURES SURVIVE THE WRITE ENGINE, for the state this
+			// transfer touched: the `evm_set*` cheats still mutate it, and a dump
+			// round-trips through `loadState` on a revm-backed node.
+			const CHEAT_ADDR = '0x000000000000000000000000000000000000c4ea';
+			await txRevm.node.request({
+				method: 'evm_setBalance',
+				params: [CHEAT_ADDR, '0x2a'],
+			});
+			await txRevm.node.request({
+				method: 'evm_setNonce',
+				params: [CHEAT_ADDR, '0x7'],
+			});
+			out.cheatBalance = String(
+				await txRevm.node.request({
+					method: 'eth_getBalance',
+					params: [CHEAT_ADDR, 'latest'],
+				}),
+			);
+			out.cheatNonce = String(
+				await txRevm.node.request({
+					method: 'eth_getTransactionCount',
+					params: [CHEAT_ADDR, 'latest'],
+				}),
+			);
+			const dump = await txRevm.node.dumpState();
+			out.dumpHasSink = Object.keys(dump.accounts)
+				.map((a) => a.toLowerCase())
+				.includes(VALUE_SINK_ADDR);
+			const reloaded = await nodeWith(await createRevmEngine({wasm: txModule}));
+			await reloaded.node.loadState(dump);
+			out.reloadedSinkBalance = String(
+				await reloaded.node.request({
+					method: 'eth_getBalance',
+					params: [VALUE_SINK_ADDR, 'latest'],
+				}),
+			);
+			await reloaded.node.dispose();
+		} finally {
+			Revm.prototype.transact = realTransact;
+		}
+
+		await txDef.node.dispose();
+		await txRevm.node.dispose();
+	}
 
 	// ---------- one engine, one node ----------
 	// `fromAsset` is already bound to the `revm` node. Re-using it would rebind

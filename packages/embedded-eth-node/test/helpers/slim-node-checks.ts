@@ -15,7 +15,11 @@ import {
 	createMemoryPersistence,
 	RpcError,
 } from '../../src/index.js';
-import type {Engine, ReadCallResult} from '../../src/index.js';
+import type {
+	Engine,
+	ReadCallResult,
+	TransactionResult,
+} from '../../src/index.js';
 import {createWorkerNode} from '../../src/worker-client.js';
 import {
 	createWalletClient,
@@ -218,6 +222,9 @@ const engineThatCannotStart: Engine = {
 	async call(): Promise<ReadCallResult> {
 		throw new Error('unreachable: this engine never connected');
 	},
+	async transact(): Promise<TransactionResult> {
+		throw new Error('unreachable: this engine never connected');
+	},
 };
 
 /**
@@ -239,6 +246,9 @@ function makeNoneOnlyEngine(): Engine {
 		},
 		async call(): Promise<ReadCallResult> {
 			return {returnValue: new Uint8Array(), executionGasUsed: 0n};
+		},
+		async transact(): Promise<TransactionResult> {
+			throw new Error('test-engine-none-only: no transaction is mined here');
 		},
 	};
 }
@@ -287,6 +297,30 @@ async function engineSeamHonestyChecks(): Promise<Record<string, unknown>> {
 	out.engineNotAnEngine = await probeCreate({
 		chainId: CHAIN_ID,
 		engine: {id: 'looks-legit-but-has-no-call'} as any,
+	});
+
+	// 6c-bis) HALF AN ENGINE IS REFUSED, both ways it can be half.
+	//
+	// `transact` is REQUIRED: the node executes its transactions on the engine it
+	// was given and has no second EVM to fall back to, so an engine that brings only
+	// `call` is a missing capability rather than a choice. It was briefly optional,
+	// while the shipped revm engine had no write half, and a node with such an engine
+	// ran TWO EVMs — which is precisely the misattribution this refusal removes: a
+	// receipt from a node can now be attributed to `node.engine`.
+	//
+	// A PRESENT-BUT-NOT-CALLABLE `transact` is the second half, and it shipped with
+	// nothing measuring it. It is the same class of mistake (a half-built engine, a
+	// typo, a property that holds a value instead of a method), and a refusal nothing
+	// measures is one refactor away from disappearing.
+	const readOnlyEngine = makeNoneOnlyEngine() as Partial<Engine>;
+	delete readOnlyEngine.transact;
+	out.engineWithoutTransact = await probeCreate({
+		chainId: CHAIN_ID,
+		engine: readOnlyEngine as Engine,
+	});
+	out.engineWithBrokenTransact = await probeCreate({
+		chainId: CHAIN_ID,
+		engine: {...makeNoneOnlyEngine(), transact: 'nope'} as any,
 	});
 
 	// 6d) the WORKER path. `WorkerNodeOptions extends NodeOptions`, so `engine` is

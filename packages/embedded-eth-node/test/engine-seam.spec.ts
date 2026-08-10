@@ -4,7 +4,9 @@
  *   - an injected engine serves ALL THREE read-path callers (eth_call,
  *     eth_estimateGas, eth_fillTransaction's estimation)
  *   - the engine reports EXECUTION gas; the node adds intrinsic gas
- *   - an engine with no transaction half leaves transactions on @ethereumjs/vm
+ *   - `call` and `transact` are two operations on ONE engine: there is no second
+ *     EVM to mine on, so a stub whose `transact` touches no state leaves the
+ *     recipient with nothing
  *   - the default engine keeps the EIP-2929 reset + pure-read checkpoint/revert
  *   - an engine that DOES transact owns the mining path, and the receipt is built
  *     from the neutral transaction result it returned
@@ -52,12 +54,16 @@ test('engine seam (default @ethereumjs/evm, injected engine, reads and transacti
 	// eth_call + eth_estimateGas + eth_fillTransaction = three engine calls
 	expect(c.stubCallsSeen).toBe(3);
 
-	// an engine implementing only the READ half leaves transactions on
-	// @ethereumjs/vm: no extra engine `call`, and a real receipt all the same
+	// reads and transactions are TWO OPERATIONS ON ONE ENGINE: mining the tx added
+	// no `call`, went to this engine's own `transact`, and — because that `transact`
+	// deliberately touches no state — moved no ether. There is no longer a fallback
+	// to the node's own @ethereumjs/vm, which would have credited the recipient for
+	// real and hidden the fact that the engine never ran.
 	expect(c.stubCallsAfterTx).toBe(3);
+	expect(c.stubTransactCount).toBe(1);
 	expect(c.stubTxStatus).toBe('success');
 	expect(c.stubTxGasUsed).toBe('21000');
-	expect(c.stubTargetBalance).toBe('1');
+	expect(c.stubTargetBalance).toBe('0');
 
 	// a reverting engine result is still an honest execution-reverted error
 	expect(c.revertingCall).toBe('threw:3:0xdeadbeef');

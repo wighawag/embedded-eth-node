@@ -11,9 +11,8 @@
  * configuration this feature recommends and the one nobody was measuring. Same
  * file because it is the same backend: same package, same send path, same
  * scenario, one option different (`createNode({engine})`). That engine implements
- * the seam's READ half only, so the row measures reads on revm and transactions on
- * `@ethereumjs/vm`, which is why its label says "read engine". See
- * {@link EngineChoice} below.
+ * BOTH halves of the seam, so the row measures reads AND transactions on revm,
+ * against the node's own state. See {@link EngineChoice} below.
  */
 import {createNode, type Engine, type SlimNode} from 'embedded-eth-node';
 import {createRevmEngine} from 'embedded-eth-node/revm';
@@ -64,16 +63,19 @@ const chain = {
 type SendMode = 'recover' | 'trusted' | 'fabricated';
 
 /**
- * Which EVM answers this row's READ path (`eth_call` / `eth_estimateGas`).
+ * Which EVM answers this row — both its reads (`eth_call` / `eth_estimateGas`)
+ * and its transactions.
  *
  *   'default'  the node's own `@ethereumjs/evm`, i.e. `createNode()` untouched.
  *   'revm'     `createRevmEngine()` from the optional `embedded-eth-node/revm`
  *              subpath — the configuration a consumer opts into.
  *
- * ONLY reads move. Transactions run on `@ethereumjs/vm` whatever engine is
- * installed, so the write rows (`deploy`, `callAvg`) are unaffected by design and
- * any difference there is noise, not the engine. The rows that mean something
- * are `read`, `compute`, `keccak`, `frame` and `floor`.
+ * BOTH HALVES MOVE. The engine executes this row's transactions as well as its
+ * reads (it did reads only until the revm write half landed), so `deploy` and
+ * `callAvg` are now engine-sensitive too rather than noise — though they still
+ * carry the node's own signing and ecrecover, which dominate a small transaction.
+ * The read rows (`read`, `compute`, `keccak`, `frame`, `floor`) remain the ones
+ * that isolate the interpreter.
  *
  * The DISTINCTION FROM THE `revm` ROW matters when reading the table: that row is
  * RAW revm owning its own state and driving everything, which is the engine's
@@ -156,7 +158,7 @@ function makeBackend(
 	return {
 		name:
 			engineChoice === 'revm'
-				? 'embedded-eth-node + revm read engine (signed eth_sendRawTransactionSync, auto-mine)'
+				? 'embedded-eth-node + revm engine (signed eth_sendRawTransactionSync, auto-mine)'
 				: {
 						recover:
 							'embedded-eth-node (signed eth_sendRawTransactionSync, auto-mine)',

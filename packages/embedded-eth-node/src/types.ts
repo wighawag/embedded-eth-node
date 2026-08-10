@@ -271,12 +271,12 @@ export interface EngineContext {
 }
 
 /**
- * THE EVM BEHIND THE NODE, in ONE interface with TWO operations: execute a
- * read-only {@link call} (`eth_call`, `eth_estimateGas`, `eth_fillTransaction`'s
+ * THE EVM BEHIND THE NODE, in ONE interface with TWO REQUIRED operations: execute
+ * a read-only {@link call} (`eth_call`, `eth_estimateGas`, `eth_fillTransaction`'s
  * estimation) and execute a committing {@link transact} (the mining path).
  *
- * ONE INTERFACE, NOT TWO, and not a capability bolted onto a read seam. What
- * differs between the two operations is a transaction's VALIDITY rules, not their
+ * ONE INTERFACE, NOT TWO, and neither operation is a capability an engine may
+ * decline. What differs between them is a transaction's VALIDITY rules, not their
  * engine-ness: a read RELAXES them (base fee, block gas limit, EIP-3607) and
  * cannot commit, a transaction relaxes nothing and commits. That asymmetry belongs
  * to the operations, and stating it in one place where both are visible beats
@@ -311,22 +311,26 @@ export interface Engine {
 	 * reporting what a receipt needs. Full validity: nonce checked, fees charged,
 	 * no simulation switch anywhere near it.
 	 *
-	 * OPTIONAL ONLY WHILE AN ENGINE HAS NOT GROWN ITS WRITE HALF, and that is a
-	 * transitional state rather than a design: an engine that omits it leaves the
-	 * node's transactions on the node's OWN `@ethereumjs/vm`, which is exactly what
-	 * every non-default engine did before this seam covered transactions. The
-	 * shipped `embedded-eth-node/revm` engine is in that state today (its write
-	 * half is the task `revm-executes-the-first-transaction-with-commit`, under the
-	 * spec `revm-engine-behind-runtx`; a bucket PATH is not cited because a work
-	 * item's status IS its folder, so the path moves and this comment ships),
-	 * so requiring the method here would have meant either refusing every
-	 * transaction on a revm-backed node or changing what one does — and this seam's
-	 * whole bar is that nothing changes. `node.engine.id` names the engine the seam
-	 * is bound to, so a node whose engine implements only `call` reports an engine
-	 * that answered its reads and none of its transactions; that is the pre-existing
-	 * two-EVM shape, and it disappears when the engine implements this method.
+	 * REQUIRED, like {@link call}, and refused at construction if it is missing or
+	 * is not callable (`connectEngine` in `src/engine.ts`). The node does not fill
+	 * it in with its own `@ethereumjs/vm`: a node running one EVM for reads and
+	 * another for transactions has two chances to disagree with itself, and a
+	 * receipt from it could not be attributed to the engine `node.engine` names.
+	 *
+	 * NONCE CHECKING IS THE CALL PATH'S CHOICE, NOT A PARAMETER. It is ON here
+	 * because this method is the transaction path, and OFF for {@link call} because
+	 * that is `eth_call` semantics. Nothing on {@link TransactionRequest} can turn
+	 * it off, and nothing should be added that can: a transaction executed without
+	 * the check is silently replayable, so the property worth having is that
+	 * forgetting it is impossible rather than merely discouraged.
+	 *
+	 * THROW to reject a transaction the chain would not accept (a replayed nonce, an
+	 * unaffordable fee). The node's mining path is written against that shape —
+	 * `@ethereumjs/vm`'s `runTx` throws — so an engine reporting an invalid
+	 * transaction as a zero-gas result would have the node mine a block containing a
+	 * receipt for a transaction that never ran.
 	 */
-	transact?(request: TransactionRequest): Promise<TransactionResult>;
+	transact(request: TransactionRequest): Promise<TransactionResult>;
 }
 
 /** Which EVM a node is running on (see {@link SlimNode.engine}). */
@@ -377,14 +381,13 @@ export interface NodeOptions {
 	 */
 	blockEnv?: BlockEnv;
 	/**
-	 * The EVM this node runs on: reads (`eth_call`, `eth_estimateGas`,
-	 * `eth_fillTransaction`'s estimation) and, when the engine implements
-	 * {@link Engine.transact}, its transactions too. Default: `@ethereumjs/evm`,
-	 * i.e. exactly what the node has always run, on both halves.
+	 * The EVM this node runs on, BOTH halves: reads (`eth_call`,
+	 * `eth_estimateGas`, `eth_fillTransaction`'s estimation) through
+	 * {@link Engine.call} and transactions through {@link Engine.transact}.
+	 * Default: `@ethereumjs/evm`, i.e. exactly what the node has always run.
 	 *
-	 * An engine that implements only `call` leaves transactions on the node's own
-	 * `@ethereumjs/vm`, so such a node runs TWO EVMs — read `node.engine` to know
-	 * which one was installed.
+	 * An engine that implements only one half is refused at construction rather
+	 * than half-served — see {@link Engine.transact}.
 	 *
 	 * An engine is passed as an OBJECT, never named by a string: the core must not
 	 * reference engines it does not use, or a consumer of the JS-only path would
@@ -436,10 +439,8 @@ export interface SlimNode {
 	readonly senderMode: SenderMode;
 	/**
 	 * The engine this node was created with — `{id: '@ethereumjs/evm'}` unless one
-	 * was injected. It answers this node's reads, and its transactions too when it
-	 * implements {@link Engine.transact}; an engine that implements only the read
-	 * half leaves transactions on the node's own `@ethereumjs/vm`, so on such a node
-	 * a receipt cannot be attributed to this id.
+	 * was injected. It answered this node's reads AND executed its transactions, so
+	 * a receipt from this node can be attributed to this id.
 	 */
 	readonly engine: EngineInfo;
 	/** Stop timers / release resources. */

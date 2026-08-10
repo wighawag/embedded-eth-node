@@ -47,12 +47,7 @@ function hexToBytes(s: string): Uint8Array {
 	return hexToBytesStrict((s.startsWith('0x') ? s : '0x' + s) as `0x${string}`);
 }
 import {keccak_256} from '@noble/hashes/sha3.js';
-import {
-	connectEngine,
-	createEthereumjsEngine,
-	transacts,
-	type TransactingEngine,
-} from './engine.js';
+import {connectEngine, createEthereumjsEngine} from './engine.js';
 // The engine reports EXECUTION gas for a read and the node adds intrinsic gas on top;
 // an engine that charges intrinsic gas itself (revm) subtracts the SAME formula,
 // so it has exactly one home. See ./intrinsic-gas.ts.
@@ -215,20 +210,13 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 	// never a failure: an engine that was supplied and cannot come up fails the
 	// construction (see connectEngine). There is deliberately no path from
 	// "your engine did not work" to "here is a node on the default engine".
-	const defaultEngine = createEthereumjsEngine({vm, stateManager: sm});
-	const engine: Engine = options.engine ?? defaultEngine;
-	// THE TRANSACTION HALF, when the installed engine has not grown one. This is NOT
-	// the silent fallback `connectEngine` exists to refuse: that one would answer a
-	// consumer's chosen operation on an engine they did not choose. An engine with no
-	// `transact` never claimed the operation, and leaving its transactions on
-	// `@ethereumjs/vm` is exactly what every non-default engine did before the seam
-	// covered transactions — which is why it is what preserves behaviour. See
-	// `Engine.transact` in ./types.ts for why the method is optional at all, and note
-	// that a PRESENT-but-broken `transact` is refused at construction rather than
-	// landing here.
-	const transactionEngine: TransactingEngine = transacts(engine)
-		? engine
-		: defaultEngine;
+	//
+	// ONE ENGINE, BOTH HALVES. There is no per-operation selection here and no
+	// capability check: an `Engine` implements `call` AND `transact`, `connectEngine`
+	// refuses one that does not, and `node.engine` therefore names the EVM that
+	// answered this node's reads and executed its transactions alike.
+	const engine: Engine =
+		options.engine ?? createEthereumjsEngine({vm, stateManager: sm});
 	await connectEngine(engine, {
 		stateManager: sm,
 		common,
@@ -373,7 +361,7 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 			// `TransactionResult` — everything a receipt needs from an EVM and nothing
 			// else — so every line below is the NODE's own half: the block it landed in,
 			// the running `cumulativeGasUsed`, log positions, and the receipt itself.
-			const res = await transactionEngine.transact({tx, block});
+			const res = await engine.transact({tx, block});
 			cumulativeGasUsed += res.gasUsed;
 			const h = txHashOf(tx);
 			const from = tx.getSenderAddress().toString();

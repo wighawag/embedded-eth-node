@@ -12,9 +12,12 @@
  *      the NODE adds intrinsic gas.
  *   4. A reverting engine result still surfaces as a real execution-reverted
  *      JSON-RPC error (code 3) carrying the return data.
- *   5. An engine that implements ONLY the read half leaves transactions on the
- *      node's own `@ethereumjs/vm` — the read stub sees no extra `call` when a
- *      signed tx is mined, and that tx still produces a real receipt.
+ *   5. THERE IS NO SECOND EVM. `call` and `transact` are two operations on ONE
+ *      engine, so mining a signed tx adds no `call` (they are separate
+ *      operations) AND lands on the SAME engine's `transact` — proven by a stub
+ *      whose `transact` touches no state: the recipient receives nothing, which
+ *      is exactly what the deleted "fall back to the node's own
+ *      `@ethereumjs/vm`" path used to hide.
  *   6. The default engine keeps the EIP-2929 warm/access reset AND the
  *      checkpoint/revert that the pure-read path has always done: a repeated
  *      `eth_estimateGas` for a warm SSTORE returns the SAME number (dropping the
@@ -143,6 +146,7 @@ export async function runEngineSeamChecks() {
 	let connectedStateManagerUsable = false;
 	let connectCount = 0;
 
+	let stubTransactCount = 0;
 	const stub: Engine = {
 		id: 'test-stub',
 		connect(ctx) {
@@ -160,6 +164,21 @@ export async function runEngineSeamChecks() {
 			return {
 				returnValue: hexToBytes(STUB_RETURN),
 				executionGasUsed: STUB_EXECUTION_GAS,
+			};
+		},
+		// The transaction half of the SAME engine, and it touches no state at all.
+		// That is what makes the absence of a fallback measurable below: the transfer
+		// gets a receipt (this engine reported one) and the recipient gets nothing
+		// (no EVM moved any ether), where the deleted fallback would have executed it
+		// on the node's own `@ethereumjs/vm` and credited the recipient for real.
+		async transact(): Promise<TransactionResult> {
+			stubTransactCount++;
+			return {
+				status: 1,
+				gasUsed: 21_000n,
+				effectiveGasPrice: 1n,
+				logs: [],
+				logsBloom: new Uint8Array(256),
 			};
 		},
 	};
@@ -196,8 +215,10 @@ export async function runEngineSeamChecks() {
 	out.stubFilledGas = filled.tx.gas;
 	out.stubCallsSeen = seen.length; // the three read-path callers, once each
 
-	// 5) an engine with NO transaction half leaves the tx on @ethereumjs/vm: the
-	// read engine sees no extra call, and the tx is executed and mined as ever.
+	// 5) reads and transactions are TWO OPERATIONS ON ONE ENGINE: mining a signed tx
+	// adds no `call`, goes to this engine's `transact`, and — because that `transact`
+	// touches nothing — leaves the recipient with nothing. The node has no second EVM
+	// to quietly mine on.
 	const stubTransport = custom(
 		{request: ({method, params}: any) => stubNode.request({method, params})},
 		{retryCount: 0},
@@ -217,6 +238,7 @@ export async function runEngineSeamChecks() {
 	out.stubTxStatus = rcpt.status;
 	out.stubTxGasUsed = rcpt.gasUsed.toString();
 	out.stubCallsAfterTx = seen.length;
+	out.stubTransactCount = stubTransactCount;
 	out.stubTargetBalance = (
 		await stubPub.getBalance({address: TARGET})
 	).toString();
@@ -235,6 +257,12 @@ export async function runEngineSeamChecks() {
 					executionGasUsed: 7n,
 					error: 'revert',
 				};
+			},
+			// Never called here; present because an `Engine` implements both halves
+			// and a node whose engine does not is refused at construction (asserted in
+			// ./slim-node-checks.ts, with the other engine refusals).
+			async transact(): Promise<TransactionResult> {
+				throw new Error('test-reverting: transact is not exercised here');
 			},
 		},
 	});

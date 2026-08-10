@@ -1,5 +1,5 @@
 /**
- * revm.ts — `embedded-eth-node/revm`: a READ engine backed by `revm-wasm`.
+ * revm.ts — `embedded-eth-node/revm`: the node's EVM, backed by `revm-wasm`.
  *
  * ```ts
  * import {createNode} from 'embedded-eth-node';
@@ -15,16 +15,16 @@
  * is nevertheless a plain `dependency`: a JS-only consumer pays install bytes
  * and ZERO bundle bytes.
  *
- * SCOPE: THE READ HALF OF THE SEAM ONLY — `eth_call`, `eth_estimateGas` and
- * `eth_fillTransaction`'s estimation. It implements `Engine.call` and not (yet)
- * `Engine.transact`, so a node with this engine installed still mines its
- * transactions on its own `@ethereumjs/vm`, exactly as it did before the seam
- * covered transactions; the write half is the task
- * `revm-executes-the-first-transaction-with-commit` (cited by SLUG, not by bucket
- * path, because a work item's status is its folder). `Revm#call`
- * is structurally incapable of committing, so this engine needs neither the
- * checkpoint/revert nor the EIP-2929 reset the default `@ethereumjs/evm` engine
- * pays for.
+ * BOTH HALVES OF THE SEAM. `call` serves `eth_call`, `eth_estimateGas` and
+ * `eth_fillTransaction`'s estimation; `transact` executes a signed transaction
+ * AND COMMITS it, which is the node's mining path. They are asymmetric in ONE
+ * respect and it is a transaction's VALIDITY: `call` relaxes base fee, block gas
+ * limit and EIP-3607 because a simulation is not a transaction, and `transact`
+ * relaxes NOTHING — `revm-wasm` refuses to combine any of those switches with
+ * committing, so the asymmetry is enforced by the binding rather than merely
+ * intended. `Revm#call` is additionally incapable of committing whatever its
+ * options say, so a read needs neither the checkpoint/revert nor the EIP-2929
+ * reset the default `@ethereumjs/evm` engine pays for.
  *
  * WASM DELIVERY IS ONE CODE PATH. `revm-wasm` accepts bytes, a `URL`, a string,
  * a `Response` or an already-compiled `WebAssembly.Module`, so whatever the
@@ -35,10 +35,14 @@
  * (`readFileSync(fileURLToPath(wasmUrl))`) and pass those. In a browser the URL
  * works as-is.
  *
- * WHAT IT COSTS. State is read through `SimpleStateManager`'s public checkpoint
- * stacks (see ./revm-state-store.ts and ADR 0005), which is the only synchronous
- * view of the node's state that exists — so this engine serves `stateMode:'none'`
- * ONLY, and refuses `'trie'` at construction rather than at the first opcode.
+ * WHAT IT COSTS. State is read AND WRITTEN through `SimpleStateManager`'s public
+ * checkpoint stacks plus the node's own storage overlays (see
+ * ./revm-state-store.ts, ADR 0005 for the reach-through and ADR 0010 for the
+ * ownership decision), which is the only synchronous view of the node's state
+ * that exists — so this engine serves `stateMode:'none'` ONLY, and refuses
+ * `'trie'` at construction rather than at the first opcode. THE NODE KEEPS
+ * OWNING STATE: nothing is copied into wasm, and a transaction writes back only
+ * the accounts it touched and the slots that changed.
  *
  * AND WHICH FORKS. It serves the hardforks whose transaction costing the node's
  * own arithmetic reproduces AND the PROTOCOL agrees with
@@ -48,9 +52,11 @@
  * enforces. See ADR 0008.
  */
 import type {Common} from '@ethereumjs/common';
+import type {Block} from '@ethereumjs/block';
+import {bigIntToBytes, equalsBytes, generateAddress} from '@ethereumjs/util';
 import type {OverlayStorageStateManager} from './state-manager.js';
 import {createRevm, type SpecName, type WasmSource} from 'revm-wasm';
-import type {Revm} from 'revm-wasm';
+import type {BlockEnv, ExecuteOptions, Outcome, Revm} from 'revm-wasm';
 import {intrinsicGas} from './intrinsic-gas.js';
 import {SimpleStateManagerStore} from './revm-state-store.js';
 import type {
@@ -58,6 +64,8 @@ import type {
 	EngineContext,
 	ReadCallRequest,
 	ReadCallResult,
+	TransactionRequest,
+	TransactionResult,
 } from './types.js';
 
 /** This engine's stable identifier, as reported by `node.engine.id`. */
@@ -298,7 +306,7 @@ export async function createRevmEngine(
 						'Pass the engine to createNode() before using it.',
 				);
 			}
-			store.beginCall();
+			store.beginExecution();
 			const isCreate = request.to === undefined;
 			const intrinsic = intrinsicGas(request.data, isCreate, nodeCommon);
 			const header = request.block.header;
@@ -313,31 +321,8 @@ export async function createRevmEngine(
 			// (`CallerGasLimitMoreThanBlock`), and with it the divergence window where
 			// a call needing within `intrinsic` gas of the entire block gas limit ran
 			// out of gas on revm and completed on the default engine.
-			const blockGasLimit = header.gasLimit;
 			const gasLimit = request.gasLimit + intrinsic;
-
-			const block = {
-				number: header.number,
-				timestamp: header.timestamp,
-				gasLimit: blockGasLimit,
-				coinbase: header.coinbase.bytes,
-				// THE NODE'S REAL BASE FEE, because a contract can read it. `BASEFEE`
-				// inside a view function must report the block the node actually has;
-				// the validation the real value would otherwise trip is turned off
-				// explicitly below (`disableBaseFee`) rather than bought with a zeroed
-				// base fee, which is a lie the contract sees.
-				baseFeePerGas: header.baseFeePerGas ?? 0n,
-				// PREVRANDAO. Post-Merge it IS `mixHash` (the node writes
-				// `NodeOptions.blockEnv.prevRandao` there and pins difficulty to 0), and
-				// `mixHash` is read rather than the `prevRandao` getter because that
-				// getter THROWS on a pre-Merge fork — which stopped being belt and braces
-				// the moment `berlin` and `london` were admitted, and is now the reason a
-				// read on either of them runs at all.
-				prevRandao: header.mixHash,
-				...(header.excessBlobGas !== undefined
-					? {excessBlobGas: header.excessBlobGas}
-					: {}),
-			};
+			const block = blockEnvOf(request.block);
 
 			const common = {
 				from: request.from.bytes,
@@ -371,10 +356,13 @@ export async function createRevmEngine(
 				//                       never enforced it, so without this the two
 				//                       engines disagree about whether the call runs.
 				//
-				// They are simulation-only: `revm-wasm` REFUSES to combine any of them
-				// with committing (a committed transaction from a contract address is one
-				// the chain would reject). This engine only ever reads, so that constraint
-				// is structural here, but a future WRITE path must not reach for them.
+				// THEY BELONG TO THIS METHOD AND TO NOTHING ELSE. `revm-wasm` REFUSES to
+				// combine any of them with committing (a committed transaction from a
+				// contract address is one the chain would reject), so `transact` below must
+				// not reach for them — and a `commit:false` simulation that copied this
+				// object would run a transaction with relaxed VALIDITY and no field of the
+				// result would show it. `test/revm-engine.spec.ts` asserts their ABSENCE on
+				// the transaction path rather than trusting this comment.
 				//
 				// AND THE ONE THAT IS DELIBERATELY NOT SET: `disableBalanceCheck`.
 				// Relaxing a TRANSACTION's validity rules must not relax the VALUE
@@ -410,8 +398,10 @@ export async function createRevmEngine(
 			// through `create`, where `data` is init code — `call` would treat it as
 			// calldata to the zero address and return a plausible, wrong estimate.
 			// `commit: false` + `checkNonce: false` make it the simulation `eth_call`
-			// semantics ask for; the store's write methods throw, so a commit that
-			// slipped through would be loud rather than silent.
+			// semantics ask for. They are stated EXPLICITLY here because `create`
+			// defaults BOTH the other way (it is a transaction entry point), which is
+			// the mirror image of `transact` below, where both defaults are what a
+			// transaction wants and passing either would be a value a refactor can flip.
 			const outcome = isCreate
 				? revm.create({...common, commit: false, checkNonce: false})
 				: revm.call({...common, to: request.to!.bytes});
@@ -428,5 +418,255 @@ export async function createRevmEngine(
 					: (outcome.error ?? `revm ${outcome.status}`),
 			};
 		},
+
+		async transact(request: TransactionRequest): Promise<TransactionResult> {
+			store.beginExecution();
+			const tx = request.tx as TransactionFields;
+
+			// THE SENDER CROSSES THE SEAM AS A VALUE, and this engine must never
+			// recover one of its own. `senderMode:'trusted'` exists so that the CLAIMED
+			// sender may differ from the recoverable one (it shadows
+			// `getSenderAddress()` on the parsed transaction — see `parseTx` in
+			// ./node.ts), so an engine calling `Revm#recoverSigner` here would execute
+			// a transaction as the WRONG address and hand back a plausible receipt.
+			// revm agrees by construction: `transact` takes `from` directly and never
+			// recovers anything.
+			const sender = request.tx.getSenderAddress().bytes;
+			const options: ExecuteOptions = {
+				from: sender,
+				data: tx.data ?? EMPTY_DATA,
+				value: tx.value ?? 0n,
+				gasLimit: tx.gasLimit,
+				// THE NONCE IS SUPPLIED AND THE CHECK IS NOT MENTIONED. `Revm#transact`
+				// and `Revm#create` default `checkNonce` ON precisely because a caller who
+				// forgets it gets a silently replayable transaction, and the node's
+				// callers must not be able to reach that choice at all: it is decided by
+				// WHICH METHOD OF THIS ENGINE was called (story 10 of the spec), so there
+				// is no `checkNonce` here to flip and no option on
+				// `TransactionRequest` to pass one through.
+				nonce: tx.nonce,
+				...feesOf(tx),
+				// EIP-2930/1559 access list, in revm's own shape. Charged and warmed by
+				// revm; the node does not price it (`eip-2930-access-lists-are-charged-and
+				// -warmed` is where that is proven load-bearing rather than merely
+				// passed). DROPPING it would not be caught by a cross-engine gas diff
+				// alone, because a list the node also failed to charge would agree.
+				...(tx.accessList !== undefined && tx.accessList.length > 0
+					? {
+							accessList: tx.accessList.map(([address, storageKeys]) => ({
+								address,
+								storageKeys,
+							})),
+						}
+					: {}),
+				// NOT MAPPED, and named so it is a known gap rather than an oversight:
+				// EIP-4844's `blobVersionedHashes` / `maxFeePerBlobGas` (a type-3
+				// transaction) and EIP-7702's `authorizationList` (post-Cancun, so
+				// unreachable while this engine admits Berlin..Cancun). The type-3 receipt
+				// is incomplete on BOTH engines — `blobGasUsed` / `blobGasPrice` are
+				// absent from the seam's result altogether — and that limitation is
+				// documented where it would be met by
+				// `document-the-type-3-receipt-gap-where-it-would-be-met`.
+				spec,
+				chainId,
+				block: blockEnvOf(request.block),
+				// AND NOTHING ELSE. No `commit` (it defaults to committing, which is what
+				// this method IS), no `returnState` (the logs, the bloom and the account
+				// changes are all part of a transaction's answer, and `returnState:false`
+				// cannot be combined with committing anyway), and above all NONE of the
+				// read path's simulation switches: `disableBaseFee`,
+				// `disableBlockGasLimit`, `disableEip3607` and `disableBalanceCheck` each
+				// relax a transaction's VALIDITY, and a transaction that runs with them
+				// relaxed is not a transaction. `revm-wasm` refuses to combine them with
+				// committing, so copying the read path's options object here would throw
+				// rather than lie — but that is the binding protecting us, not a design,
+				// and the absence is asserted in `test/revm-engine.spec.ts`.
+				//
+				// ONE CONSEQUENCE, STATED RATHER THAN WORKED AROUND: the node lets a
+				// client set a gas limit above the block's and passes
+				// `skipBlockGasLimitValidation` to `runTx` on the default engine
+				// (./engine.ts). There is no committing equivalent here, so a transaction
+				// whose gas limit exceeds the node's `blockGasLimit` is REJECTED by revm
+				// (`CallerGasLimitMoreThanBlock`) and accepted by the default engine. That
+				// asymmetry is the binding's, it is why the flag never became a neutral
+				// request field, and the honest answer is a loud rejection rather than a
+				// switch that would relax the whole of validity to buy it back.
+			};
+
+			// A DEPLOYMENT GOES THROUGH `create`, where `data` is INIT CODE: `transact`
+			// would treat it as calldata to the zero address, mine a receipt with no
+			// contract address and deploy nothing — measured, before this branch existed.
+			// Same split as the read half makes for a CREATE-shaped estimate, and for the
+			// same reason. BOTH entry points commit and check the nonce by default, which
+			// is why neither is mentioned in `options`.
+			const outcome =
+				tx.to === undefined
+					? revm.create(options)
+					: revm.transact({...options, to: tx.to.bytes});
+
+			// A TRANSACTION THAT NEVER RAN IS NOT A RECEIPT. revm reports an invalid
+			// transaction as an OUTCOME (`status: 'validation-error'`, zero gas, nothing
+			// committed) where `runTx` THROWS, and the node's mining path is written
+			// against the throwing shape: `eth_sendRawTransaction` must fail rather than
+			// mine a block containing a zero-gas receipt for a transaction that was
+			// rejected. So this converts. The MESSAGE is revm's own, verbatim, because
+			// it is the only thing that knows why (`NonceTooLow { tx: 0, state: 1 }`);
+			// turning these into the node's own JSON-RPC errors, matched against what
+			// the default engine says, is
+			// `replayed-and-invalid-transactions-are-rejected-as-the-nodes-own-errors`.
+			if (outcome.status === 'validation-error') {
+				throw new Error(
+					`embedded-eth-node/revm: the transaction is invalid and was NOT executed: ` +
+						`${outcome.error ?? 'revm reported no reason'}`,
+				);
+			}
+
+			const created = createdAddressOf(outcome, tx, sender);
+			return {
+				status: outcome.success ? 1 : 0,
+				// `gasUsed`, NOT `totalGasSpent`, and the two are different fields with
+				// different meanings on this outcome: `gasUsed` is NET of refunds and
+				// `totalGasSpent` is the gross number before them. A receipt reports the
+				// net one — it is what the sender paid for, and what `@ethereumjs/vm`'s
+				// `totalGasSpent` (confusingly) already is, since `runTx` subtracts the
+				// refund from it before returning. THE READ PATH ABOVE TAKES THE OTHER
+				// ONE, deliberately: a read has no refund and `eth_estimateGas` wants the
+				// gross figure. Copying that mapping down here would put gas BEFORE
+				// refunds on every receipt, which a value transfer (zero refund) cannot
+				// detect — measured: a storage-clearing transaction reports
+				// `totalGasSpent` 26004, `gasRefunded` 4800 and `gasUsed` 21204
+				// (docs/spikes/revm-executes-the-first-transaction-with-commit/).
+				gasUsed: outcome.gasUsed,
+				// revm's OWN `Transaction::effective_gas_price`, not a second
+				// implementation of `min(maxFee, baseFee + tip)`: the engine that charged
+				// the sender is the engine that reports what it charged.
+				effectiveGasPrice: outcome.effectiveGasPrice,
+				// Emission order, reverted frames already excluded by revm.
+				logs: outcome.logs ?? [],
+				// ALWAYS 256 BYTES HERE, and that is the package's decoder doing work:
+				// the wire format OMITS the bloom when the log count is zero, and the
+				// decoder materialises the all-zero one. A hand-rolled reader of the blob
+				// would either mis-parse everything after it or hand the node a 0-byte
+				// `logsBloom`, which is why this path uses `revm-wasm`'s own decoder.
+				logsBloom: outcome.logsBloom ?? EMPTY_BLOOM,
+				...(created !== undefined ? {createdAddress: created} : {}),
+			};
+		},
 	};
+}
+
+/** Calldata for a transaction that carries none. */
+const EMPTY_DATA = /* @__PURE__ */ new Uint8Array();
+/** The bloom of no logs, for the impossible case where the decoder omits it. */
+const EMPTY_BLOOM = /* @__PURE__ */ new Uint8Array(256);
+
+/**
+ * The transaction fields this engine reads, named once.
+ *
+ * `TypedTransaction` is a UNION of five classes and the fee fields exist on
+ * different members of it (`gasPrice` on legacy and EIP-2930, `maxFeePerGas` on
+ * the 1559 family), so reading them off the union directly does not typecheck and
+ * reading them off `any` typechecks anything. This is the narrow middle: exactly
+ * the fields that are read, all optional, so a missing one is a branch rather
+ * than a runtime surprise.
+ */
+interface TransactionFields {
+	readonly to?: {readonly bytes: Uint8Array};
+	readonly data?: Uint8Array;
+	readonly value?: bigint;
+	readonly gasLimit: bigint;
+	readonly nonce: bigint;
+	readonly gasPrice?: bigint;
+	readonly maxFeePerGas?: bigint;
+	readonly maxPriorityFeePerGas?: bigint;
+	readonly accessList?: readonly [Uint8Array, Uint8Array[]][];
+}
+
+/**
+ * The node's block, as revm's block environment. ONE mapping, shared by both
+ * operations, because a read and a transaction observe the SAME block and an
+ * engine that described it two ways could disagree with itself about `BASEFEE`.
+ *
+ * THE NODE'S REAL VALUES, never convenient ones. `BASEFEE` inside a contract
+ * must report the block the node actually has; on the read path the validation
+ * the real base fee would otherwise trip is turned off explicitly
+ * (`disableBaseFee`) rather than bought with a zeroed base fee, which is a lie
+ * the contract sees.
+ *
+ * PREVRANDAO is read off `mixHash`. Post-Merge it IS `mixHash` (the node writes
+ * `NodeOptions.blockEnv.prevRandao` there and pins difficulty to 0), and the
+ * `prevRandao` getter THROWS on a pre-Merge fork — which stopped being belt and
+ * braces the moment `berlin` and `london` were admitted.
+ */
+function blockEnvOf(block: Block): BlockEnv {
+	const header = block.header;
+	return {
+		number: header.number,
+		timestamp: header.timestamp,
+		gasLimit: header.gasLimit,
+		coinbase: header.coinbase.bytes,
+		baseFeePerGas: header.baseFeePerGas ?? 0n,
+		prevRandao: header.mixHash,
+		...(header.excessBlobGas !== undefined
+			? {excessBlobGas: header.excessBlobGas}
+			: {}),
+	};
+}
+
+/**
+ * The transaction's fee fields, in revm's vocabulary.
+ *
+ * revm keeps `gasPrice` and `maxFeePerGas` in ONE field and derives the EIP-2718
+ * transaction type from which fields are present, so the two families are passed
+ * as the two families and the type is left to the binding — whose own
+ * documentation says the derivation is the part most easily got wrong by hand.
+ * The PRESENCE of `maxPriorityFeePerGas` is what makes it derive a 1559-family
+ * transaction, so an undefined one is not the same as a zero one.
+ */
+function feesOf(tx: TransactionFields): {
+	gasPrice?: bigint;
+	maxFeePerGas?: bigint;
+	maxPriorityFeePerGas?: bigint;
+} {
+	if (tx.maxFeePerGas !== undefined) {
+		return {
+			maxFeePerGas: tx.maxFeePerGas,
+			maxPriorityFeePerGas: tx.maxPriorityFeePerGas ?? 0n,
+		};
+	}
+	return {gasPrice: tx.gasPrice ?? 0n};
+}
+
+/**
+ * The address a TOP-LEVEL creation produced, derived rather than reported — and
+ * the ONE place that derivation lives.
+ *
+ * revm's outcome has no created-address field, so it comes out of the account
+ * changes: the entry flagged `created`. THAT IS AMBIGUOUS THE MOMENT A
+ * TRANSACTION PERFORMS NESTED CREATIONS, because every one of them is flagged the
+ * same way, and the receipt's `contractAddress` names only the top-level one. Two
+ * things narrow it here:
+ *
+ *  1. a transaction with a `to` creates nothing AT THE TOP LEVEL, whatever it
+ *     creates inside, so it has no `contractAddress` at all;
+ *  2. among several created entries, the top-level one is the address the
+ *     PROTOCOL says a creation transaction produces, `keccak(rlp(sender, nonce))`
+ *     — which `@ethereumjs/util` already computes, and which is unambiguous
+ *     because a transaction's own creation is always a plain CREATE.
+ *
+ * The nested case is only PARTIALLY discharged: it is asserted against
+ * `@ethereumjs/vm` by `revm-write-callbacks-reproduce-the-post-state`, on a
+ * transaction that actually performs one. This function is where that assertion
+ * lands, rather than an expression inlined in the result mapping.
+ */
+function createdAddressOf(
+	outcome: Outcome,
+	tx: TransactionFields,
+	sender: Uint8Array,
+): Uint8Array | undefined {
+	if (tx.to !== undefined) return undefined;
+	const created = (outcome.stateChanges ?? []).filter((c) => c.created);
+	if (created.length <= 1) return created[0]?.address;
+	const topLevel = generateAddress(sender, bigIntToBytes(tx.nonce));
+	return created.find((c) => equalsBytes(c.address, topLevel))?.address;
 }

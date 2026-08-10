@@ -23,7 +23,7 @@ import {defineConfig, devices} from '@playwright/test';
 // drop.
 //
 // BOTH ROWS ABOVE ARE RAW backends, which is not what a consumer ships. The
-// `embedded-eth-node-revm-engine` row measures the node WITH the revm read engine
+// `embedded-eth-node-revm-engine` row measures the node WITH the revm engine
 // installed, and that is the number to cite for the recommended configuration:
 // it keeps essentially all of raw revm's frame win (the node's own dispatch is
 // what remains, and at this call shape it is small). Measured figures, with their
