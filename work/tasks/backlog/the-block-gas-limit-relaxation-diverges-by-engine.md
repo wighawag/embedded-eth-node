@@ -12,18 +12,30 @@ covers: []
 
 This is the class of defect the whole spec exists to remove ("a node running two different EVMs has two chances to disagree with itself"), so it cannot rest as an accepted quirk. Decide which behaviour is CORRECT and make both engines do it. The options, and they are not symmetric:
 
-**Stop relaxing it.** Drop `skipBlockGasLimitValidation` from the default engine, so both engines reject a transaction whose gas limit exceeds the block's, which is also what a real node does. This is the honest direction, and the cost has to be checked rather than assumed: the flag was passed for a reason (the node mines one block per transaction, and the node's own default read budget is the block gas limit), so find out what actually breaks. The conformance battery's reference `runTx` passes the same flag, so it will not tell you.
+**THE RESOLUTION IS DECIDED (maintainer, 2026-08-10): drop the skip flag, and let CONFIGURATION buy the permissiveness back.** Remove `skipBlockGasLimitValidation` so both engines enforce the rule a real node enforces, and tell a consumer who wants enormous gas limits to raise `blockGasLimit`, which `NodeOptions` already exposes (default 30,000,000). The permissiveness stops being a hidden per-transaction exemption that one engine cannot honour and becomes a visible, configured property of the block, which BOTH engines then honour by construction: revm rejects against the block gas limit it was given, `runTx` rejects against the same one, and they are given the same one.
 
-**Or keep relaxing it and make revm agree.** Not available on a committing path today, by the binding's own refusal, so this reduces to raising the mined block's gas limit to accommodate the transaction, which changes what a block MEANS and would show up in `eth_getBlockByNumber`. Say so plainly if you take it.
+It is also strictly more honest than the flag. Today a transaction is accepted against a limit the block does not have. Afterwards, if the block says its limit is huge, the limit really is huge, and `GASLIMIT` reports it to a contract truthfully.
 
-**Or refuse the configuration.** If neither engine can be made to match, the honest edge is that the node REFUSES a transaction whose gas limit exceeds the block's, identically on both engines, with an error naming the reason. That is a behaviour change on the default engine and needs a changeset.
+Three consequences to handle rather than discover:
+
+- **The default does not move.** `blockGasLimit` stays 30,000,000, so nothing changes for a consumer who never asked for more. What changes is that a transaction asking for MORE than the configured limit is refused instead of mined.
+- **The read budget follows the block gas limit**, so a consumer who sets it enormous also enlarges the default `eth_call` budget, and a runaway contract then burns far more wall clock before running out of gas. Decide explicitly whether that link should be broken (a separately-bounded read budget) or documented as the cost of the configuration; do not leave it to be discovered by someone whose browser tab locks up.
+- **The refusal must be legible**, naming the limit that was exceeded and `blockGasLimit` as the knob, in this repo's honest-edge voice, on BOTH engines.
+
+~~**Stop relaxing it.**~~ (Superseded by the decision above; kept because the cost it names is still what you must check.) Dropping `skipBlockGasLimitValidation` from the default engine, so both engines reject a transaction whose gas limit exceeds the block's, which is also what a real node does. This is the honest direction, and the cost has to be checked rather than assumed: the flag was passed for a reason (the node mines one block per transaction, and the node's own default read budget is the block gas limit), so find out what actually breaks. The conformance battery's reference `runTx` passes the same flag, so it will not tell you.
+
+~~**Or keep relaxing it and make revm agree.**~~ REJECTED. Not available on a committing path today, by the binding's own refusal, so this reduces to raising the mined block's gas limit to accommodate the transaction, which changes what a block MEANS and would show up in `eth_getBlockByNumber`. Say so plainly if you take it.
+
+~~**Or refuse the configuration.**~~ Subsumed by the decision: the refusal IS the behaviour, and configuration is what lifts it. If neither engine can be made to match, the honest edge is that the node REFUSES a transaction whose gas limit exceeds the block's, identically on both engines, with an error naming the reason. That is a behaviour change on the default engine and needs a changeset.
 
 Whichever is chosen, the outcome is that the two engines answer the same question the same way, and a test asserts it on BOTH rather than describing it in a comment.
 
 ## Acceptance criteria
 
-- [ ] A transaction whose gas limit exceeds the block gas limit gets the SAME outcome on both engines, asserted on both.
-- [ ] The chosen resolution is recorded where the relaxation lives, including what was checked to establish that removing it (or keeping it) is safe.
+- [ ] `skipBlockGasLimitValidation` is gone, and a transaction whose gas limit exceeds the block gas limit is REFUSED identically on both engines, asserted on both.
+- [ ] Raising `blockGasLimit` restores the old permissiveness end to end: a transaction with a gas limit above 30,000,000 is mined on a node configured for it, on both engines, and `GASLIMIT` read through a contract reports the configured value.
+- [ ] The refusal names the limit that was exceeded and `blockGasLimit` as the knob, on both engines.
+- [ ] The link between the block gas limit and the default read budget is decided explicitly (broken or documented) and the reasoning recorded at the code site.
 - [ ] The conformance battery covers the case, so it cannot regress silently. Note the battery's own reference passes the same skip flag, so the assertion must be about the NODE's answer, not the reference's.
 - [ ] If the resolution changes what the default engine accepts, there is a changeset saying so.
 - [ ] Reference gas is unchanged: `number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 returning `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`.
@@ -42,4 +54,6 @@ Whichever is chosen, the outcome is that the two engines answer the same questio
 >
 > BEWARE THE REFERENCE. The conformance battery's own `runTx` passes the same skip flag, so a battery that diffs node against reference cannot see this. Assert on the node's answer per engine.
 >
-> Prefer the direction that makes the node MORE like a real node, and if you take it, establish what the relaxation was buying rather than assuming it was cargo. The node mines one block per transaction, which is probably why it is there.
+> THE DIRECTION IS DECIDED: drop the flag, and let `blockGasLimit` (already in `NodeOptions`) buy the permissiveness back. Do not re-open it. What is left to you is doing it well: the refusal must say which limit was exceeded and which knob raises it, the configured-high-limit path must be proven end to end on BOTH engines, and the block-gas-limit-to-read-budget link must be decided rather than inherited.
+>
+> Do NOT reach for the shape where the node quietly widens the block it hands the engine to fit the transaction. That would make `GASLIMIT` lie to a contract, which is the exact class of dishonesty the block-environment work removed.
