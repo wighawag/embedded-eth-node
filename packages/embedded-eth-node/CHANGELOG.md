@@ -1,5 +1,369 @@
 # embedded-eth-node
 
+## 0.3.0
+
+### Minor Changes
+
+- cf377cd: **The block gas limit is ENFORCED, on both engines, and `blockGasLimit` is what lifts it (behaviour change on the default engine).** A transaction whose gas limit exceeds the block's is now REFUSED. It used to be mined on the default `@ethereumjs/evm` engine, because the node passed `@ethereumjs/vm`'s `skipBlockGasLimitValidation` to `runTx`, and REJECTED on revm, which expresses the same relaxation as a simulation switch it refuses to combine with committing. Same node, same transaction, two answers depending on which EVM was installed. That flag is gone.
+
+  If you want enormous gas limits, ask for them: `createNode({blockGasLimit: 100_000_000n})` (default still `30_000_000n`, so nothing changes for a node that never asked for more). The permissiveness stops being a hidden per-transaction exemption that one engine cannot honour and becomes a visible property of the block that BOTH honour by construction, because both are handed the same block. It is also more honest: the transaction is no longer accepted against a limit the block does not have, and `GASLIMIT` reports the configured number to a contract, as does `eth_getBlockByNumber`.
+
+  **The refusal names what was exceeded and what raises it**, identically on every engine, because the NODE answers it at submit rather than each EVM at execution: the block is the node's half of the seam on any engine, and neither EVM's own words carry the numbers or know that `blockGasLimit` exists (`@ethereumjs/vm` says "tx has a higher gas limit than the block", revm says `Transaction(CallerGasLimitMoreThanBlock)`). It is an `RpcError` with code `-32000` (the range geth uses for a transaction its pool refuses), thrown by the `eth_sendRawTransaction*` call that submitted it, so an over-limit transaction never enters the pending queue and cannot take a later `mine()` batch down with it. Both engines still enforce the same rule underneath as the backstop.
+
+  **The default read budget is deliberately NOT tied to `blockGasLimit`.** An `eth_call` that names no `gas` still gets a fixed 30,000,000, so raising the block gas limit does not silently buy every unbudgeted read a proportionally longer runaway before it halts (and the revm engine's Osaka refusal quotes that budget as a fixed number). Pass `gas` on the call when you want a bigger one. The reasoning is recorded at the code site in `src/node.ts`.
+
+  This supersedes the "one asymmetry stated rather than worked around" note in the revm-transactions entry of this same release: the asymmetry is not shipped, it is removed.
+
+  The default entry's bundle-size baseline is re-pinned 417.2 -> 417.8 KB raw / 125.7 -> 126.0 KB gzip. The 0.6 KB is the refusal's prose in the core bundle, paid by every consumer including the JS-only one, and it is the feature: an error that does not say which limit was exceeded or which knob raises it is the thing this change exists to remove.
+
+  Covered by the differential conformance battery on BOTH engines and both state modes (`block gas limit refuses an over-limit tx; blockGasLimit lifts it`), asserting the NODE's own answer rather than the reference's, because that battery's reference `runTx` passes `skipBlockGasLimitValidation` itself and is therefore blind to exactly this bug. Reference gas is unchanged (`number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 -> `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`).
+
+- 085aa37: **BREAKING (no alias):** the engine seam now covers TRANSACTIONS as well as reads, so `ReadEngine` is `Engine` and `node.readEngine` is `node.engine`. No behaviour changes.
+
+  The node had ONE seam for reads and a HARDCODED path for writes: an injected engine
+  answered `eth_call`, while transactions bypassed it and went straight to
+  `@ethereumjs/vm`'s `runTx`. The seam is now ONE interface with TWO operations —
+  `call` (read-only) and `transact` (executes and commits) — the default
+  `@ethereumjs/evm` engine implements both, and the node's mining path executes
+  through the engine rather than calling `runTx` itself.
+
+  Renamed on the public surface, with **no deprecation alias**, because a shim would
+  have left two words for one concept from the day it landed:
+  - `ReadEngine` → `Engine` (and it gained `transact`)
+  - `ReadEngineContext` → `EngineContext`
+  - `ReadEngineInfo` → `EngineInfo`
+  - `SlimNode.readEngine` → `SlimNode.engine` (same `{id}` value, over comlink too)
+  - `ReadCallRequest` / `ReadCallResult` keep their names: they are the READ
+    operation's request and result, and that is still what they are.
+
+  New, and the point of the change: `TransactionRequest` (the signed transaction the
+  node parsed, plus the block it is mined in) and `TransactionResult` — what a
+  RECEIPT needs from an EVM and nothing else: `status`, `gasUsed` (net of refunds),
+  `effectiveGasPrice`, `logs` in emission order (`TransactionLog`: address, topics,
+  data as raw bytes), `logsBloom`, and `createdAddress`. `runTx`'s `amountSpent`,
+  `gasRefund`, `minerValue`, `accessList` and `execResult` are deliberately absent:
+  no receipt reads them, and a field that exists only because one engine returns it
+  is what makes two engines incomparable. `effectiveGasPrice` now comes from the
+  engine that executed the transaction (the node's legacy-safe computation moved
+  behind the default engine), so the fee arithmetic has one implementation per engine
+  and none in the node.
+
+  What did NOT move, on any engine: block construction, `cumulativeGasUsed`, receipt
+  assembly, the RPC layer, transaction parsing and sender recovery are still the
+  node's. `@ethereumjs/vm`'s `skipBlockGasLimitValidation` / `skipHardForkValidation`
+  stayed INSIDE the default engine rather than becoming neutral request fields — they
+  are one EVM's vocabulary, and `revm-wasm` refuses to combine its equivalent
+  relaxation with committing, so a neutral field would have been a promise another
+  engine could only throw at. The reasoning is at the code site in `src/engine.ts`.
+  (Later in this same release, `skipBlockGasLimitValidation` was DROPPED rather than
+  relocated. See the block-gas-limit entry: a relaxation only one engine could honour
+  was the divergence, wherever it lived. `skipHardForkValidation` still lives there.)
+
+  `transact` was OPTIONAL, transitionally: an engine that omitted it left transactions
+  on the node's own `@ethereumjs/vm`, which is exactly what every non-default engine
+  did before this change, and `createRevmEngine()` from `embedded-eth-node/revm` was
+  in that state — it served the seam's read half only, so a node with it installed
+  still mined on `@ethereumjs/vm` and a receipt could not be attributed to
+  `node.engine.id`. **That state did not survive the release**: the sibling entry for
+  `revm-executes-the-first-transaction-with-commit` makes `transact` REQUIRED, deletes
+  that fallback and gives the revm engine its write half, so no published version ever
+  shipped the optional marker (written in the past tense for that reason — the two
+  entries land under one version heading). A `transact` that is present but is not a
+  function is refused at construction, next to the existing engine refusals, because a
+  half-built engine silently mining somewhere else is the same class of lie those
+  refusals exist to prevent.
+
+  No behaviour change anywhere: reference gas is identical (`number()` 2446,
+  `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 →
+  `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`), and the
+  differential conformance battery (both state modes, and again with the revm engine
+  installed), the GeneralStateTests, trusted-sender, persistence, worker and
+  viem-surface suites all pass unchanged. `test/engine-seam.spec.ts` gained the bar
+  for the new half: an engine whose `transact` returns values no EVM would produce
+  for a 21000-gas transfer, so the receipt proves the ENGINE executed the transaction
+  rather than `runTx` having been called anyway. The default entry's bundle-size
+  baseline is re-pinned 416.3 → 417.1 KB raw / 125.4 → 125.7 KB gzip (the result
+  mapping plus one more refusal string; still zero bytes of `revm-wasm`).
+
+  `docs/adr/0006-the-engine-is-an-injected-object-not-a-named-string.md` carries a
+  dated amendment: the injected-object decision is unchanged, its scope widened.
+
+- 59f2df2: **A replayed or invalid transaction is REFUSED by the NODE, in one vocabulary, on every engine.** A transaction whose nonce the sender has already used, whose nonce this node will never reach, whose sender cannot cover `value + gasLimit * maxFeePerGas`, or whose gas limit is below its intrinsic gas is now refused above the engine seam, with an `RpcError` code `-32000` and no `data`, before any EVM sees it.
+
+  It used to be whichever EVM was installed that answered, and the two have nothing in common: revm rejected a replay with `Transaction(NonceTooLow { tx: 0, state: 1 })` — Rust's debug rendering of an enum variant, arriving where a client expects prose — and `@ethereumjs/vm` with `the tx doesn't have the correct nonce. account has nonce of: 1 tx has nonce of: 0` followed by a dump of the whole block and transaction. Neither carried a JSON-RPC code at all. This is the transaction-path twin of the divergence removed from the read path in the same release (revm's validation text arriving as `eth_call` return data), and it is fixed the same way: the engine-specific artifact stops reaching a surface that is meant to be engine-independent.
+
+  **The words are geth's**, so a client already knows them (viem maps these phrases onto typed errors): `nonce too low: address 0x…, tx: 0, state: 1`, `nonce too high: …`, `insufficient funds for gas * price + value: address 0x… have … want …`, `intrinsic gas too low: have 20999, want 21000`. Each is followed by this node's own half — what happened and what to do about it — including the thing a real node would not have to say: there is NO MEMPOOL here, so a too-high nonce is refused rather than queued until the gap is filled.
+
+  **Two behaviour details worth knowing.** Affordability is checked against `value + gasLimit * maxFeePerGas` (EIP-1559's own assertion — the MAX fee, not the effective price the transaction will actually be charged), which is exactly where both engines already drew the line. And the intrinsic-gas floor is the transaction's own, so it includes an EIP-2930 access list (2,400 per address, 1,900 per key); the read path's shared `intrinsicGas()` has no access-list term and is deliberately left alone. Both are measured against both engines in `docs/spikes/replayed-and-invalid-transactions-are-rejected-as-the-nodes-own-errors/measurements.md`, which also records the decisions taken.
+
+  The nonce and affordability rules are checked at MINE time, immediately before the engine would execute the transaction (their answers change while a transaction waits in `pending`, e.g. nonce 0 and nonce 1 submitted back to back under `manual` mining); the intrinsic-gas floor is refused at SUBMIT, like the block gas limit, since neither can change with time. Each engine's own checks remain underneath as the backstop, and still answer the causes the node does not pre-check (EIP-3607, a type-3 transaction's blob fee).
+
+  Covered by a new battery run against BOTH engines (`test/revm-invalid-transactions.spec.ts`, `test/helpers/invalid-transactions.ts`), which asserts far more than "it threw": after each refusal, every balance, the sender's nonce, a storage slot the transaction would have written, the block number, the receipt, the stored transaction and the block's transaction list are unchanged, the node still mines at the very nonce the refused transaction claimed, and the next receipt's `cumulativeGasUsed` equals its own `gasUsed`. The battery's ability to go red is measured by mutation, including an injected half-committed rejection.
+
+  The default entry's bundle-size baseline is re-pinned 417.9 -> 419.7 KB raw / 126.0 -> 126.6 KB gzip. The 1.8 KB is those four refusals' prose in the core bundle, paid by every consumer including the JS-only one, and it is the feature.
+
+  Reference gas is unchanged (`number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 -> `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`).
+
+- 134b82f: **A revm-executed transaction now leaves post-state `@ethereumjs/vm` cannot be told apart from — for a creation, a nested creation, storage written through nested call frames, an account emptied to nothing, and a selfdestruct.** Gas equality is what the cross-backend gate measures, and it says nothing about balances, code or storage: an engine can charge every transaction correctly and commit the wrong account changes. This is the other half of the correctness bar, diffed through the node's PUBLIC surface (`eth_getBalance`, `eth_getCode`, `eth_getStorageAt`, `dumpState`) against a default-engine node built from identical state, plus absolute numbers so two engines cannot agree on a state neither should have produced (`test/revm-post-state.spec.ts`, `test/post-state-expected.ts`).
+
+  **Behaviour change on the DEFAULT engine, in `stateMode:'none'`: a deleted account now takes its STORAGE with it.** `SimpleStateManager.deleteAccount` tombstones the account and never touches storage, so a `SELFDESTRUCT` (or an EIP-161 empty-account clearing) left a dead contract's slots readable at its address and `dumpState` kept serialising them. Measured through the node's own surface, one transaction that writes slot 0 and selfdestructs in the same transaction answered `0x…2a` in `'none'` on `@ethereumjs/vm` and `0x…00` in `'trie'` and on revm. A trie settles which side is wrong — deleting the account removes its storage trie with it — so the fix is ours, in `OverlayStorageStateManager.deleteAccount`, and it is O(1) on the per-account overlay layout. Destroyed contracts' slots now read `0`, and a `dumpState` (hence IndexedDB persistence) taken after a selfdestruct no longer carries them. Nothing else moves; the account's CODE is still kept, on both engines. Recorded in the 2026-08-10 amendment to `docs/adr/0007-we-override-simplestatemanagers-no-op-clearstorage.md`, measured by a committed probe in `docs/spikes/revm-write-callbacks-reproduce-the-post-state/`, and asserted in BOTH state modes in `test/slim-node-checks.spec.ts`.
+
+  **The receipt's `contractAddress` is proved on a NESTED creation.** `revm-wasm`'s outcome carries no created-address field, so the node derives it from the account changes — and "the entry flagged created" is ambiguous the moment a transaction creates two accounts. The derivation (`keccak(rlp(sender, nonce))`) is now asserted against `@ethereumjs/vm` on a transaction whose init code CREATEs a child; taking the first flagged entry passes every simple deploy and names the child here.
+
+  **The zero-tip coinbase disappearing from state is CORRECT and is now asserted as such, on both engines.** With no priority fee the block's beneficiary is credited nothing, ends each transaction touched-and-empty, and is deleted under EIP-161 — `@ethereumjs/vm` does exactly the same. It is the case in a state diff most likely to be filed as a bug.
+
+  `dumpState` is compared STRUCTURALLY between the engines (same accounts, same code, same slots, same values) and not byte for byte: key order is insertion order, which is each engine's write order — revm hands its account changes over sorted by address, `@ethereumjs/vm` writes them in touch order — so a byte comparison of two CORRECT dumps fails as soon as one transaction creates two accounts.
+
+  The default entry's bundle-size baseline is re-pinned 417.8 -> 417.9 KB raw (gzip unchanged at 126.0). The 0.1 KB is the two-line `deleteAccount` override above; it sits in the core graph because `OverlayStorageStateManager` is the default state manager for `stateMode:'none'`, which is every consumer who passes no options, and it is what buys them post-state that agrees with a trie.
+
+  Reference gas is unchanged (`number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 -> `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`).
+
+- d494efe: **The revm engine now EXECUTES AND COMMITS transactions, and `Engine.transact` is REQUIRED (breaking for a hand-written engine).** A node with `createRevmEngine()` installed runs ONE EVM: `eth_call`, `eth_estimateGas` and every mined transaction go to revm, against the node's own state.
+
+  `createRevmEngine()` gained the seam's transaction half, built on `revm-wasm`'s committing execute, plus the write half of the state store (five callbacks that previously threw). A signed transaction is executed with FULL validity — nonce checked, real fees charged, base fee burnt, coinbase credited — and its receipt is built from revm's own outcome. Measured against a trie-backed `@ethereumjs/vm` `runTx` reference by the differential conformance battery, which now runs _every_ transaction in it on revm (deploys, storage writes, logs, a real EIP-2930 access list, a legacy fee, a revert, two transactions in one block) and diffs receipts field by field plus post-state: zero mismatches.
+
+  Three details of the mapping, because they are the ones a reimplementation gets wrong:
+  - **The receipt's `gasUsed` is revm's `gasUsed`, not its `totalGasSpent`.** Those are two different fields: the first is NET of refunds (what a receipt reports, and what `@ethereumjs/vm`'s confusingly-named `totalGasSpent` already is) and the second is the gross figure before them. The READ path deliberately takes the gross one, because a read has no refund and `eth_estimateGas` wants it. Copying that mapping across would put gas-before-refunds on every receipt, and a value transfer (zero refund) cannot detect it — so the case is measured: `totalGasSpent` 26004, `gasRefunded` 4800, `gasUsed` 21204.
+  - **The transaction path carries NONE of the read path's simulation switches** (`disableBaseFee`, `disableBlockGasLimit`, `disableEip3607`, `disableBalanceCheck`), and their absence is ASSERTED rather than assumed. Each relaxes a transaction's VALIDITY, and a transaction that runs with them relaxed is not a transaction.
+  - **Nonce checking is chosen by the call path and is not reachable as an option.** The binding defaults it ON for a committing execute precisely because forgetting it yields a silently replayable transaction, so the engine passes nothing for it and `TransactionRequest` carries no way to.
+
+  **`Engine.transact` is no longer optional, and the node's fallback is deleted.** It was optional for exactly one reason — the revm engine had no write half — and that reason is gone. An engine that brings only `call` (or a `transact` that is not callable) is now refused at `createNode()` with a real error naming the missing operation; the node does not fill it in with its own `@ethereumjs/vm`. So `node.engine` names the EVM that answered a node's reads AND executed its transactions, and a receipt can be attributed to it. `transacts()` and the `TransactingEngine` type are gone from the public surface. A third-party engine can no longer ship reads first and grow writes later; an engine that genuinely cannot commit should implement `transact` as a throw.
+
+  One asymmetry was stated rather than worked around here: the node let a client set a gas limit above the block's and told `@ethereumjs/vm` to skip that check, while `revm-wasm` expresses the same relaxation as a simulation switch it refuses to combine with committing, so a transaction whose gas limit exceeded `blockGasLimit` was REJECTED on revm and accepted on the default engine. **SUPERSEDED LATER IN THIS SAME RELEASE** (see the block-gas-limit entry): the skip flag is gone, both engines refuse such a transaction, and `blockGasLimit` is what lifts the limit. It never shipped as a divergence.
+
+  State stays the NODE's on both engines, read and written through host callbacks with nothing copied into wasm — so `dumpState`, `loadState`, IndexedDB persistence and the `evm_set*` cheats are untouched. The decision, its measured affordability (2000 `SLOAD`s of one slot cause ONE host callback at 283,003 gas; 2000 distinct slots cause 2,000 at 4,283,003; a transaction writing one slot of a 1000-slot contract causes exactly one `setStorage`) and the caveat that cuts against it (EIP-2929 resets warmth every transaction, so a game loop re-pays the crossings every tick — wall clock only, gas is identical) are in the new `docs/adr/0010-revm-reads-and-writes-through-host-callbacks-the-node-keeps-owning-state.md`, with a re-runnable probe in `docs/spikes/revm-executes-the-first-transaction-with-commit/`. `docs/adr/0006-...` carries a second dated amendment for the contraction.
+
+  Reference gas is unchanged (`number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 → `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`) and the default engine's behaviour is untouched. `OverlayStorageStateManager` gained `setStorageAt()` / `clearStorageAt()`, the synchronous write twins of `storageAt()`, and the revm store's shape guard requires them. The default entry's bundle-size baseline is re-pinned 417.1 → 417.2 KB raw (gzip unchanged at 125.7); still zero bytes of `revm-wasm`.
+
+- fc8b1c7: **In `senderMode:'recover'`, the node now derives the sender with the INSTALLED ENGINE's `ecrecover` when it has one — ~3x on a small transaction, at zero additional engine bytes, and proven to authenticate identically to the implementation it replaces.**
+
+  `'recover'` pays a fixed ecrecover on every transaction and it is the single dominant cost of a small one. `embedded-eth-node/revm` already contains that exact code — the `0x01` precompile's secp256k1 — so the seam now offers it and the node uses it. With no such engine, recovery is `tx.getSenderAddress()` exactly as before.
+  - `Engine` gains an **OPTIONAL** `ecrecover(hash, recoveryId, r, s) => Uint8Array | undefined`. It is the seam's only optional operation, and deliberately: `call` and `transact` are refused at construction because the node cannot supply them, while this one it can and always could. Omitting it costs a third-party engine nothing but speed.
+  - **The engine is lent the CURVE STEP, never the decision.** Deciding _who sent this transaction_ stays the node's on every engine (`docs/adr/0006-...`, amendment 4): the new `src/sender-recovery.ts` computes the message hash, enforces EIP-2's low-`s` rule, and converts the wire's `v` — 27/28, `chainId * 2 + 35/36`, or a bare y-parity — into a 0/1 recovery id before the curve is asked. An engine is handed a question about a SIGNATURE and never one about a TRANSACTION, so it can neither admit a transaction the node would refuse nor refuse one it would admit.
+  - **EIP-2 is the reason that division is load-bearing, not tidiness.** revm's ecrecover is the `0x01` precompile's, which NORMALISES a high-`s` signature and returns an address — correctly, since EIP-2 constrains transactions rather than the precompile. A node that simply forwarded `(hash, v, r, s)` would ADMIT, on the revm engine, a transaction the default engine REFUSES: nothing throws, the receipt looks right, and it is attributed to the right signer. Removing the node-side check turns the new suite red with the transaction mined and the balance moved (`docs/spikes/sender-recovery-uses-the-engines-ecrecover/measurements.md`).
+  - **`senderMode:'trusted'` is untouched.** It still skips recovery ENTIRELY — now measured, by counting the engine's `ecrecover` calls and requiring zero — and the `evm_*As` cheats still throw `-32601` outside that mode, whatever engine is installed.
+
+  **Proven on failures, not only on successes.** `test/revm-sender-recovery.spec.ts` (battery in `test/helpers/sender-recovery.ts`) runs the two implementations side by side in three layers: as a PRIMITIVE over a table of signatures (`@ethereumjs/util`'s `ecrecover` + `publicToAddress` against `engine.ecrecover`, valid / flipped recovery id / malleable high-`s` twin / `r=0` / `s=0` / `r=n` / `s=n` / `r=n-1` / recovery ids 2, 3, 4, 27, 28); through TWO NODES built from identical state, one with the engine and one without, asserting the recovered sender is the known signer for legacy, EIP-2930 and EIP-1559 transactions; and on four transactions that must be REFUSED (a structurally malformed signature, one that reaches the curve and recovers nothing, a high-`s` one, and a wrong recovery id) where both must reject with nothing mined and no balance or nonce moved. A counting wrapper proves the engine really recovered them, so the differential cannot pass vacuously by comparing the fallback with itself.
+
+  **The numbers moved, and the docs move with them.** The `'recover'` vs `'trusted'` figures the repo quoted (~13x isolated, ~2.3x end to end) were measured on `runTx` before ADR 0009's storage re-layer and had drifted by half. Re-measured on the current node: **~6.2x isolated / ~3.6x end to end on the default engine**, and **~2.8x / ~1.8x with a revm engine**, whose recovery is ~4.3x cheaper (2.02 → 0.65 ms per isolated transaction, and `callAvg` 1.92 → ~1.08 ms in Chromium). `'trusted'` remains worth having and has stopped being the dominant lever. Updated in `src/types.ts`, `src/node.ts`, `src/engine.ts`, the README, the trusted-sender suite and `packages/benchmarks`; `CHANGELOG.md` is history and `docs/adr/0002-...` takes a dated amendment rather than an edit.
+
+  **Decisions taken while building this** (the optional seam operation, the `ecrecover` naming against `CONTEXT.md`'s glossary, two implementations rather than one pluggable path, the refusal's shape, and the core-graph bundle cost) are recorded in `docs/spikes/sender-recovery-uses-the-engines-ecrecover/measurements.md#decisions-taken-while-building-this`, with the seam decision itself in `docs/adr/0006-the-engine-is-an-injected-object-not-a-named-string.md` (amendment 4) and the mode's re-described trade in `docs/adr/0002-...` (2026-08-11).
+
+  The default entry point's bundle grows 420.0 → 421.1 KB raw / 126.7 → 127.1 KB gzip (re-pinned in `packages/benchmarks/test/evm.spec.ts`) — that is `src/sender-recovery.ts`, still zero bytes of `revm-wasm`. Reference gas is unchanged (`number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 → `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`).
+
+- ccacf35: **The RPC block now reports the block the EVM actually ran: `miner`, `mixHash` and a real `logsBloom` (behaviour change on all three).** A node created with `blockEnv: {coinbase, prevRandao}` mined blocks whose `COINBASE` / `PREVRANDAO` opcodes returned the configured values while `eth_getBlockByNumber` reported `miner: 0x0000…0000` and no `mixHash` field at all, and every block's `logsBloom` was a hard-coded 256 zero bytes even when its receipts carried real ones. The RPC surface and the EVM disagreed about the same block, and no document said so. If your tooling reads a constant-zero `miner`, it now gets the configured coinbase; if it pre-filtered blocks by the header bloom before calling `eth_getLogs`, it stops silently finding nothing.
+
+  **The reload was the real defect, and it was worse than an RPC one.** `eth_call` executes against the STORED `Block` object of the latest block, and `loadState` rebuilt that object from six header fields with the coinbase and the mixHash among the ones it dropped. So a node that had loaded a persisted state (an ordinary IndexedDB page reload) handed contracts a ZERO `COINBASE` / `PREVRANDAO` while the same node's mined blocks used the configured ones: the node changed its own execution semantics across a reload. `SerializedBlock` now carries the values, `loadState` restores them onto the rebuilt block, and `test/rpc-block.spec.ts` makes every assertion twice, on the original node and on a fresh one built with NO `blockEnv` that knows only what the dump gave it. The IndexedDB suites (`test/persistence-reload.spec.ts` and its revm twin) carry the same three values across a REAL page reload, again with the post-reload node configured with no `blockEnv` of its own.
+
+  The same reconstruction also fixes the chain's own continuity: because the rebuilt header is now field-for-field the one that was mined, its `hash()` matches the hash the RPC reports, so the first block mined after a reload names a parent that resolves. It used to name one no lookup could find. That invariant is stated at the `loadState` site and asserted through the RPC.
+
+  **The persisted format stays `version: 1`.** The three fields are OPTIONAL, so a state dumped by any earlier version still loads: an absent `miner` / `mixHash` reads as zero (never as a missing RPC field), and an absent `logsBloom` is REBUILT from the receipts the dump already carries, rather than defaulted to the zero placeholder this change exists to remove. Asserted against a dump with the fields stripped.
+
+  **Genesis honours `blockEnv.coinbase` and `blockEnv.prevRandao` too**, and only those two: they describe the environment the chain runs under, whereas `number` / `timestamp` / `gasLimit` place a block within it (block 0 is block 0). Block 0 used to be the one block that ignored `blockEnv` entirely.
+
+  Not changed, deliberately: the conformance battery's `block environment through a contract` step still diffs those two values against the configuration rather than against the now-honest block, because swapping an oracle changes what a step can catch and belongs to its own reasoning. The header's `gasUsed` is still always `0x0` (the header is built before its transactions execute) — out of scope here, but now STATED in the README's `eth_getBlockByNumber` row alongside the remaining placeholders, so a consumer meets it.
+
+  The default entry's bundle-size baseline is re-pinned 422.0 -> 422.5 KB raw / 127.4 -> 127.6 KB gzip. The 0.5 KB is the bloom OR loop (shared by the mining path and the old-dump rebuild), the three fields crossing `SerializedBlock`, and the coinbase/mixHash restoration in `loadState`; it is in the core graph because block construction and the RPC layer are the node's on every engine.
+
+  Reference gas is unchanged (`number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 -> `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`).
+
+- 7ba77f8: **The SENDER now crosses the engine seam as a value: `TransactionRequest.sender` (required — breaking for a hand-written engine), so a trusted-sender transaction executes as the CLAIMED sender on any engine.**
+
+  `senderMode:'trusted'` exists so a caller who already knows the sender can skip ecrecover, which means it deliberately admits a transaction whose claimed sender differs from what its signature recovers to (and a fabricated signature has no meaningful recoverable sender at all). The node used to express that by SHADOWING `getSenderAddress()` on the `@ethereumjs/tx` instance it was about to run — fine while the node itself called `runTx`, which reads the sender through exactly that one call, but once transactions cross the engine seam it became an undocumented convention holding ACROSS an engine boundary. **An engine that recovers its own sender does not fail loudly**: it charges a different account, advances a different nonce, commits, and hands back a receipt that looks completely right.
+  - `TransactionRequest` gains a required `sender: Address` — the node's authoritative answer to who sent the transaction: `msg.sender` of the top-level frame, the account charged, the nonce advanced, the `from` on the receipt. An engine executes on behalf of it and derives nothing.
+  - **The instance shadowing is gone**, not kept as a second mechanism. `parseTx` decides the sender ONCE per transaction (recovered, or the claimed address) and carries it to the engine, the receipt and the stored transaction, so "who the engine executed as" and "who the receipt names" cannot drift apart by engine. Transactions are parsed FROZEN again in both sender modes. One user-visible consequence: an unrecoverable signature is now rejected by the `eth_sendRawTransaction*` call that submitted it rather than by a later `mine()` (recovery is eager, and it always happened before the block was returned anyway).
+  - The default `@ethereumjs/evm` engine pins the sender for `runTx` **inside the engine**, where that EVM's vocabulary belongs (like the two `skip*Validation` flags): a prototype VIEW of the transaction whose `getSenderAddress()` returns `request.sender`, so the node's own frozen transaction is never mutated and the pin lives for exactly one call. `embedded-eth-node/revm` needs none of that — revm's execute takes `from` directly — and it no longer asks the transaction either.
+  - **`senderMode:'trusted'` is unchanged in scope**: still opt-in at `createNode()`, and the `evm_*As` cheats still throw `-32601` in the default `'recover'` mode, whatever engine is installed (ADR 0002 carries a new dated consequence; `docs/adr/0006-...` carries amendment 3).
+
+  **Proven, and proven to be provable.** The trusted-sender suite is now ENGINE-PARAMETERISED (the precedent the conformance battery set) and runs on the default engine _and_ on the revm engine, from one shared suite rather than a copy: `test/trusted-sender.spec.ts` + `test/revm-trusted-sender.spec.ts`. Its claimed-sender check is built so that the wrong answer is SILENT — the transaction is signed by an account that is interchangeable with the claimed one as far as validity goes (same nonce, both funded), so a re-recovering engine executes it happily and only the post-state disagrees. Both specs assert, to the wei: the claimed account paid `value + gasUsed * effectiveGasPrice` and its nonce advanced, the signer paid NOTHING and its nonce did not move, the receipt names the claimed sender, the call's state change happened, and the resulting post-state matches the SAME pinned literals on both engines (`test/trusted-sender-post-state.ts`). `test/engine-seam.spec.ts` pins the seam itself: a stub engine reports both the sender it was handed and the one it would have recovered, and they must differ for such a transaction. Each half was verified to FAIL under a one-line re-recovering engine (`docs/spikes/trusted-sender-transactions-run-on-the-write-engine-as-the-claimed-sender/re-recovering-engine-probe.md`).
+
+  Reference gas is unchanged (`number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 → `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`), and the conformance battery (both state modes, and again on revm), the GeneralStateTests, persistence, worker and viem-surface suites pass unchanged.
+
+### Patch Changes
+
+- a7eeecf: **EIP-2930 access lists are proven CHARGED and WARMED on both engines, and `eth_estimateGas` now charges a request's access list.**
+
+  A dropped access list is invisible to every differential in this repo: the transaction then costs the same wrong number on both engines, the receipts match field for field and the post-state is identical. That is measured rather than argued (`docs/spikes/eip-2930-access-lists-are-charged-and-warmed/measurements.md`): with the list stripped on both sides the battery reports an EMPTY `mismatches` beside seven wrong gas figures. So the new `test/revm-access-list.spec.ts` (battery in `test/helpers/access-list.ts`) is ABSOLUTE, and it is a DIFFERENCE: the same type-1 transaction WITH its access list and with an EMPTY one, on a revm-backed node and on a default-engine node built from identical state.
+
+  The two halves pull in opposite directions, which is what makes the arithmetic diagnostic rather than merely different. Listing an ADDRESS the transaction touches (`BALANCE` against a cold account) costs 2,400 and saves 2,500, so it is **100 gas cheaper**; adding the STORAGE KEY a callee `SLOAD`s costs 1,900 and saves 2,000, again **-100**; naming the callee itself is **+2,400** for an address EIP-2929 had already warmed, which is the shape of a charge that bought nothing; and a list whose entries are NEVER touched is **+6,200 exactly** (2,400 + 2 \* 1,900) and buys nothing at all, the case where a dropped list changes nothing any other measure can see. A dropped list gives 0 on all four. A listed address is also shown to be WARMED, not touched: it is absent from `dumpState` afterwards.
+
+  **The behaviour change: `eth_estimateGas` charges a request's `accessList`** (2,400 per address, 1,900 per storage key), as geth does. It had ignored the field, so it answered 21,000 for a type-1 transaction whose intrinsic floor is 27,200 while the node's own intrinsic-gas refusal was telling callers that `eth_estimateGas` reports what a transaction needs: the node refused the very number it had just recommended. The battery closes that loop rather than asserting a figure, by signing a transaction at exactly the recommended gas limit and requiring it to mine. The charge sits BESIDE the shared intrinsic formula (`accessListGas` in `src/intrinsic-gas.ts`), never inside it, because the engine seam's read request carries no access list and `embedded-eth-node/revm` SUBTRACTS that formula from revm's total. It is a slight over-estimate for entries a transaction really touches, since the read underneath prices those accesses cold, which is the safe direction for a number a client uses as its gas limit. `eth_fillTransaction` deliberately does not charge it: the transaction it returns carries no access list.
+
+  Mined transactions are unchanged: both engines already charged and warmed the list, and the revm mapping was verified still in place. Reference gas is unchanged (`number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 -> `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`).
+
+- 90f56f8: The bottom storage overlay no longer accumulates a tombstone per cleared account, which was one permanent entry per contract creation for the life of the process.
+
+  `stateMode:'none'` storage is per-account with per-checkpoint OVERLAYS (ADR 0009), and an overlay's tombstone set exists to hide the slots overlays BELOW it hold. The BOTTOM overlay is committed state, so it has nothing below and a tombstone there hides nothing — but nothing removed it either, and `@ethereumjs/evm` calls `clearStorage` on EVERY contract creation. A long-lived in-browser node therefore kept one packed address key per CREATE ever executed, and walked all of them again in `liveStorage()`, i.e. in every `dumpState`.
+
+  Nothing answered WRONG because of it: a tombstone over an account with nothing beneath it is a no-op that happens to cost memory. It is pruned at the two places one could be created, rather than swept later: `commit()` skips it when the overlay it is merging into is the bottom one, and `clearStorageAt()` skips it when no checkpoint is open. The `delete` that performs the clear is untouched in both, so a cleared account still reads as cleared — the stack walk falls off the end, which is the same "no value here" a tombstone produced.
+
+  Both sites are reachable and they are reachable from DIFFERENT engines. `runTx` checkpoints, so on the default `@ethereumjs/evm` engine the EVM's `clearStorage` lands three overlays deep and the tombstone is pruned as the frames commit down; `embedded-eth-node/revm` commits its state changes through synchronous host callbacks with no checkpoint around them, so every CREATE on that engine clears at depth 1 and never went through `commit()` at all (measured: three contract creations, three permanent tombstones).
+
+  `test/storage-overlay.spec.ts` asserts both halves at both sites — no tombstone in the bottom overlay, and the account still reads as cleared and is absent from `liveStorage()` — plus the case that must NOT change: a commit into a non-bottom overlay still leaves the tombstone that hides the frame below it. The six checkpoint/commit/revert semantics, the 20,000-operation randomised differential against the frozen pre-overlay layout, the naive control's continued failure of 4 of the 6, and the byte-identical `dumpState` fixture are all unchanged and unweakened. No API, no serialised format and no gas moved. The default entry's bundle-size baseline is re-pinned 421.9 -> 422.0 KB raw (gzip unchanged at 127.4): the 0.1 KB is the two depth tests, in the core graph because this is the default state manager for `stateMode:'none'`.
+
+- 7738986: **`dumpState`, `loadState`, IndexedDB persistence and the `evm_set*` cheats keep working EXACTLY as they do today when a revm engine is installed — proved by running the existing suites on it and changing nothing they assert.**
+
+  No production code changed, and that is the result rather than the absence of one. State stays the node's on every engine, read AND written through host callbacks with nothing copied across ([ADR 0010](https://github.com/wighawag/embedded-eth-node/blob/main/docs/adr/0010-revm-reads-and-writes-through-host-callbacks-the-node-keeps-owning-state.md)), so the node's state-facing surface never learns which engine is installed and none of these features has an engine-conditional path to acquire. The three suites were PARAMETERISED by engine — the precedent the conformance battery set — and every expectation in them is the one it already had: the IndexedDB persist/reload flow (`revm-persistence-reload.spec.ts`), and the custom-genesis + cheat halves of the genesis suite (`revm-genesis-cheats.spec.ts`), now run on `embedded-eth-node/revm` against literals shared with the default-engine run (`test/genesis-cheats-expected.ts`). The genesis suite's trie-vs-none PERF half stays on the default engine by construction: it is a comparison BETWEEN the state modes, so it needs a `stateMode:'trie'` node, which this engine refuses at construction (ADR 0005).
+
+  **The two cases worth adding are both about a WRITE crossing a transaction boundary** (`state-roundtrip.spec.ts` and `revm-state-roundtrip.spec.ts`, suite in `test/helpers/state-roundtrip.ts`), because every other differential in this repo lives inside ONE transaction and would pass unchanged for an engine that cached state between them. All four cheats are applied BETWEEN two transactions and the next transaction is built so that EXECUTION has to observe each: it is accepted at the cheated NONCE, paid out of the cheated BALANCE, increments the cheated STORAGE (`number` goes 1 -> 41 -> 42), and a third transaction CALLS the cheated CODE. Then a `dumpState` taken AFTER a transaction is reloaded into a fresh node, compared structurally, and handed the SAME signed transaction as the original — same receipt, same post-state, same dump.
+
+  **Neither failure mode throws**, which is why the expectations are absolute literals shared by both engines rather than a cross-engine diff. Measured with the cheats deliberately skipped (`docs/spikes/every-node-feature-survives-a-revm-write-engine/measurements.md`): every structural check still passes — success receipts, empty `mismatches`, the reloaded node still agreeing with the original field for field, both dumps still equal — and only the four absolute readings move (42 becomes 2, 99 becomes 0). A self-consistent engine executing against stale state is invisible to a differential.
+
+  `dumpState` is compared STRUCTURALLY, never byte for byte: key order is insertion order, which is each engine's write order (revm's account changes arrive sorted by address, `@ethereumjs/vm` writes in touch order), so a byte comparison of two CORRECT dumps fails the moment a transaction creates two accounts. Cross-engine dump equality for the same transactions was already covered that way by `revm-post-state.spec.ts` and is not restated here.
+
+  Reference gas is unchanged (`number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 -> `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`).
+
+- cc448d0: **The MONEY a transaction costs is now diffed between engines on BALANCES, not on receipts** (`test/revm-fees.spec.ts`, `test/helpers/fees.ts`). `effectiveGasPrice` already has exactly one implementation per engine and none in the node — the default engine computes it where `@ethereumjs/vm` charges the transaction, the revm engine reports revm's own `Transaction::effective_gas_price` off its outcome, and the node copies whichever number the engine that ran the transaction handed back. What no receipt field can prove is that the matching amount of ether actually MOVED: a receipt can carry the right price while the wrong amount left the sender, and the cross-backend gas gate cannot see that class of bug at all.
+
+  So seven transactions now run on a revm-backed node and on a default-engine node built from identical state, and three balances are read before and after each one: the sender is charged `value + gasUsed * effectiveGasPrice`, the coinbase is credited `gasUsed * (effectiveGasPrice - baseFee)`, and `gasUsed * baseFee` is BURNT — the burn measured as the drop in total supply across every account in `dumpState`, so money appearing at a fourth address cannot hide inside a subtraction. The four readings must also CLOSE against each other. The base fee is seven wei, so every figure is checkable by eye: a 1,000 wei transfer at 21,000 gas and an effective price of 10 charges the sender 211,000, credits the coinbase 63,000 and burns 147,000.
+
+  The cases are chosen for where the engines are most likely to disagree first: a **LEGACY transaction ABOVE a non-zero base fee** (at `gasPrice == baseFee` a mispriced legacy transaction is invisible, because every wrong answer coincides with the right one), **EIP-2930** with its access list charged, **EIP-1559 capped by `maxFeePerGas`** as well as by the tip (only the capped one measures the `min`), a **zero priority fee**, and a **STORAGE-CLEARING REFUND** priced at the effective gas price — with the same call repeated against the now-zero slot, 2,000 gas dearer, so the refund is known to have happened rather than assumed. A refund valued at the base fee instead would leave the sender short by `refund * tip` with every receipt field still reading correctly.
+
+  **The zero-tip coinbase disappearing from state is CORRECT, and now has its control.** Credited nothing, the block's beneficiary ends the transaction touched-and-empty and is deleted under EIP-161 on both engines. The tipped case asserts the same coinbase IS in the dump, so its absence means "credited nothing" rather than "never written".
+
+  That the battery can go RED is measured, not assumed: three deliberate mutations (a legacy transaction priced at the base fee, the revm engine reporting gross gas instead of net, and a hand-rolled `baseFee + tip` beside revm's own answer) each with the run they produced, in `docs/spikes/fees-refunds-and-effective-gas-price-come-from-the-engine/measurements.md`.
+
+  Tests only — no library code changed, and no behaviour with it. Reference gas is unchanged (`number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 -> `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`).
+
+- 77ef1ec: The revm engine's exported hardfork tables are FROZEN, so the construction guard cannot be assigned away.
+
+  `REVM_SPEC_BY_HARDFORK` and `REVM_REFUSED_HARDFORKS` are public on the
+  `embedded-eth-node/revm` subpath so "which forks does this engine serve" is
+  answerable in code rather than by provoking a throw. They were typed
+  `Readonly<Record<...>>`, which is erased at runtime, so a consumer could re-admit
+  a refused fork with one assignment (`REVM_SPEC_BY_HARDFORK.prague = 'PRAGUE'`)
+  and `createRevmEngine()` would then connect on it — producing an
+  `eth_estimateGas` revm itself rejects (`GasFloorMoreThanGasLimit`, and on Osaka
+  `TxGasLimitGreaterThanCap` for the default 30M read budget). A client uses an
+  estimate as the transaction's gas limit, so that guard is the only thing between
+  such an assignment and a silently wrong number.
+
+  Both tables are now `Object.freeze`d. Reading them is unchanged; WRITING to
+  either now fails at the assignment (a `TypeError` in strict mode, a dropped write
+  in sloppy mode) instead of silently removing the guard. The guard deliberately
+  still reads the tables themselves rather than a copy taken at module load, so the
+  table a consumer inspects and the table the engine consults cannot disagree; the
+  reasoning is recorded at the code site in `src/revm.ts`.
+
+  No behaviour changes for any admitted fork (`berlin`, `london`, `paris`,
+  `shanghai`, `cancun` — unchanged), and no refusal message changed. Also asserted
+  now, in `test/revm-engine.spec.ts`: the tables report frozen, a re-admitting edit
+  leaves them exactly as they were, the guard still refuses `prague` afterwards in
+  the same words, and the engine's existing refusal to serve a read before
+  `connect()` bound it to a node is measured rather than merely written.
+
+- e2db3f3: The `stateMode:'none'` storage key is now PACKED, which takes 70-73% off every cold revm storage access.
+
+  A storage key inside the node is no longer a `0x`-hex string (42 characters for the account, 66 for the slot) but two bytes per UTF-16 code unit: 10 code units and 16. It is `revm-wasm`'s own `MemoryStore` encoding, and it became available only when the node took ownership of its storage representation (`stateMode:'none'` storage is per-account with per-checkpoint overlays, ADR 0009); before that the format was `SimpleStateManager`'s and had to be reproduced byte for byte.
+
+  Measured against the SHIPPED store over a real `OverlayStorageStateManager`, through the real wasm module, with the key encoding as the only difference between the arms: **a cold revm storage access went from 1.31-1.33 µs to 0.36-0.39 µs**, of which 0.17-0.18 µs is the wasm crossing itself (measured by a store that answers without looking at the key). The JS half alone went from 1.11-1.12 µs to 0.22 µs. The spike that proposed this predicted 50% from a prototype; the shipped version does better, because the encoder is unrolled into a single `String.fromCharCode` call and because the store's per-account view — a `Map` lookup and a closure per access that never saved anything, since the address key had to be built first to find the view — went with it. Both runs and the re-runnable probe are in `docs/spikes/revm-state-store-packed-storage-keys/measurements.md`.
+
+  **Nothing a consumer can see changes.** `dumpState` / `loadState` output is persisted data and stays `{address: {slot: value}}` in `0x`-hex, key order included — the internal key moves UNDER that format, `liveStorage()` converts on the way out, and the existing byte-identical assertion against a dump captured before the layout ever changed still passes, unweakened. Accounts and code are untouched: those stacks are `SimpleStateManager`'s and stay keyed `address.toString()`. Gas is untouched on either engine (`number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 -> `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`).
+
+  **The risk this carries is a key format disagreeing with itself, and it has its own test.** `@ethereumjs/evm`, genesis, `loadState` and the `evm_set*` cheats write storage through the ASYNC `putStorage`; revm reads it through the SYNCHRONOUS `storageAt`. Two formats that each work on their own make every cross-route read a MISS — and a miss is a ZERO, not an error, at identical gas, so the cross-backend gas gate, the conformance differential's receipts and every `dumpState` diff would stay green while the node read nothing. So both halves import the SAME encoder (`src/storage-keys.ts`), and the new `test/revm-storage-keys.spec.ts` asserts the agreement end to end in both directions on absolute values, with a default-engine node as the oracle: storage seeded at genesis, set by a cheat between transactions and rehydrated by `loadState` is read back by an `SLOAD` on revm, and a slot revm's `SSTORE` committed is read back through `eth_getStorageAt` and `dumpState`. Mutating either half of the encoder back to hex turns it red, with the transcripts recorded beside the measurement.
+
+  The default entry's bundle-size baseline is re-pinned 421.1 -> 421.9 KB raw / 127.1 -> 127.4 KB gzip. The 0.8 KB is `src/storage-keys.ts` — two unrolled encoders, the inverse pair that keeps `dumpState` in hex, and a 256-entry hex table — and it is in the core graph because this is the DEFAULT state manager's key format: the async `putStorage` that `@ethereumjs/evm` drives builds keys with the same module, which is the whole point.
+
+  One internal detail worth stating for anyone deep-importing `src/state-manager.ts`: the `AddressKey` / `SlotKey` type aliases are gone, replaced by `PackedAddressKey` / `PackedSlotKey` (and `HexKey` for what `liveStorage()` returns). They were never exported from the package entry point.
+
+- 350fc62: `stateMode:'none'` storage is now per-account with per-checkpoint OVERLAYS, so a checkpoint stops copying all of state — 18-28x faster on four transactions at 100,000 slots, and FLAT in state size.
+
+  `SimpleStateManager` keeps storage in one flat `${address}_${slot}` map and copies
+  it WHOLE on every `checkpointSync()`. `@ethereumjs/evm` checkpoints once per
+  message frame, so every transaction paid `frames + 1` copies of all of state, and
+  `clearStorage(address)` — which the EVM calls on every contract creation — could
+  only be a prefix scan of the whole map.
+
+  Storage is now `Map<address, Map<slot, value>>`, and a checkpoint pushes an
+  **overlay**: only what that checkpoint changed, plus a tombstone set of the
+  accounts it cleared. A commit merges the top overlay down, a revert drops it, and
+  a read walks the stack.
+
+  Measured on the shipped class against the layout it replaces
+  (`docs/spikes/re-layer-storage-as-per-account-maps-with-per-frame-diffs/measurements.md`,
+  re-runnable):
+
+  |                                                 | before           | after                 |
+  | ----------------------------------------------- | ---------------- | --------------------- |
+  | one checkpoint, 100,000 slots                   | 20,213–22,901 µs | 0.34–0.37 µs          |
+  | `clearStorage`, 100,000 slots                   | 15,647–17,458 µs | ~0.53 µs              |
+  | four transactions, 1,000 slots                  | 14.3–15.8 ms     | ~12.0 ms              |
+  | four transactions, 100,000 slots                | 301–336 ms       | 11.9–16.8 ms (18–28x) |
+  | one transaction through the node, 100,000 slots | 38.9–94.0 ms     | 2.4–3.0 ms            |
+  | one `eth_call` through the node, 100,000 slots  | 49.6 ms          | ~0.33 ms              |
+
+  ~12 ms whether state holds 1,000 slots or 100,000: flat in state size rather than
+  merely faster, which is the property that matters — the old layout kept getting
+  worse as state grew. (Both figures per cell are two consecutive runs of the same
+  script; the 100,000-slot row is the allocation-heaviest and moves tens of percent,
+  so read the flatness rather than a single ratio.) This is a cost the DEFAULT engine paid, not a revm one:
+  swapping the interpreter could not have touched it, because the copying was in
+  the state manager.
+
+  **No API and no serialised format changed.** `dumpState` output is asserted
+  byte-identical against a dump captured from the previous version, and that dump
+  is asserted to load back — it is persisted data, and the internal layout moved
+  under it. `loadState`, IndexedDB persistence and the `evm_set*` cheats are
+  untouched, and the conformance differential, the GeneralStateTests run and the
+  cross-backend gas gate are unchanged.
+
+  One INTERNAL breaking change, for anyone who reached past
+  `StateManagerInterface`: the `'none'`-mode state manager is now
+  `OverlayStorageStateManager` (was `SimpleStateManagerWithClearStorage`) and its
+  inherited flat `storageStack` is no longer maintained — READING it throws an error
+  naming the replacement (`storageAt(addressKey, slotKey)` for one slot,
+  `liveStorage()` for all of them). That is deliberate: left present and empty, it
+  made three shipped readers answer "this slot is zero" for a slot holding a value,
+  with no error at all.
+
+  The default entry point grew 413.7 -> 416.3 KB raw / 124.6 -> 125.4 KB gzip, and
+  the benchmark's bundle baseline is re-pinned in this same change. The 2.6 KB is
+  the overlay walk, the commit merge, the two synchronous accessors and the retired
+  stack's error text; it is in the core graph because this is the default state
+  manager, and it is what buys that same default consumer that flatness. Still zero bytes
+  of `revm-wasm` in the default graph.
+
+  Correctness is asserted before speed, in `test/storage-overlay.spec.ts`: six
+  checkpoint/commit/revert semantics, a 20,000-operation randomised differential
+  against the previous flat layout comparing every read and periodic full
+  snapshots, and the same battery run against a NAIVE per-account layout (shared
+  inner maps) which must FAIL it — 4 of the 6 — so the assertions are known to have
+  teeth.
+
+- 83d62e5: **`embedded-eth-node/revm`: a call the engine REFUSES no longer answers with revm's error text as `eth_call` return data.** `revm-wasm` reuses the outcome's return-data slot for the text of a validation error, so an unaffordable value-bearing `eth_call` on the revm engine came back as `RpcError(3, 'execution reverted', '0x5472616e…')`, whose `data` decodes to the ASCII of `Transaction(LackOfFundForMaxFee { fee: 1, balance: 0 })`. The default `@ethereumjs/evm` engine returns `0x` for the identical call. `data` on that error has ONE meaning to a client — the callee's revert payload, which viem tries to decode as a revert reason — so this put a non-answer where an answer is expected, on one engine only. Both engines now return `0x`, and this was the last known behavioural divergence between them ON THE READ PATH, on the forks revm admits. The TRANSACTION path still differs in the words a rejection reaches the caller with, which is open and tasked; and this node runs no blob fee market, so nothing here should be read as a claim that the two engines agree everywhere.
+
+  **A real revert still delivers its own bytes**, on both engines: the two cases are told apart by revm's own `outcome.status` (`validation-error`, which spends no gas and executes nothing, versus `revert`/`halt`), never by matching its message. Measured across all four statuses in `docs/spikes/stop-forwarding-revms-validation-error-text-as-eth-call-return-data/`.
+
+  **The engine's explanation is not discarded, it moves to the error.** `ReadCallResult.error` now carries a node-voiced refusal quoting revm's reason verbatim ("the call is invalid and was NOT executed: `Transaction(LackOfFundForMaxFee { .. })`. Nothing ran, so this is a refusal rather than a revert…"), which is the same field the default engine reports `insufficient balance` in — a place nothing can decode as a contract's answer. `eth_call` itself is unchanged: the node still flattens every engine failure into one `execution reverted` with code 3, on both engines.
+
+  Asserted engine-against-engine (`test/helpers/revm-engine.ts`): the same unaffordable call carries the same `data` on both engines, and a callee that reverts with a reason still delivers its bytes on both. Reference gas is unchanged (`number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 -> `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`).
+
+- 01363c1: **A log emitted inside a sub-call that then REVERTS is now proved absent from the receipt, from its bloom and from `eth_getLogs` — on both engines.** This is a test-only change (`patch`): no behaviour moved, and the reason it did not is itself the news. `logsBloom` already comes from the engine that executed the transaction, on both paths (`@ethereumjs/vm`'s `runTx` bloom on the default engine, `revm-wasm`'s own decoded outcome on the revm one) and the node contains no bloom implementation to drift from them, so story 6 of the transaction-engine spec needed the log CASES rather than another move.
+
+  The interesting case is the one that looks plausible when it is wrong. A receipt carrying a log from a frame that reverted has a real address, real topics and sane ordering; the only thing wrong with it is that the event never happened, and `eth_getLogs` then reports it to an application that acts on it. Nothing in the battery reached that case before — `boom()` reverts before emitting anything — so it is now covered by a fixture built for it (`test/contracts/DiscardedLogProbe.sol`) in three shapes: a sub-call that emits and reverts BETWEEN two surviving events, the same frame as a whole transaction (a failed receipt that must keep nothing at all), and both inside a block alongside other log-emitting transactions.
+
+  **The bloom is asserted without computing one.** A second bloom implementation on the test side would be the same drift the engine seam exists to remove, and a receipt diffed against our own arithmetic is not diffed against an EVM. So the absence is stated two ways instead: the whole 256 bytes are diffed against the trie-backed `@ethereumjs/vm` reference like every other receipt field, AND the reverting transaction's bloom must be BYTE-IDENTICAL to a baseline transaction that emits the same two events from the same address with the same indexed arguments and makes no reverting sub-call. A bloom is over log addresses and topics only, so those two can differ by exactly one thing: the discarded frame's topic leaking in. That pair is load-bearing — with the sub-call's revert removed, the receipt diff against the reference stays perfectly clean (the reference executes the same contract and leaks the same log) and only the baseline comparison, the topic check and the `eth_getLogs` filter go red.
+
+  **The division of labour is pinned too, on a block that can see it.** The engine owns a log's address, topics, data and emission order; the node owns block hash, block number, transaction hash, transaction index and a `logIndex` that runs across the BLOCK. A block of one log per transaction cannot tell a block-wide index from a per-transaction one, so the new step mines a block emitting 2, then 0, then 2 logs: continuity reads 0,1,2,3 where a per-transaction index reads 0,1,0,1, and the zero-log transaction in the middle proves the running total counts logs and not transactions. `eth_getLogs` for that block must then return exactly the receipts' logs, field for field, and a filter on the discarded event's topic must return nothing while the same filter on a surviving event returns the survivors.
+
+  A zero-log transaction's bloom is also now stated absolutely as the all-zero 256 bytes, not only diffed. That is the value revm's wire format OMITS when the log count is zero, so it is the case a hand-rolled decoder turns into an empty `logsBloom` on the cheapest transaction there is.
+
+  The new fixture is a SEPARATE contract rather than two more functions on `ConformanceProbe`, deliberately: that probe's creation bytecode is shared with the trusted-sender suite, which pins the resulting sender balance as an absolute literal, so growing it would mean editing another suite's oracle to match an observation.
+
+  Reference gas is unchanged (`number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 -> `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`).
+
+- f048042: **What a transaction actually costs on each engine, measured by SHAPE and reported whatever it says** (`docs/spikes/measure-what-transactions-on-revm-actually-cost/`, produced by the re-runnable `measure-transaction-cost.mjs` in that folder). Story 8 of `work/specs/tasked/revm-engine-behind-runtx.md` wants transaction execution "measurably faster", and the honest form of that is a measurement rather than an assertion. Three changes had moved the baseline since the last figures were taken — ADR 0009's storage re-layer, the engine's `ecrecover`, and the packed storage key — so nothing is quoted here; it is all re-derived against the current tree, and the script exits non-zero if any of its own checks fail.
+
+  **The headline, and it is smaller than the compute rows suggest.** For the configuration a consumer actually ships (`senderMode:'recover'`, the default), a transaction is **3.0-3.3x cheaper on revm for every light shape** (transfer, storage write, creation, logs) and **3.9-7.3x for slot-heavy ones**. But **88-101% of the light-shape saving is `Engine.ecrecover`, not the interpreter**: with recovery taken out of the window, a plain **value transfer is 0.93x / 1.02x, i.e. no measurable difference at all**, and the other light shapes are 1.35-1.70x. A transaction is not compute, and on a 21,000-gas transfer the node's own dispatch, block building and receipt assembly are essentially all of it.
+
+  **The interpreter and the state seam start to matter with DISTINCT storage slots**, which is the axis the host-callback design is sensitive to (a boundary crossing is paid once per COLD access, ADR 0010): 1.8x at 16 slots, 3.1-3.2x at 64, 6.8-6.9x at 256, 16.3-16.5x at 12,288 — which is near the most one transaction can reach, since the block gas limit refuses much more. The marginal cost of one further cold slot is **0.55-0.58 µs on revm against 9.3-9.7 µs on the default engine**. There is no crossover where the default engine wins; the crossover that exists is the FRAME BUDGET, and it falls between 1,024 and 2,048 distinct slots per transaction, where the default engine goes from 55% to 109-116% of a 16.6 ms frame and revm is at 8-9%.
+
+  **The COMMIT path is measured for the first time.** Host writes are exactly proportional to what the transaction touched (a transfer: three account reads and three account writes on revm, nothing else) and the commit is 2.0-3.2% of a light transaction, rising to 23% of a 256-slot write. **One premise this was asked to check turned out to be inverted**: crediting the coinbase a real fee costs FEWER host writes than deleting it, not more — one `setAccount` against `clearStorage` plus `removeAccount` on revm (3 writes against 4), and 6 against 7 on the default engine.
+
+  **Stated as a finding rather than acted on** (ADR 0010 asks for exactly this trigger): a wasm-side cache spanning transactions would remove at most the read-callback time, about 15% of a 256-slot transaction, and would need invalidating on the `evm_set*` cheats — a poor trade at today's numbers. Revisit if a tick needs SEVERAL thousand-slot transactions, since four 4,096-slot transactions is 10-11 ms of a 16.6 ms frame.
+
+  Documentation and a spike script only — no library code changed, and no behaviour with it. Reference gas is unchanged, and the script asserts it on BOTH engines before it prints a single timing (`number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 -> `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`), plus 15 further per-shape and per-sweep-point gas equalities between the two engines.
+
 ## 0.2.0
 
 ### Minor Changes
