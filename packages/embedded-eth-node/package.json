@@ -1,6 +1,6 @@
 {
 	"name": "embedded-eth-node",
-	"version": "0.2.0",
+	"version": "0.3.0",
 	"description": "Slim, execution-only in-browser EIP-1193 Ethereum node on @ethereumjs/vm. Transport-agnostic core + optional comlink Worker helpers + IndexedDB persistence.",
 	"keywords": [
 		"ethereum",
