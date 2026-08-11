@@ -61,6 +61,27 @@ test('storage overlays: checkpoint/commit/revert semantics, the readers, and the
 	expect(c.clearLeavesNeighbourAlone).toBe(true);
 	expect(c.clearRevertRestoresAccount).toBe(true);
 
+	// ---- 3b. a tombstone hides what is BELOW it, so the bottom overlay has none
+	// The bottom overlay has nothing underneath, so a tombstone there hides
+	// nothing and never goes away — and the EVM calls `clearStorage` on every
+	// contract creation, so a long-lived browser node kept one permanent entry per
+	// CREATE ever executed and paid for it again in every `dumpState`. The clear
+	// itself must survive the pruning, which is the other half.
+	expect(c.bottomCommitLeavesNoTombstone).toBe(true);
+	expect(c.bottomCommitStillReadsCleared).toBe(true);
+	expect(c.repeatedBottomCommitsLeaveNoTombstones).toBe(true);
+	// The same rule at the other site a bottom tombstone can be created from: a
+	// clear with no checkpoint open, which is where the REVM engine's every
+	// contract creation lands (it commits through synchronous callbacks with no
+	// checkpoint around them, unlike `runTx`).
+	expect(c.clearAtBottomLeavesNoTombstone).toBe(true);
+	expect(c.clearAtBottomStillReadsCleared).toBe(true);
+	// ...and a commit into a NON-bottom overlay still leaves one, because there IS
+	// something below for it to hide.
+	expect(c.nonBottomCommitKeepsTombstone).toBe(true);
+	expect(c.nonBottomCommitStillHidesBelow).toBe(true);
+	expect(c.nonBottomTombstoneRevertRestores).toBe(true);
+
 	// ---- 4. the three readers that answered WRONG rather than throwing ----
 	// The guard now constrains the REPRESENTATION: it accepts the node's manager
 	// and refuses a flat one, which is exactly the change it slept through before.

@@ -22,7 +22,8 @@
  *   overlay that cleared the account (which hides every overlay below it).
  * - `commit()` merges the top overlay into the one below and pops it; `revert()`
  *   just pops it, so an uncommitted write was never anywhere else to begin with.
- * - `clearStorage(address)` is one `delete` plus one tombstone: O(that account).
+ * - `clearStorage(address)` is one `delete` plus one tombstone: O(that account)
+ *   (no tombstone on the BOTTOM overlay, which has nothing below it to hide).
  *
  * ## The key is PACKED, and both sides of it import ONE encoder
  *
@@ -132,6 +133,16 @@ export type {PackedAddressKey, PackedSlotKey, HexKey} from './storage-keys.js';
  * below, which is what makes `clearStorage` O(that account) rather than a scan.
  * Both are needed: without `cleared`, a clear could only be expressed by copying
  * the account's slots forward as zeroes, which is the cost being removed.
+ *
+ * THE BOTTOM OVERLAY HOLDS NO TOMBSTONES. It is committed state, so there is
+ * nothing below it for a tombstone to hide and dropping the account's `written`
+ * entry has already cleared everything there was. Nothing ever removes an entry
+ * from a bottom `cleared` set either, so keeping them made this the one part of
+ * the layout that grew without bound — the EVM calls `clearStorage` on EVERY
+ * contract creation. Both places one could arrive are pruned at the source:
+ * {@link OverlayStorageStateManager.clearStorageAt} when no checkpoint is open,
+ * and {@link OverlayStorageStateManager.commit} when the merge target is the
+ * bottom.
  */
 export interface StorageOverlay {
 	/** address key -> (slot key -> value) written IN THIS overlay, PACKED. */
@@ -227,6 +238,19 @@ export class OverlayStorageStateManager extends SimpleStateManager {
 	 * the overlay below and re-tombstoning it there hides everything deeper,
 	 * without touching a single slot. Then the writes land on top of that, so a
 	 * clear-then-write inside one frame commits as "only the new slots".
+	 *
+	 * EXCEPT ON THE BOTTOM OVERLAY, WHICH KEEPS NO TOMBSTONES. A tombstone exists
+	 * to hide the slots overlays BELOW it hold; the bottom overlay is committed
+	 * state and has nothing below, so a tombstone there hides nothing and is never
+	 * removed by anything. `@ethereumjs/evm` calls `clearStorage` on EVERY contract
+	 * creation, so keeping them cost a long-lived in-browser node one permanent
+	 * entry per CREATE ever executed, plus an O(addresses-ever-cleared) term in
+	 * {@link liveStorage} and therefore in every `dumpState`. The `delete` is what
+	 * performs the clear and it still runs, so the account still reads as cleared —
+	 * {@link storageAt} falls off the end of the stack, which is the same
+	 * `undefined` a tombstone would have produced. Pruned HERE, at one of the two
+	 * places a bottom tombstone can be created (the other is
+	 * {@link clearStorageAt}, with no checkpoint open), rather than swept later.
 	 */
 	override async commit(): Promise<void> {
 		this.accountStack.splice(-2, 1);
@@ -240,9 +264,12 @@ export class OverlayStorageStateManager extends SimpleStateManager {
 					'top one. Every commit must be preceded by a checkpoint.',
 			);
 		}
+		// After the `pop()` below, `below` is the bottom overlay exactly when the
+		// stack is two deep now.
+		const belowIsBottom = overlays.length === 2;
 		for (const address of top.cleared) {
 			below.written.delete(address);
-			below.cleared.add(address);
+			if (!belowIsBottom) below.cleared.add(address);
 		}
 		for (const [address, inner] of top.written) {
 			const target = below.written.get(address);
@@ -342,11 +369,28 @@ export class OverlayStorageStateManager extends SimpleStateManager {
 	 * Clear one account's storage SYNCHRONOUSLY, by key — {@link clearStorage}
 	 * without an `Address`, for the same synchronous-callback reason as
 	 * {@link setStorageAt}. Still O(1): one `delete` plus one tombstone.
+	 *
+	 * NO TOMBSTONE WHEN THE TOP OVERLAY *IS* THE BOTTOM ONE, i.e. when no
+	 * checkpoint is open. It is the same invariant {@link commit} keeps: a
+	 * tombstone hides what overlays BELOW hold, and the bottom overlay has nothing
+	 * below, so the `delete` above has already removed everything there was and the
+	 * tombstone would be an entry nothing can ever remove.
+	 *
+	 * THIS IS THE SITE THE REVM ENGINE REACHES, and it is why the rule is here as
+	 * well as in `commit()`. `runTx` checkpoints, so the DEFAULT engine's
+	 * `clearStorage` on every contract creation lands three overlays deep and is
+	 * pruned on the way down; `embedded-eth-node/revm` commits its state changes
+	 * through `src/revm-state-store.ts`'s SYNCHRONOUS callbacks with no checkpoint
+	 * around them, so every CREATE on that engine clears at depth 1 and arrives
+	 * straight here. Measured before this line existed: three contract creations
+	 * left three permanent tombstones in the bottom overlay, one per CREATE, each
+	 * of them then walked by {@link liveStorage} and therefore by every
+	 * `dumpState`.
 	 */
 	clearStorageAt(addressKey: PackedAddressKey): void {
 		const top = this.topOverlay();
 		top.written.delete(addressKey);
-		top.cleared.add(addressKey);
+		if (this.storageOverlays.length > 1) top.cleared.add(addressKey);
 	}
 
 	override async getStorage(

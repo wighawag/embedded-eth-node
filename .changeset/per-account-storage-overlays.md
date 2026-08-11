@@ -56,7 +56,7 @@ The default entry point grew 413.7 -> 416.3 KB raw / 124.6 -> 125.4 KB gzip, and
 the benchmark's bundle baseline is re-pinned in this same change. The 2.6 KB is
 the overlay walk, the commit merge, the two synchronous accessors and the retired
 stack's error text; it is in the core graph because this is the default state
-manager, and it is what buys that same default consumer the 28x. Still zero bytes
+manager, and it is what buys that same default consumer that flatness. Still zero bytes
 of `revm-wasm` in the default graph.
 
 Correctness is asserted before speed, in `test/storage-overlay.spec.ts`: six

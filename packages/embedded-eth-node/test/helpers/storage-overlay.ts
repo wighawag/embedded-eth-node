@@ -26,6 +26,11 @@
  *    wall clock, because a timing threshold in a browser test is a flake. The
  *    wall-clock half is measured in
  *    `docs/spikes/re-layer-storage-as-per-account-maps-with-per-frame-diffs/`.
+ *    Plus the tombstone's OWN rule (3b): a tombstone hides what overlays BELOW
+ *    it hold, so the BOTTOM overlay keeps none — otherwise the set grew by one
+ *    permanent entry per contract creation, forever, and `liveStorage()` walked
+ *    them all on every `dumpState`. Both halves are asserted, because pruning
+ *    the tombstone must not turn into losing the CLEAR.
  * 4. **The three readers that answered WRONG rather than throwing** when the
  *    layout moved under them: the revm store's `getStorage`, the shape guard, and
  *    `dumpState`'s `'none'` branch. Each is asserted on the value it used to get
@@ -565,6 +570,85 @@ export async function runStorageOverlayChecks(): Promise<
 		await sm.revert();
 		out.clearRevertRestoresAccount =
 			bytesToHex(await sm.getStorage(addr(100), slot(0))) === '0x01';
+	}
+
+	// ---------- 3b. a tombstone hides what is BELOW it, so the bottom has none --
+	// A tombstone exists to hide the slots overlays BELOW it hold. The BOTTOM
+	// overlay has nothing below it, so a tombstone there hides nothing and simply
+	// stays for the process's lifetime — and `@ethereumjs/evm` calls
+	// `clearStorage` on EVERY contract creation, so an in-browser node accumulated
+	// one permanent entry per CREATE ever executed plus an
+	// O(addresses-ever-cleared) term in `liveStorage()`, i.e. in every
+	// `dumpState`. Both halves are asserted, because dropping the tombstone must
+	// not turn into dropping the CLEAR: the account still has to read as cleared.
+	{
+		const sm = new OverlayStorageStateManager();
+		await sm.putStorage(A1, slot(0), val(1));
+		await sm.putStorage(A1, slot(1), val(2));
+		await sm.putStorage(A2, slot(0), val(3));
+		await sm.checkpoint();
+		await sm.clearStorage(A1);
+		await sm.commit(); // into the BOTTOM overlay
+		const bottom = sm.storageOverlays[0];
+		out.bottomCommitLeavesNoTombstone =
+			sm.storageOverlays.length === 1 &&
+			bottom.cleared.size === 0 &&
+			!bottom.written.has(packAddressKey(A1.bytes));
+		out.bottomCommitStillReadsCleared =
+			bytesToHex(await sm.getStorage(A1, slot(0))) === '0x' &&
+			bytesToHex(await sm.getStorage(A1, slot(1))) === '0x' &&
+			bytesToHex(await sm.getStorage(A2, slot(0))) === '0x03' &&
+			!sm.liveStorage().has(A1.toString() as `0x${string}`);
+
+		// ...and it repeats: 200 clear-and-commit cycles at the bottom leave the
+		// bottom overlay exactly as empty as one does. This is the growth itself,
+		// stated as the property rather than as a byte count.
+		const sm2 = new OverlayStorageStateManager();
+		for (let i = 0; i < 200; i++) {
+			await sm2.checkpoint();
+			await sm2.clearStorage(addr(1000 + i));
+			await sm2.commit();
+		}
+		out.repeatedBottomCommitsLeaveNoTombstones =
+			sm2.storageOverlays.length === 1 &&
+			sm2.storageOverlays[0].cleared.size === 0;
+
+		// The OTHER place a bottom tombstone can be created: a clear with NO
+		// checkpoint open, where the top overlay IS the bottom one. The default
+		// engine never gets here (`runTx` checkpoints, and the EVM clears at depth
+		// 3), but the revm engine commits its state changes through the store's
+		// SYNCHRONOUS callbacks with no checkpoint around them, so on that engine
+		// every contract creation clears at depth 1 — measured: three CREATEs left
+		// three permanent tombstones in the bottom overlay.
+		const smBottom = new OverlayStorageStateManager();
+		await smBottom.putStorage(A1, slot(0), val(1));
+		await smBottom.putStorage(A2, slot(0), val(3));
+		await smBottom.clearStorage(A1); // depth 1: the top IS the bottom
+		out.clearAtBottomLeavesNoTombstone =
+			smBottom.storageOverlays.length === 1 &&
+			smBottom.storageOverlays[0].cleared.size === 0;
+		out.clearAtBottomStillReadsCleared =
+			bytesToHex(await smBottom.getStorage(A1, slot(0))) === '0x' &&
+			bytesToHex(await smBottom.getStorage(A2, slot(0))) === '0x03' &&
+			!smBottom.liveStorage().has(A1.toString() as `0x${string}`);
+
+		// ...while a commit into a NON-bottom overlay still leaves the tombstone,
+		// because there IS something below for it to hide. Skipping it there would
+		// resurrect the outer frame's slots on commit.
+		const sm3 = new OverlayStorageStateManager();
+		await sm3.putStorage(A1, slot(0), val(1));
+		await sm3.checkpoint(); // frame 1
+		await sm3.checkpoint(); // frame 2
+		await sm3.clearStorage(A1);
+		await sm3.commit(); // frame 2 -> frame 1, which is NOT the bottom
+		out.nonBottomCommitKeepsTombstone =
+			sm3.storageOverlays.length === 2 &&
+			sm3.storageOverlays[1].cleared.has(packAddressKey(A1.bytes));
+		out.nonBottomCommitStillHidesBelow =
+			bytesToHex(await sm3.getStorage(A1, slot(0))) === '0x';
+		await sm3.revert(); // frame 1 dropped: the bottom's slot must come back
+		out.nonBottomTombstoneRevertRestores =
+			bytesToHex(await sm3.getStorage(A1, slot(0))) === '0x01';
 	}
 
 	// ---------- 4. the readers that used to answer WRONG, silently ----------

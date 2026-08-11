@@ -1,0 +1,13 @@
+---
+'embedded-eth-node': patch
+---
+
+The bottom storage overlay no longer accumulates a tombstone per cleared account, which was one permanent entry per contract creation for the life of the process.
+
+`stateMode:'none'` storage is per-account with per-checkpoint OVERLAYS (ADR 0009), and an overlay's tombstone set exists to hide the slots overlays BELOW it hold. The BOTTOM overlay is committed state, so it has nothing below and a tombstone there hides nothing — but nothing removed it either, and `@ethereumjs/evm` calls `clearStorage` on EVERY contract creation. A long-lived in-browser node therefore kept one packed address key per CREATE ever executed, and walked all of them again in `liveStorage()`, i.e. in every `dumpState`.
+
+Nothing answered WRONG because of it: a tombstone over an account with nothing beneath it is a no-op that happens to cost memory. It is pruned at the two places one could be created, rather than swept later: `commit()` skips it when the overlay it is merging into is the bottom one, and `clearStorageAt()` skips it when no checkpoint is open. The `delete` that performs the clear is untouched in both, so a cleared account still reads as cleared — the stack walk falls off the end, which is the same "no value here" a tombstone produced.
+
+Both sites are reachable and they are reachable from DIFFERENT engines. `runTx` checkpoints, so on the default `@ethereumjs/evm` engine the EVM's `clearStorage` lands three overlays deep and the tombstone is pruned as the frames commit down; `embedded-eth-node/revm` commits its state changes through synchronous host callbacks with no checkpoint around them, so every CREATE on that engine clears at depth 1 and never went through `commit()` at all (measured: three contract creations, three permanent tombstones).
+
+`test/storage-overlay.spec.ts` asserts both halves at both sites — no tombstone in the bottom overlay, and the account still reads as cleared and is absent from `liveStorage()` — plus the case that must NOT change: a commit into a non-bottom overlay still leaves the tombstone that hides the frame below it. The six checkpoint/commit/revert semantics, the 20,000-operation randomised differential against the frozen pre-overlay layout, the naive control's continued failure of 4 of the 6, and the byte-identical `dumpState` fixture are all unchanged and unweakened. No API, no serialised format and no gas moved. The default entry's bundle-size baseline is re-pinned 421.9 -> 422.0 KB raw (gzip unchanged at 127.4): the 0.1 KB is the two depth tests, in the core graph because this is the default state manager for `stateMode:'none'`.

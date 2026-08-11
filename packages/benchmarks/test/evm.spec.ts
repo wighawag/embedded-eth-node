@@ -90,7 +90,22 @@ const collected: Record<string, unknown>[] = [];
  * change that grows it, and say why in the changeset. A red assertion here means
  * either that or an accidental import into the core graph.
  *
- * RE-PINNED ELEVEN TIMES SINCE. Most recent first:
+ * RE-PINNED TWELVE TIMES SINCE. Most recent first:
+ *
+ * 421.9 -> 422.0 KB raw (gzip unchanged at 127.4), by
+ * `prune-bottom-overlay-tombstones-and-align-the-quoted-speedup`: the BOTTOM
+ * storage overlay now keeps no tombstones. One hides the slots overlays BELOW it
+ * hold, and the bottom has none below, so the entry hid nothing and nothing ever
+ * removed it — while `@ethereumjs/evm` calls `clearStorage` on every contract
+ * creation, so a long-lived in-browser node kept one packed address key per
+ * CREATE ever executed and re-walked all of them in `liveStorage()`, i.e. in
+ * every `dumpState`. The 0.1 KB is two depth tests in `src/state-manager.ts`,
+ * one in `commit()` and one in `clearStorageAt()` (the site the revm engine
+ * reaches, since it commits through synchronous callbacks with no checkpoint
+ * open). It is in the CORE graph for the same reason the four `state-manager.ts`
+ * re-pins below are, and it buys that same default consumer a `'none'`-mode node
+ * whose memory does not grow with the number of contracts it has ever created.
+ * Still zero bytes of `revm-wasm`.
  *
  * 421.1 -> 421.9 KB raw / 127.1 -> 127.4 KB gzip, by
  * `revm-state-store-packed-storage-keys`: the `stateMode:'none'` storage key is
@@ -205,13 +220,19 @@ const collected: Record<string, unknown>[] = [];
  * `re-layer-storage-as-per-account-maps-with-per-frame-diffs`:
  * `src/state-manager.ts` re-layers `stateMode:'none'` storage as per-account maps
  * with per-checkpoint OVERLAYS, so a checkpoint stops copying the whole storage
- * map (28x on four transactions at 100,000 slots, and flat in state size). The
+ * map (four transactions at 100,000 slots: 18-28x across two runs, and FLAT in
+ * state size — ~12 ms whether state holds 1,000 slots or 100,000). Read the
+ * FLATNESS rather than either ratio: the 100,000-slot cell is the
+ * allocation-heaviest in the file and moves tens of percent between runs, which
+ * is why ADR 0009, the changeset and
+ * `docs/spikes/re-layer-storage-as-per-account-maps-with-per-frame-diffs/measurements.md`
+ * all quote the range and say in as many words not to quote the single cell. The
  * 2.6 KB is the overlay walk, the commit merge, the two synchronous accessors the
  * revm store and `dumpState` read through, and the error text for the retired
  * flat `storageStack`. It has to be in the CORE graph for the same reason the
  * previous re-pin did: this IS the default state manager for `stateMode:'none'`,
  * which is every consumer who passes no options — and the growth buys that same
- * consumer the 28x. Still zero bytes of `revm-wasm`.
+ * consumer that flatness. Still zero bytes of `revm-wasm`.
  *
  * 413.5 -> 413.7 KB raw (gzip unchanged at 124.6), by the `clearStorage` fix:
  * `src/state-manager.ts` subclasses `SimpleStateManager` to implement the
@@ -235,7 +256,7 @@ const collected: Record<string, unknown>[] = [];
  * carries 1% of slack because the zlib shipped with different Node builds does
  * not compress byte-identically, which is noise rather than growth.
  */
-const DEFAULT_ENTRY_BASELINE = {rawKB: 421.9, gzipKB: 127.4};
+const DEFAULT_ENTRY_BASELINE = {rawKB: 422.0, gzipKB: 127.4};
 const GZIP_SLACK = 1.01;
 
 // Build + serve once for the whole file (the cut contains all backends).
