@@ -52,7 +52,10 @@ import {connectEngine, createEthereumjsEngine} from './engine.js';
 // The engine reports EXECUTION gas for a read and the node adds intrinsic gas on top;
 // an engine that charges intrinsic gas itself (revm) subtracts the SAME formula,
 // so it has exactly one home. See ./intrinsic-gas.ts.
-import {intrinsicGas as intrinsicGasOf} from './intrinsic-gas.js';
+import {
+	accessListGas,
+	intrinsicGas as intrinsicGasOf,
+} from './intrinsic-gas.js';
 import {
 	RpcError,
 	type NodeOptions,
@@ -811,7 +814,8 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 				`32000 more to create a contract) before its first opcode runs, so this gas ` +
 				`limit could not start it and no block this node builds could contain it. ` +
 				`Raise the gas limit to at least ${minimum} — eth_estimateGas reports what a ` +
-				`transaction needs.`,
+				`transaction needs, given the same calldata AND the same access list, which ` +
+				`it charges too.`,
 		);
 	}
 
@@ -1018,6 +1022,18 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 				// (21000 base, +32000 for creation, + per-byte calldata cost). This
 				// matches what the tx actually pays in runTx (verified against
 				// totalGasSpent) without mutating state.
+				//
+				// PLUS THE REQUEST'S ACCESS LIST, which the engine never saw: a read is
+				// executed with no access list on either engine (`ReadCallRequest` carries
+				// none), so EIP-2930's 2,400 per address and 1,900 per storage key are
+				// charged HERE, above the seam, by the one caller that has a request to
+				// read them off. Without it this method answers 21,000 for a type-1
+				// transaction whose intrinsic floor is 27,200, and
+				// `refuseIfBelowIntrinsicGas` above sends the caller to THIS method for the
+				// number a transaction needs, so the node would refuse the figure it had
+				// just recommended. Why it is a separate term rather than one more line in
+				// the shared formula, and why it deliberately over-estimates a list whose
+				// entries are touched: `accessListGas` in ./intrinsic-gas.ts.
 				const p = params[0] ?? {};
 				const r = await evmCall(p);
 				if (r.error)
@@ -1025,7 +1041,9 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 				const dataHex: string = p.data ?? p.input ?? '0x';
 				const isCreate = !p.to;
 				return numHex(
-					r.executionGasUsed + intrinsicGas(dataHex, isCreate, common),
+					r.executionGasUsed +
+						intrinsicGas(dataHex, isCreate, common) +
+						accessListGas(p.accessList),
 				);
 			}
 

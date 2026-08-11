@@ -100,7 +100,7 @@ method-not-found (`-32601`) — it never fakes a result.
 | `eth_blockNumber` | latest mined block number |
 | `eth_getBlockByNumber`, `eth_getBlockByHash` | header + (optional) full txs; roots are zero in `'none'` mode |
 | `eth_call` | **runs on the [engine](#engine-ethereumjsevm-default-vs-revm-wasm-opt-in)**; pure (never mutates); reverts throw `RpcError(3, 'execution reverted')` |
-| `eth_estimateGas` | **runs on the [engine](#engine-ethereumjsevm-default-vs-revm-wasm-opt-in)**; honest run-and-measure (`executionGasUsed` + intrinsic incl. EIP-3860); verified == `runTx` `totalGasSpent` |
+| `eth_estimateGas` | **runs on the [engine](#engine-ethereumjsevm-default-vs-revm-wasm-opt-in)**; honest run-and-measure (`executionGasUsed` + intrinsic incl. EIP-3860, **+ the request's EIP-2930 `accessList`**: 2,400/address + 1,900/key, as geth charges it); verified == `runTx` `totalGasSpent` |
 | `eth_getBalance`, `eth_getCode`, `eth_getStorageAt`, `eth_getTransactionCount` | state reads at a block tag |
 | `eth_gasPrice`, `eth_maxPriorityFeePerGas` | **constant** (faked fee market — local chain) |
 | `eth_feeHistory` | correct response **shape**, but **constant/faked values** — not for real fee prediction |
@@ -137,6 +137,14 @@ method-not-found (`-32601`) — it never fakes a result.
   doesn't under-report and cause out-of-gas reverts). estimateGas returns the
   **real** number (executionGasUsed + intrinsic incl. EIP-3860 initcode word cost),
   verified equal to `runTx`'s `totalGasSpent`.
+- **A request's EIP-2930 access list is CHARGED by `eth_estimateGas`** (2,400 per
+  address, 1,900 per storage key), because the node's own intrinsic-gas refusal
+  sends you to `eth_estimateGas` for the number a transaction needs, and that
+  number has to be one the node would then accept. It is a slight OVER-estimate
+  for entries the transaction really touches (the read underneath carries no
+  access list, so those accesses are priced cold), which is the safe direction: a
+  client uses an estimate as its gas limit. Mined transactions are unaffected;
+  they are charged and warmed by whichever engine executed them.
 
 ## State mode: `'none'` (fast, default) vs `'trie'` (real state root, opt-in)
 
@@ -492,6 +500,16 @@ credited and the base fee burnt, read off BALANCES rather than off the receipt's
 `effectiveGasPrice`, for legacy, EIP-2930 and EIP-1559 transactions and for a
 storage-clearing refund. A receipt can carry the right price while the wrong
 amount left the sender, which is why the money is asserted where the money is.
+
+A third one is deliberately NOT a differential: `test/revm-access-list.spec.ts`
+holds EIP-2930 access lists to ABSOLUTE gas figures on both engines, because a
+node that dropped an access list would charge the same wrong number on each and
+agree with itself perfectly (measured, with an empty `mismatches` beside seven
+wrong figures, in
+`docs/spikes/eip-2930-access-lists-are-charged-and-warmed/measurements.md`).
+Listing an entry a transaction touches is **100 gas cheaper** (charged 2,400 or
+1,900, warmed for 2,500 or 2,000), listing entries it never touches costs
+**+6,200 exactly**, and a dropped list is 0.
 
 That same battery runs once more with the optional revm engine installed
 (`test/revm-conformance.spec.ts`), in the one state mode that engine serves

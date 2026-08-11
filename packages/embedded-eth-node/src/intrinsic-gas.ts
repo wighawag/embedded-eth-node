@@ -15,8 +15,8 @@
  *
  * WHAT IT IS NOT: A TRANSACTION'S VALIDITY FLOOR. This formula answers the READ
  * path's question — how much gas a call costs before execution, so the node can
- * add it to what an engine reports and the revm engine can subtract it — and an
- * `eth_call` carries no ACCESS LIST, so there is no access-list term here. A
+ * add it to what an engine reports and the revm engine can subtract it — and
+ * SIGNED CALLDATA IS ALL IT KNOWS ABOUT, so there is no access-list term in it. A
  * TRANSACTION pays one: 2,400 per address and 1,900 per storage key, which both
  * engines charge, so this figure is 6,200 gas short of the floor for a type-1
  * transaction naming one address and two keys. The node therefore refuses a gas
@@ -26,8 +26,13 @@
  * node's, neither a copy of the other; measured side by side on four transaction
  * shapes in
  * `docs/spikes/replayed-and-invalid-transactions-are-rejected-as-the-nodes-own-errors/measurements.md`.
- * Do not "unify" them by adding an access-list term here: the read path has no
- * access list to charge, so the term would be dead arithmetic on this side.
+ * Do not "unify" them by adding an access-list term to {@link intrinsicGas}: the
+ * two callers that share this formula must stay in lockstep, and the revm engine
+ * SUBTRACTS whatever it returns from a read whose engine request carries no access
+ * list at all, so an extra term there would be subtracted from a figure that never
+ * contained it. An `eth_estimateGas` REQUEST may nevertheless name an access list
+ * (geth's `accessList` field, and viem sends it), so the charge for THAT lives
+ * beside this formula rather than inside it: see {@link accessListGas}.
  *
  * WHY THE FORK IS A `Common` AND NOT A HARDFORK NAME. The formula has a
  * fork-dependent term, so both callers have to name the same fork — and the
@@ -106,6 +111,81 @@ export function intrinsicGas(
 		if (common.isActivatedEIP(3860)) {
 			gas += BigInt(Math.ceil(data.length / 32)) * 2n;
 		}
+	}
+	return gas;
+}
+
+/** EIP-2930: what one access-list entry's ADDRESS costs, up front. */
+const ACCESS_LIST_ADDRESS_COST = 2_400n;
+/** EIP-2930: what one access-list STORAGE KEY costs, up front. */
+const ACCESS_LIST_STORAGE_KEY_COST = 1_900n;
+
+/**
+ * WHAT AN `eth_estimateGas` REQUEST'S ACCESS LIST COSTS: 2,400 per address plus
+ * 1,900 per storage key, the EIP-2930 charge, added to {@link intrinsicGas} by
+ * `eth_estimateGas` alone.
+ *
+ * ## Why it is a SECOND function rather than a term of the formula above
+ *
+ * {@link intrinsicGas} has exactly two callers and they must not drift: `node.ts`
+ * ADDS it to the EXECUTION gas an engine reports, and `embedded-eth-node/revm`
+ * SUBTRACTS it from revm's total. The engine seam's read request
+ * (`ReadCallRequest`) carries NO access list (a read is executed with none on
+ * either engine), so a term added to the shared formula would be subtracted from a
+ * number that never included it, and `eth_estimateGas` would come out 6,200 gas
+ * short on revm and 6,200 long on `@ethereumjs/evm` for the same request. The
+ * charge therefore sits ABOVE the seam, added once by the one caller that has a
+ * request to read it off.
+ *
+ * ## Why `eth_estimateGas` charges it at all
+ *
+ * BECAUSE THE NODE'S OWN REFUSAL POINTS THE CALLER HERE. A transaction whose gas
+ * limit is below the intrinsic floor is refused with "raise the gas limit to at
+ * least N", pointing the caller at `eth_estimateGas` for the number a transaction
+ * needs (`refuseIfBelowIntrinsicGas` in ./node.ts), and that floor is the
+ * transaction's own `getIntrinsicGas()`, WHICH INCLUDES THE ACCESS LIST. An estimate blind to
+ * the list answered 21,000 for a type-1 transaction with a floor of 27,200: the
+ * node would refuse the very number it had just recommended. It is also what geth
+ * does (`eth_estimateGas` honours the request's `accessList` field), so a client
+ * that sends one gets the same answer here as from a real node.
+ *
+ * ## It OVER-estimates a list whose entries are touched, deliberately
+ *
+ * The charge is added, but the WARMING is not modelled: the read underneath was
+ * executed without the list, so an access to a listed entry inside it was priced
+ * COLD (2,600 / 2,100) where the mined transaction pays WARM (100). The estimate
+ * is therefore up to 2,500 per touched address and 2,000 per touched key ABOVE
+ * what the transaction really costs. That is the SAFE direction: a client uses
+ * the estimate as its gas limit, so an over-estimate costs nothing (unused gas is
+ * not charged) while an under-estimate is a transaction that runs out of gas.
+ * Buying the exact figure would mean widening the read seam to carry an access
+ * list and pre-warming it on both engines, which is a change to the seam, not to
+ * an estimate. Both figures are measured and pinned in
+ * `test/revm-access-list.spec.ts`, and the run in which the node refused the very
+ * gas limit it had just recommended is kept in
+ * `docs/spikes/eip-2930-access-lists-are-charged-and-warmed/measurements.md`.
+ *
+ * ## What does NOT charge it, and why that is not an oversight
+ *
+ * `eth_fillTransaction` estimates with {@link intrinsicGas} alone, because the
+ * transaction it FILLS AND RETURNS carries no access list (it builds a type-0 or
+ * type-2 envelope and drops the field): charging for a list its own answer does
+ * not contain would hand back a gas limit for a different transaction.
+ */
+export function accessListGas(accessList: unknown): bigint {
+	if (!Array.isArray(accessList)) return 0n;
+	let gas = 0n;
+	for (const entry of accessList) {
+		// TOLERANT OF THE ENTRY, STRICT ABOUT THE ARITHMETIC: this reads an unvalidated
+		// JSON-RPC parameter, and an entry naming no keys (`{address}` with
+		// `storageKeys` omitted) is a legitimate access list, not an error. What must
+		// never happen is a THROW here, which would turn a merely odd request into a
+		// failed estimate.
+		if (entry === null || typeof entry !== 'object') continue;
+		gas += ACCESS_LIST_ADDRESS_COST;
+		const keys = (entry as {storageKeys?: unknown}).storageKeys;
+		if (Array.isArray(keys))
+			gas += BigInt(keys.length) * ACCESS_LIST_STORAGE_KEY_COST;
 	}
 	return gas;
 }

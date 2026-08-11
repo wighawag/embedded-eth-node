@@ -489,10 +489,16 @@ export async function createRevmEngine(
 				nonce: tx.nonce,
 				...feesOf(tx),
 				// EIP-2930/1559 access list, in revm's own shape. Charged and warmed by
-				// revm; the node does not price it (`eip-2930-access-lists-are-charged-and
-				// -warmed` is where that is proven load-bearing rather than merely
-				// passed). DROPPING it would not be caught by a cross-engine gas diff
-				// alone, because a list the node also failed to charge would agree.
+				// revm; the node does not price it. DROPPING it is not caught by a
+				// cross-engine gas diff alone, because a list the node also failed to charge
+				// on the other engine AGREES: that run is in
+				// `docs/spikes/eip-2930-access-lists-are-charged-and-warmed/measurements.md`,
+				// with an empty `mismatches` beside seven wrong gas figures. What catches it
+				// is absolute and lives in `test/revm-access-list.spec.ts`: the same
+				// transaction WITH the list and with an EMPTY one, held to the protocol's own
+				// arithmetic on both engines. Listing an entry the transaction touches is 100
+				// gas CHEAPER (charged 2,400/1,900, warmed for 2,500/2,000); listing entries
+				// it never touches is +6,200 exactly; a dropped list is 0.
 				...(tx.accessList !== undefined && tx.accessList.length > 0
 					? {
 							accessList: tx.accessList.map(([address, storageKeys]) => ({

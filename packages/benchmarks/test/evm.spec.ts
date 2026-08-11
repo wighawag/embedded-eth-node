@@ -90,7 +90,22 @@ const collected: Record<string, unknown>[] = [];
  * change that grows it, and say why in the changeset. A red assertion here means
  * either that or an accidental import into the core graph.
  *
- * RE-PINNED EIGHT TIMES SINCE. Most recent first:
+ * RE-PINNED NINE TIMES SINCE. Most recent first:
+ *
+ * 419.7 -> 420.0 KB raw / 126.6 -> 126.7 KB gzip, by
+ * `eip-2930-access-lists-are-charged-and-warmed`: `eth_estimateGas` now charges a
+ * request's EIP-2930 access list (2,400 per address, 1,900 per storage key), as
+ * geth does. It had ignored the field, so it answered 21,000 for a type-1
+ * transaction whose intrinsic floor is 27,200 while the node's own intrinsic-gas
+ * refusal was telling callers that `eth_estimateGas` reports what a transaction
+ * needs: the node refused the number it had just recommended
+ * (`docs/spikes/eip-2930-access-lists-are-charged-and-warmed/measurements.md`).
+ * The 0.3 KB is the new `accessListGas` in `src/intrinsic-gas.ts` (a loop over the
+ * request's entries), one term at the `eth_estimateGas` case, and the clause the
+ * refusal gained. It is in the CORE graph because `eth_estimateGas` is, it is paid
+ * by every consumer including the JS-only one, and it buys them an estimate their
+ * client can use as a gas limit without being refused. Still zero bytes of
+ * `revm-wasm`.
  *
  * 417.9 -> 419.7 KB raw / 126.0 -> 126.6 KB gzip, by
  * `replayed-and-invalid-transactions-are-rejected-as-the-nodes-own-errors`: the
@@ -189,7 +204,7 @@ const collected: Record<string, unknown>[] = [];
  * carries 1% of slack because the zlib shipped with different Node builds does
  * not compress byte-identically, which is noise rather than growth.
  */
-const DEFAULT_ENTRY_BASELINE = {rawKB: 419.7, gzipKB: 126.6};
+const DEFAULT_ENTRY_BASELINE = {rawKB: 420.0, gzipKB: 126.7};
 const GZIP_SLACK = 1.01;
 
 // Build + serve once for the whole file (the cut contains all backends).

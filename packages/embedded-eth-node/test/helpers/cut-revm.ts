@@ -28,6 +28,11 @@
  *                      transaction COSTS, measured on BALANCES (sender charged,
  *                      coinbase credited, base fee burnt) rather than on the
  *                      receipt's `effectiveGasPrice`
+ *   - 'access-list' : the SHARED EIP-2930 battery (helpers/access-list.ts): the
+ *                      same type-1 transaction WITH its access list and with an
+ *                      EMPTY one, so the list is proven CHARGED (2,400 per address,
+ *                      1,900 per key) and WARMED (the access inside execution costs
+ *                      the warm price), which no cross-engine diff can see
  *   - 'invalid-transactions': the SHARED refusal battery
  *                      (helpers/invalid-transactions.ts) — a replayed nonce, a
  *                      far-future nonce, an unaffordable transaction and a gas
@@ -45,6 +50,7 @@ import {runRevmConformance} from './revm-conformance.js';
 import {runRevmTrustedSender} from './revm-trusted-sender.js';
 import {runRevmPostState} from './revm-post-state.js';
 import {runRevmFees} from './revm-fees.js';
+import {runRevmAccessList} from './revm-access-list.js';
 import {runRevmInvalidTransactions} from './revm-invalid-transactions.js';
 
 const cut: CodeUnderTest = {
@@ -111,6 +117,19 @@ const cut: CodeUnderTest = {
 		if (ctx.params.mode === 'fees') {
 			try {
 				results.revmFees = await runRevmFees();
+			} catch (e) {
+				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
+			}
+			return {results, timings, errors, env: captureEnv()};
+		}
+
+		// The SHARED EIP-2930 battery, with the revm engine installed. A dropped access
+		// list is invisible to every differential in this repo (both engines then charge
+		// the same wrong number), so this one measures the SAME transaction with and
+		// without the list and holds the difference to the protocol's own arithmetic.
+		if (ctx.params.mode === 'access-list') {
+			try {
+				results.revmAccessList = await runRevmAccessList();
 			} catch (e) {
 				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
 			}
