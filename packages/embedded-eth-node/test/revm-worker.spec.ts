@@ -5,11 +5,17 @@
  *
  * `createWorkerNode({engine})` is refused (an engine is a function-bearing object
  * holding thread-bound live state, and the options are structured-cloned), so the
- * supported shape is the consumer's OWN worker module: build the engine there,
- * `createNode({engine})` there, comlink-expose the node. That file is
- * ./helpers/revm-worker.ts and it imports `embedded-eth-node` /
+ * supported shape is the consumer's OWN worker module: build the engine there and
+ * hand it to `exposeNode({createEngine})` from `embedded-eth-node/worker-host`,
+ * which supplies the node, the `SlimNode` proxy and the comlink `expose()` that
+ * this file used to have to hand-copy. That module is ./helpers/revm-worker.ts,
+ * now four lines, and it imports `embedded-eth-node/worker-host` /
  * `embedded-eth-node/revm` BY PACKAGE NAME, so this spec also exercises the
  * published export map the way a consumer resolves it.
+ *
+ * The SECOND test here drives the same recipe MISTYPED (the promise where the
+ * factory belongs), because the option this recipe rests on is only as good as
+ * what it does when a consumer gets it wrong.
  *
  * What is proven here, and why each part is needed:
  *   - the engine identity crossing the boundary reads `revm-wasm`, not the
@@ -44,6 +50,12 @@ const cut = resolve(here, './helpers/cut-revm.ts');
 // ...and the CONSUMER'S own worker module, which is what makes revm reachable
 // from a Worker at all. `src/worker-entry.ts` deliberately builds no engine.
 const workerEntry = resolve(here, './helpers/revm-worker.ts');
+// ...and the same module with the recipe's one plausible typo in it, driven by
+// the second test. A separate mount, because a harness serves ONE worker entry.
+const misusedEngineWorker = resolve(
+	here,
+	'./helpers/revm-misused-engine-worker.ts',
+);
 
 /**
  * Reference execution gas, identical on `@ethereumjs/evm` and revm-wasm, and
@@ -136,6 +148,60 @@ test('revm in a Worker: the README recipe, executed', async ({page}) => {
 	// bound reddened this gate before).
 	expect(c.mainThreadSampleCount).toBeGreaterThan(10);
 	expect(t.mainThreadMaxGap).toBeLessThan(t.workerCompute / 3);
+
+	await h.dispose();
+});
+
+/**
+ * THE RECIPE MISTYPED, on the engine whose factory makes the typo likely: the
+ * parentheses are already in `createRevmEngine({wasm})`, so dropping the arrow
+ * reads harmless and passes the PROMISE where the factory belongs. That misuse
+ * used to leave `createWorkerNode()` pending forever (the refusal threw before
+ * `expose()` could register a listener, so the worker answered nothing), with the
+ * explanation confined to the worker's console. It must reach the caller.
+ *
+ * The `await` form of the same mistake is NOT tested here and cannot be fixed
+ * here: a top-level `await` before `exposeNode()` loses the main thread's first
+ * message on Chromium and WebKit alike, whatever the refusal does. See
+ * `work/notes/observations/a-top-level-await-in-a-worker-module-loses-the-first-message.md`,
+ * and the hazard is documented on `exposeNode` and in the README's Worker section.
+ */
+test('revm in a Worker: the recipe mistyped rejects the caller, and does not hang it', async ({
+	page,
+}) => {
+	const h = await mountHarness(page, {
+		cut,
+		worker: misusedEngineWorker,
+		coi: false,
+		nodePolyfills: ['buffer', 'process', 'global'],
+		esbuild: {loader: {'.wasm': 'binary'}},
+	});
+	const workerUrl = new URL('worker.js', h.serverUrl).href;
+	const r = await h.run({
+		phase: 'once',
+		params: {mode: 'engine-misuse', workerUrl},
+	});
+
+	console.log('\n[revm engine-misuse] errors:', r.errors);
+	console.log('[revm engine-misuse]', JSON.stringify(r.results, null, 2));
+	expect(r.errors).toEqual([]);
+
+	const main = r.results.mainThread as {outcome: string; message: string};
+	expect(main.outcome).toBe('REJECTED');
+	expect(main.message).toContain('createEngine');
+	expect(main.message).toContain('worker-host');
+	// The PROMISE case is named as itself: a consumer who wrote
+	// `createEngine: createRevmEngine({wasm})` is told that is what they did, and
+	// shown both forms, rather than being told "not a function" about a value they
+	// can see is one call away from being right.
+	expect(main.message).toMatch(/promise/i);
+	expect(main.message).toContain('() => createRevmEngine({wasm})');
+
+	// The worker still says it at the moment it happens, without throwing (a throw
+	// there is exactly what used to strand the main thread).
+	const early = r.results.early as {reported: string; threw: string};
+	expect(early.threw).toBe('DID_NOT_THROW');
+	expect(early.reported).toMatch(/promise/i);
 
 	await h.dispose();
 });

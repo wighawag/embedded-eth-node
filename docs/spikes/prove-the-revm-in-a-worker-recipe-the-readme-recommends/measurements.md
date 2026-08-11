@@ -67,9 +67,11 @@ Non-obvious in-scope choices, recorded because a reviewer or a later task would 
 
 **Why:** the main thread then keeps using `createWorkerNode()` unchanged, which is precisely what `src/worker-client.ts`'s refusal message promises ("then drive it with the same client code"). It also makes the recipe checkable: `createWorkerNode()` reads `engine`, `stateMode` and `senderMode` off the remote, so the engine identity crosses the boundary for free.
 
-**Rejected:** exposing a bespoke API and hand-rolling a matching client (proves the engine works in a Worker, but stops proving the README's actual claim that the client is unchanged); importing `embedded-eth-node/worker-entry` from the consumer module to reuse its proxy (it calls `expose()` at import time, so importing it would expose the WRONG api; captured as `work/notes/observations/worker-entry-cannot-be-reused-by-a-consumers-own-worker-module.md`).
+**Rejected:** exposing a bespoke API and hand-rolling a matching client (proves the engine works in a Worker, but stops proving the README's actual claim that the client is unchanged); importing `embedded-eth-node/worker-entry` from the consumer module to reuse its proxy (it calls `expose()` at import time, so importing it would expose the WRONG api; captured at the time as an observation note, since discharged by deletion in commit `1f9454d`, its signal having been carried into `make-the-worker-node-proxy-reusable-instead-of-hand-copied` and thence into the `WHY IT IS A SEPARATE MODULE` block at the top of `packages/embedded-eth-node/src/worker-host.ts` and decision 1 of `docs/spikes/make-the-worker-node-proxy-reusable-instead-of-hand-copied/decisions.md`; do not resurrect the note).
 
 **Touches:** anyone adding a plain field to `SlimNode` now has THREE proxies to update: `src/worker-entry.ts`, this example, and any consumer's copy. That is inherent to the recipe (the consumer owns their worker module) and is the reason the example forwards every plain field with the same comment `worker-entry` carries.
+
+> *Superseded 2026-08-11:* that consequence is gone. `embedded-eth-node/worker-host` holds the ONE proxy and `exposeNode({createEngine})` is the whole of a consumer's worker module, so this example forwards nothing and there is nothing to keep in sync. The snapshot above is left as written; the current shape is in `packages/embedded-eth-node/src/worker-host.ts`.
 
 ### 2. The example is a TEST HELPER, not a new `examples/` tree
 

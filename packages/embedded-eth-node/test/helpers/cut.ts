@@ -38,6 +38,10 @@
  *                            ENGINE-PARAMETERISED: the same suite runs on revm
  *                            through ./cut-revm.ts
  *   - 'worker'             : the comlink Worker wrapper (same API, non-blocking)
+ *   - 'engine-misuse'      : a worker module that hands `exposeNode()` an ENGINE
+ *                            where the FACTORY belongs: the main thread must get
+ *                            a REJECTION carrying the reason, never a promise that
+ *                            never settles, and the worker must say so early too
  *
  * The cross-backend PERFORMANCE benchmark (vs raw @ethereumjs/* and tevm) lives in
  * the separate `embedded-eth-node-benchmarks` package, so this library package's
@@ -55,6 +59,7 @@ import {runEngineSeamChecks} from './engine-seam.js';
 import {runRpcBlockChecks} from './rpc-block.js';
 import {runTrustedSenderChecks} from './trusted-sender.js';
 import {workerRoundtrip} from './worker-roundtrip.js';
+import {driveMisusedEngineWorker, reportEarlySignal} from './engine-misuse.js';
 import {runConformance} from './conformance.js';
 import {viemSurfaceProbe} from './viem-surface.js';
 import {runStateTests} from './statetest.js';
@@ -234,6 +239,25 @@ const cut: CodeUnderTest = {
 				timings.push({label: 'workerRoundtripAvg', ms: out.roundtripAvgMs});
 				timings.push({label: 'mainThreadMaxGap', ms: out.mainThreadMaxGapMs});
 				timings.push({label: 'workerCompute', ms: out.workerComputeMs});
+			} catch (e) {
+				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
+			}
+			return {results, timings, errors, env: captureEnv()};
+		}
+
+		// engine-misuse: the same Worker path, driven by a worker module that misuses
+		// `createEngine`. What is under test is what the MAIN THREAD gets: the refusal
+		// used to throw during the worker module's evaluation, so `expose()` never ran
+		// and `createWorkerNode()` never settled at all.
+		if (ctx.params.mode === 'engine-misuse') {
+			try {
+				results.mainThread = await driveMisusedEngineWorker(
+					String(ctx.params.workerUrl),
+				);
+				// ...and the worker's own half, on the value THIS bundle's worker module
+				// passes: an engine-shaped object, i.e. the non-promise branch of the
+				// message.
+				results.early = reportEarlySignal({id: 'pretend-engine'});
 			} catch (e) {
 				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
 			}

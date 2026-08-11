@@ -67,6 +67,11 @@
  *                      and reads the engine identity, the reference gas, a
  *                      committing transaction's post-state and the main thread's
  *                      responsiveness back across the boundary
+ *   - 'engine-misuse' : the recipe's one plausible TYPO, on this engine:
+ *                      `createEngine: createRevmEngine({wasm})` (the promise) where
+ *                      `createEngine: () => createRevmEngine({wasm})` belongs. The
+ *                      main thread must be REJECTED with the reason rather than
+ *                      left pending forever
  *   - 'invalid-transactions': the SHARED refusal battery
  *                      (helpers/invalid-transactions.ts) — a replayed nonce, a
  *                      far-future nonce, an unaffordable transaction and a gas
@@ -95,6 +100,7 @@ import {
 	runRevmPersistRead,
 } from './revm-persistence-reload.js';
 import {revmWorkerRoundtrip} from './revm-worker-roundtrip.js';
+import {driveMisusedEngineWorker, reportEarlySignal} from './engine-misuse.js';
 
 const cut: CodeUnderTest = {
 	name: 'embedded-eth-node/revm',
@@ -129,6 +135,26 @@ const cut: CodeUnderTest = {
 				);
 				results.revmWorker = r.results;
 				timings.push(...r.timings);
+			} catch (e) {
+				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
+			}
+			return {results, timings, errors, env: captureEnv()};
+		}
+
+		// The recipe MISTYPED: ./revm-misused-engine-worker.ts passes the PROMISE
+		// `createRevmEngine()` returned instead of a function that calls it. The
+		// consumer must be told, on the thread they wrote it on AND on the thread
+		// that awaited a node.
+		if (ctx.params.mode === 'engine-misuse') {
+			try {
+				results.mainThread = await driveMisusedEngineWorker(
+					String(ctx.params.workerUrl),
+				);
+				// The worker's own half, on the PROMISE branch of the message. A plain
+				// resolved promise, not a real engine: what is under test is that a
+				// thenable is recognised as "you called it instead of passing it", and
+				// compiling the wasm a second time here would measure nothing.
+				results.early = reportEarlySignal(Promise.resolve({id: 'revm-wasm'}));
 			} catch (e) {
 				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
 			}

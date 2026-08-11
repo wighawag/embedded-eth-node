@@ -10,4 +10,6 @@ Nothing in `src/worker-host.ts` can fix this (there is no listener to register b
 
 The consumer-facing hazard is wider than the engine: any `await` at a worker module's top level (fetching wasm, opening a database) does it. Worth a task if it is worth documenting on the `exposeNode` doc comment and the README's Worker section, which is where a consumer would look.
 
+DOCUMENTED 2026-08-11 by `a-bad-createengine-hangs-the-main-thread-instead-of-rejecting`, which is the half this note asked for: the hazard is now stated on the `exposeNode` doc comment (`packages/embedded-eth-node/src/worker-host.ts`) and in the README's Worker section, and the promise-form refusal message warns against `await createRevmEngine({wasm})` as a repair. The BEHAVIOUR is unchanged and unfixable from inside this package, so the note stays open as the record of the measurement.
+
 RECOVERED 2026-08-11 by the conductor. The run that measured this completed its work but its commit died on ENOSPC, so the note is landed here on its own rather than lost with the branch. The measurement is the build agent's, unedited; only this paragraph was added.

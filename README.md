@@ -113,6 +113,25 @@ thread still passes `chainId`, `miningConfig` and the rest through
 client code. The node proxy behind both paths is the same code in the package,
 so there is nothing to copy and nothing to keep in sync.
 
+**A function, not an engine.** `createEngine: createRevmEngine({wasm})` (no
+arrow) passes the PROMISE instead of the factory, which is the one plausible typo
+here. It is refused with a message that names both forms, said twice on purpose:
+the worker logs it the moment the module loads, AND your `await
+createWorkerNode(...)` on the main thread REJECTS with the same text, so the
+mistake reaches the thread you made it on and the thread that was waiting.
+
+**Do not `await` at the top level of a worker module before `exposeNode()`.** A
+worker module that awaits something slower than a microtask (fetching wasm,
+opening a database, `await createRevmEngine(...)`) before it calls `exposeNode()`
+can miss the main thread's FIRST message, and then `createWorkerNode()` never
+settles: comlink's handshake is posted while your module is still evaluating and
+there is no listener yet to receive it. Measured on Chromium and WebKit, and not
+fixable inside this package (nothing can register a listener before your module
+gets that far). The recipe above is safe because `() => createRevmEngine({wasm})`
+is synchronous at module scope: the factory defers the await into `createNode()`,
+which is one of the reasons `createEngine` is a function. If you must await
+something, do it INSIDE `createEngine`.
+
 ## RPC surface (the contract)
 
 This is a **curated, execution-only** method set — NOT a full EIP-1193 provider.

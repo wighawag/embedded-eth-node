@@ -7,15 +7,21 @@
  *   2b. The node's IDENTITY fields survive the boundary as plain values — in
  *      particular `engine`, which is what a bug report quotes to say which
  *      EVM produced a result. It is proxied by worker-host.ts and nothing else
- *      asserts it round-trips (the same omission silently dropped `senderMode`;
- *      see work/notes/observations/worker-entry-drops-sendermode.md).
+ *      asserts it round-trips (the same omission silently dropped `senderMode`
+ *      for a month; that observation note was discharged by deletion with the
+ *      fix, in commit 606a89c, and the story it carried now lives in
+ *      `src/worker-host.ts`'s module comment, in the field-by-field check at 2c
+ *      below, and in `worker.spec.ts`'s assertion on it).
  *   2c. ...and so does EVERY OTHER field, named by NOTHING: the Worker-backed
  *      node is compared field for field against a main-thread `createNode()`,
  *      so a field ADDED to `SlimNode` later is covered by this the day it is
- *      added rather than the day somebody remembers to assert it. That is the
- *      runtime half of the guard; the compile-time half is that the one proxy
- *      in `src/worker-host.ts` is typed `SlimNode`, so dropping a field there
- *      no longer builds.
+ *      added rather than the day somebody remembers to assert it. THE LIMIT OF
+ *      THAT, stated because the guarantee otherwise reads wider than it is: the
+ *      reference is a node INSTANCE, so this covers every field such an instance
+ *      CARRIES, and an OPTIONAL `SlimNode` member the reference node does not set
+ *      is invisible here. The compile-time half is what covers that one: the ONE
+ *      proxy in `src/worker-host.ts` is a literal typed `Required<SlimNode>`, so
+ *      dropping a field there, optional or not, no longer builds.
  *   3. The main thread stays NON-BLOCKING while the Worker runs a heavy compute:
  *      we kick off a heavy sumTo() in the Worker and simultaneously tick a
  *      main-thread rAF/now() loop; if the main thread were blocked (as it is when
