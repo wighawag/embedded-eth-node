@@ -24,8 +24,8 @@
  * never recovers a sender, because in revm that is the caller's job. So `deploy`
  * and `callAvg` here involve NO secp256k1 at all, and the honest comparison for
  * them is the `embedded-eth-node-fabricated` row (which also skips both signing
- * and recovery), NOT the default `embedded-eth-node` row, which pays ~1.3ms to
- * sign plus ~2ms to recover. Comparing against the default row would credit revm
+ * and recovery), NOT the default `embedded-eth-node` row, which pays ~0.3ms to
+ * sign plus ~1.2ms to recover (Chromium). Comparing against the default row would credit revm
  * with a saving that is really just the absence of signature work.
  *
  * (Sender recovery is still available: `Revm.recoverSigner()` runs the same k256

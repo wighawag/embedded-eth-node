@@ -71,11 +71,22 @@ export type StateMode = 'none' | 'trie';
  *   tx hash is still the real one, but it is NEVER verified, so ANY caller can
  *   claim to be ANY address.
  *
- * Why it exists: ecrecover is a FIXED ~2ms per tx and it dominates small txs
- * (~80% of a 21k-gas transfer). A client that signed the tx already knows the
- * sender, so re-deriving it is pure waste in a local chain. Measured ~13x on
- * `runTx` in isolation and ~2.3x end-to-end through a viem-style client, with
- * byte-identical gas and status.
+ * Why it exists: ecrecover is a FIXED cost per tx and it dominates small ones. A
+ * client that signed the tx already knows the sender, so re-deriving it is pure
+ * waste in a local chain. Measured (2026-08-11,
+ * `docs/spikes/sender-recovery-uses-the-engines-ecrecover/measurements.md`) at
+ * ~6.2x on the isolated transaction path (2.09 -> 0.33 ms/tx, signing outside the
+ * window) and ~3.6x end-to-end through a viem-style client, with byte-identical
+ * gas and status.
+ *
+ * HOW BIG THE GAP IS DEPENDS ON THE ENGINE NOW. `'recover'` recovers with the
+ * INSTALLED ENGINE's secp256k1 when it has one ({@link Engine.ecrecover}, which
+ * `embedded-eth-node/revm` implements at zero additional bytes — the `0x01`
+ * precompile is already in that module), and that makes the expensive half of
+ * `'recover'` about 4.3x cheaper: 2.02 -> 0.65 ms/tx isolated, so the gap narrows
+ * to ~2.8x (~1.8x end to end). `'trusted'` is still worth having and has stopped
+ * being the dominant lever. With no such engine, recovery is `@ethereumjs/tx`'s
+ * as before, and so is the ~6.2x.
  *
  * The primitive is just "execute as this sender, do not recover". It serves BOTH
  * an ordinary signed tx that wants to skip a redundant recovery AND a higher
@@ -181,7 +192,9 @@ export interface TransactionRequest {
 	 * the receipt the node builds. AUTHORITATIVE. An engine executes on behalf of
 	 * THIS address and must never derive one of its own.
 	 *
-	 * WHY IT IS A FIELD AND NOT A CALL. Sender derivation is the NODE's (`ADR 0006`),
+	 * WHY IT IS A FIELD AND NOT A CALL. Sender derivation is the NODE's (`ADR 0006`)
+	 * — an engine may LEND it the curve step ({@link Engine.ecrecover}) but never the
+	 * decision, which is the distinction that entry draws —
 	 * and in `senderMode:'trusted'` (the `evm_*As` cheats, ADR 0002) the node is TOLD
 	 * the sender and deliberately skips ecrecover — so the authoritative sender may
 	 * differ from whatever {@link tx}'s signature recovers to, and for a FABRICATED
@@ -380,6 +393,54 @@ export interface Engine {
 	 * receipt for a transaction that never ran.
 	 */
 	transact(request: TransactionRequest): Promise<TransactionResult>;
+	/**
+	 * secp256k1 PUBLIC-KEY RECOVERY, offered as a PRIMITIVE: recover the 20-byte
+	 * address that produced `(r, s)` over `hash` with `recoveryId`, or `undefined`
+	 * when it recovers to nothing. Synchronous, stateless, and callable BEFORE
+	 * {@link connect} — it touches no state, no block and no hardfork.
+	 *
+	 * OPTIONAL, and the ONLY optional operation on this interface. {@link call} and
+	 * {@link transact} are capabilities the node cannot supply for an engine that
+	 * omits them, so they are refused at construction; this one the node can, and
+	 * always could — with no engine ecrecover it recovers the sender through
+	 * `@ethereumjs/tx` as it always did. An engine implements it when its module
+	 * ALREADY carries secp256k1 (`embedded-eth-node/revm` does: the `0x01`
+	 * precompile's own k256, reached without a database or a journal), which is why
+	 * it costs zero additional bytes to offer and why offering it is not a
+	 * requirement anyone should be held to.
+	 *
+	 * IT IS NOT "SENDER DERIVATION", and the distinction is the whole reason this
+	 * is shaped as `(hash, recoveryId, r, s)` rather than as a transaction. Deciding
+	 * WHO SENT A TRANSACTION stays the node's, on every engine (see
+	 * {@link TransactionRequest.sender}): the node computes the message hash,
+	 * enforces EIP-2's low-`s` rule, turns the wire's `v` — 27/28, `chainId * 2 +
+	 * 35/36`, or a bare y-parity — into a 0/1 recovery id, and only THEN asks the
+	 * curve. An engine is handed a question about a signature and never one about a
+	 * transaction, so it needs to know nothing about EIP-155, EIP-2718 or
+	 * `senderMode`, and it can neither admit a transaction the node would refuse nor
+	 * refuse one the node would admit.
+	 *
+	 * EIP-2 IN PARTICULAR IS NOT YOURS TO ENFORCE. revm's implementation of this is
+	 * the `0x01` precompile's, which NORMALISES a high-`s` signature and returns an
+	 * address — correctly, because EIP-2 constrains transactions, not the
+	 * precompile. The node refuses such a transaction above the seam so that the
+	 * answer is the same on every engine. Implement this as the raw curve operation
+	 * and add no protocol opinions to it.
+	 *
+	 * RETURN `undefined` rather than throwing when the signature does not recover:
+	 * the node turns that into its own refusal, in the same shape on every engine.
+	 *
+	 * @param hash 32-byte message digest that was signed.
+	 * @param recoveryId 0 or 1. Never the wire's `v`.
+	 * @param r 32 bytes, big-endian.
+	 * @param s 32 bytes, big-endian.
+	 */
+	ecrecover?(
+		hash: Uint8Array,
+		recoveryId: number,
+		r: Uint8Array,
+		s: Uint8Array,
+	): Uint8Array | undefined;
 }
 
 /** Which EVM a node is running on (see {@link SlimNode.engine}). */
@@ -397,8 +458,10 @@ export interface NodeOptions {
 	/**
 	 * Sender derivation: `'recover'` (ecrecover, authenticated — DEFAULT) or
 	 * `'trusted'` (skip ecrecover, trust a caller-supplied `from`). See
-	 * {@link SenderMode}. `'trusted'` is ~13x faster per small tx and lets ANY
-	 * caller impersonate ANY address — opt in only for a local chain you control.
+	 * {@link SenderMode}. `'trusted'` is ~6.2x faster per small tx on the default
+	 * engine, ~2.8x with a revm engine installed (which recovers with its own
+	 * secp256k1), and it lets ANY caller impersonate ANY address — opt in only for a
+	 * local chain you control.
 	 */
 	senderMode?: SenderMode;
 	/** Mining strategy. Default {type:'auto'}. */

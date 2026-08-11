@@ -18,6 +18,12 @@
  *                      run with the revm engine installed — a tx submitted through
  *                      the `evm_*As` cheats executes as the CLAIMED sender, even
  *                      when the signature recovers to somebody else
+ *   - 'sender-recovery': the OTHER sender mode (helpers/sender-recovery.ts):
+ *                      `'recover'` derives the sender with the ENGINE's ecrecover
+ *                      when one is installed, and must authenticate identically to
+ *                      `tx.getSenderAddress()` — including on the transactions both
+ *                      must REFUSE (a malformed signature, a high-`s` one, a wrong
+ *                      recovery id), which is where a wrong answer is silent
  *   - 'post-state'   : the SHARED post-state differential (helpers/post-state.ts)
  *                      — five state-shaped transactions (creation, nested
  *                      creation, nested-frame storage, an EIP-161 emptying, a
@@ -61,6 +67,7 @@ import {captureEnv} from 'playwright-browser-harness/contract';
 import {runRevmEngineChecks} from './revm-engine.js';
 import {runRevmConformance} from './revm-conformance.js';
 import {runRevmTrustedSender} from './revm-trusted-sender.js';
+import {runRevmSenderRecovery} from './revm-sender-recovery.js';
 import {runRevmPostState} from './revm-post-state.js';
 import {runRevmFees} from './revm-fees.js';
 import {runRevmAccessList} from './revm-access-list.js';
@@ -111,6 +118,18 @@ const cut: CodeUnderTest = {
 		if (ctx.params.mode === 'trusted-sender') {
 			try {
 				results.revmTrustedSender = await runRevmTrustedSender();
+			} catch (e) {
+				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
+			}
+			return {results, timings, errors, env: captureEnv()};
+		}
+
+		// The OTHER sender mode: `'recover'` with the engine's own ecrecover behind
+		// it, diffed against the `tx.getSenderAddress()` it replaces — on the senders
+		// it derives AND on the transactions both must refuse.
+		if (ctx.params.mode === 'sender-recovery') {
+			try {
+				results.revmSenderRecovery = await runRevmSenderRecovery();
 			} catch (e) {
 				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
 			}

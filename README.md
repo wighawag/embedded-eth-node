@@ -201,22 +201,35 @@ const authentic = await createNode({senderMode: 'recover'}); // default
 const fast = await createNode({senderMode: 'trusted'}); // skips ecrecover
 ```
 
-`ecrecover` is a **fixed ~2ms per transaction** and it dominates small ones: ~80%
-of a 21k-gas transfer, with the crossover where EVM execution overtakes it at
-only ~33k gas of execution. A client that signed a tx **already knows** the
-sender, so re-deriving it on a local chain is pure waste.
+`ecrecover` is a **fixed cost per transaction** and it dominates small ones
+(~1.6 ms in JS, ~0.4 ms on the revm engine's own secp256k1). A client that signed
+a tx **already knows** the sender, so re-deriving it on a local chain is pure
+waste.
 
 - **`'recover'`** (default): derive the sender from the signature, exactly as a
   real node does. The tx is self-authenticating. This is the only mode that is
   safe when the node is reachable by a caller you do not control.
 - **`'trusted'`**: enables `evm_sendRawTransactionAs` / `evm_sendRawTransactionSyncAs`,
-  which take `[raw, from]` and **skip ecrecover**. Measured **~13× on `runTx` in
-  isolation** (2.52ms → 0.19ms) and **~2.3× end-to-end** through a viem-style
-  client (2.23ms → 0.97ms per tx — the residual is the *client's own* signing).
-  Gas, status, logs, receipts and post-state are **byte-identical** to `'recover'`
-  (asserted field-by-field in `test/trusted-sender.spec.ts`, and again with the
-  revm engine installed in `test/revm-trusted-sender.spec.ts` — the same suite,
-  parameterised by engine).
+  which take `[raw, from]` and **skip ecrecover**. Measured **~6.2× on the isolated
+  transaction path** (2.09ms → 0.33ms per tx, signing outside the window) and
+  **~3.6× end-to-end** through a viem-style client (2.37ms → 0.66ms per tx — the
+  residual is the *client's own* signing). Gas, status, logs, receipts and
+  post-state are **byte-identical** to `'recover'` (asserted field-by-field in
+  `test/trusted-sender.spec.ts`, and again with the revm engine installed in
+  `test/revm-trusted-sender.spec.ts` — the same suite, parameterised by engine).
+
+**The gap depends on the engine, and it has narrowed.** `'recover'` derives the
+sender with the **installed engine's** `ecrecover` when it has one —
+[`embedded-eth-node/revm`](#engine-ethereumjsevm-default-vs-revm-wasm-opt-in)
+does, at zero additional bytes, since the `0x01` precompile's secp256k1 is already
+in that wasm module. That makes the recovery ~4.3× cheaper (2.02ms → 0.65ms per
+isolated tx), so on a revm-backed node the `'recover'` vs `'trusted'` ratio is
+**~2.8×** rather than ~6.2×. `'trusted'` is still worth having; it has stopped
+being the dominant lever. The two implementations are proven to authenticate
+identically — including refusing the same malformed, high-`s` (EIP-2) and
+wrong-recovery-id signatures — in `test/revm-sender-recovery.spec.ts`. All figures
+measured 2026-08-11:
+[measurements](docs/spikes/sender-recovery-uses-the-engines-ecrecover/measurements.md).
 
 The sender you supply is the sender **on every engine**, including when the
 signature on the wire recovers to somebody else (which is the case the mode exists

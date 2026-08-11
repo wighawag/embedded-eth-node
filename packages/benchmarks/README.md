@@ -52,7 +52,8 @@ One caveat when reading the write rows: revm's `transact()` takes the sender
 directly and **never recovers a sender**, so `deploy` and `callAvg` involve no
 secp256k1 at all. The honest comparison for them is the
 `embedded-eth-node-fabricated` row, which also skips both signing and recovery —
-not the default row, which pays ~1.3ms to sign plus ~2ms to recover.
+not the default row, which pays ~0.3ms to sign plus ~1.2ms to recover (Chromium,
+read off the gaps between these three rows).
 
 ## The `embedded-eth-node-revm-engine` row
 
@@ -74,11 +75,18 @@ row's transactions as well as its reads (it served reads only until the revm wri
 half landed), so `deploy` and `callAvg` are meaningful engine comparisons rather
 than noise: a difference there is the interpreter, not the harness, and it is the
 row to look at when a transaction-heavy tick gets slower. Read them knowing what
-else they contain — this row signs each transaction and recovers its sender, ~1.3
-ms plus ~2 ms that the engine cannot make cheaper, and those dominate a 21000-gas
-transfer, so the engine delta shows up compressed. The read rows (`read`,
-`compute`, `keccak`, `frame`, `floor`) isolate the interpreter, which is why the
-library README's frame figure comes from `frame`.
+else they contain — this row signs each transaction and recovers its sender, and
+the CLIENT's signing is the part the engine cannot make cheaper. The RECOVERY it
+can, and now does: since `sender-recovery-uses-the-engines-ecrecover` the node
+recovers with this engine's own secp256k1 (`Engine.ecrecover`, the `0x01`
+precompile's k256, zero additional bytes), which took `callAvg` on this row from
+1.92 ms to ~1.08 ms in Chromium — below the default engine's `'trusted'` row
+despite still authenticating every transaction
+([measurements](../../docs/spikes/sender-recovery-uses-the-engines-ecrecover/measurements.md)).
+Signing still dominates a 21000-gas transfer, so the interpreter delta remains
+compressed here. The read rows (`read`, `compute`, `keccak`, `frame`, `floor`)
+isolate the interpreter, which is why the library README's frame figure comes from
+`frame`.
 
 It is an ordinary backend under the gate: its execution gas is compared against
 both the JS node and raw revm, and its keccak-chain result against every backend.

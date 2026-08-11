@@ -47,8 +47,11 @@ const chain = {
  * Which of the three send paths this row measures. They differ ONLY in how the
  * sender is established, so the deltas isolate secp256k1 cost precisely:
  *
- *   'recover'    sign on the client (~1.3ms) + ecrecover on the node (~2ms).
- *                What a real node does, and the honest default.
+ *   'recover'    sign on the client (~0.3ms) + ecrecover on the node (~1.2ms on
+ *                the default engine in Chromium; roughly a quarter of that when
+ *                the installed engine brings its own secp256k1 — see
+ *                {@link EngineChoice}). What a real node does, and the honest
+ *                default.
  *   'trusted'    sign on the client, but hand the node the sender so it SKIPS
  *                ecrecover. Removes the node half only.
  *   'fabricated' NO signing at all: synthesise a dummy signature and hand over
@@ -70,12 +73,15 @@ type SendMode = 'recover' | 'trusted' | 'fabricated';
  *   'revm'     `createRevmEngine()` from the optional `embedded-eth-node/revm`
  *              subpath — the configuration a consumer opts into.
  *
- * BOTH HALVES MOVE. The engine executes this row's transactions as well as its
- * reads (it did reads only until the revm write half landed), so `deploy` and
- * `callAvg` are now engine-sensitive too rather than noise — though they still
- * carry the node's own signing and ecrecover, which dominate a small transaction.
- * The read rows (`read`, `compute`, `keccak`, `frame`, `floor`) remain the ones
- * that isolate the interpreter.
+ * BOTH HALVES MOVE, AND SO DOES THE RECOVERY. The engine executes this row's
+ * transactions as well as its reads (it did reads only until the revm write half
+ * landed), so `deploy` and `callAvg` are engine-sensitive rather than noise — and
+ * since `sender-recovery-uses-the-engines-ecrecover` the node also RECOVERS the
+ * sender on the installed engine when it has an `ecrecover` (revm does), which
+ * took this row's `callAvg` from 1.92 ms to ~1.08 ms in Chromium. What is left in
+ * these two rows that no engine can make cheaper is the CLIENT's own signing, and
+ * it now dominates a 21000-gas transfer. The read rows (`read`, `compute`,
+ * `keccak`, `frame`, `floor`) remain the ones that isolate the interpreter.
  *
  * The DISTINCTION FROM THE `revm` ROW matters when reading the table: that row is
  * RAW revm owning its own state and driving everything, which is the engine's

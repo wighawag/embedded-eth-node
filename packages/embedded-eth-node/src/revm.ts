@@ -610,6 +610,36 @@ export async function createRevmEngine(
 				...(created !== undefined ? {createdAddress: created} : {}),
 			};
 		},
+
+		/**
+		 * THE secp256k1 THIS MODULE WAS ALREADY CARRYING, lent to the node for
+		 * `senderMode:'recover'`. It is the `0x01` precompile's own k256, reached
+		 * with no database, no gas limit, no block environment and no journal — which
+		 * is what makes it callable BEFORE `connect`, and before a transaction has
+		 * anything to run against. Zero additional bytes: this code is in the module
+		 * whether the node calls it or not.
+		 *
+		 * IT IS THE RAW CURVE OPERATION AND NOTHING ELSE, deliberately. The node
+		 * hands over a message hash and a 0/1 recovery id — never the wire's `v` —
+		 * and keeps every protocol rule on its own side, EIP-2's low-`s` rule
+		 * especially: the precompile NORMALISES a high-`s` signature and returns an
+		 * address, correctly, since EIP-2 constrains transactions rather than the
+		 * precompile. An engine that added that opinion here would make the same
+		 * transaction valid on one engine and invalid on the other. See
+		 * `Engine.ecrecover` in ./types.ts and ../src/sender-recovery.ts.
+		 *
+		 * `revm-wasm`'s `recoverSigner` takes `v` as the recovery byte and answers
+		 * `undefined` when the signature recovers to nothing, which is exactly the
+		 * seam's contract, so this is a rename and not an adapter.
+		 */
+		ecrecover(
+			hash: Uint8Array,
+			recoveryId: number,
+			r: Uint8Array,
+			s: Uint8Array,
+		): Uint8Array | undefined {
+			return revm.recoverSigner({hash, v: recoveryId, r, s});
+		},
 	};
 }
 

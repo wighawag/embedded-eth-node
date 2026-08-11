@@ -181,8 +181,8 @@ export function createEthereumjsEngine(deps: {
  * `hash`), so the only thing this changes is the answer to the sender question.
  *
  * It is applied UNCONDITIONALLY — never "only when it differs" — because comparing
- * would mean calling `tx.getSenderAddress()`, i.e. paying the ~2 ms ecrecover that
- * `senderMode:'trusted'` exists to skip.
+ * would mean calling `tx.getSenderAddress()`, i.e. paying the ~1.6 ms ecrecover
+ * that `senderMode:'trusted'` exists to skip.
  */
 function asSender(tx: TypedTransaction, sender: Address): TypedTransaction {
 	return Object.create(tx, {

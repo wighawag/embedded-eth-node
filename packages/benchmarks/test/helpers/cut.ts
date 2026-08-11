@@ -33,8 +33,8 @@ const BACKENDS: Record<string, () => EvmBackend> = {
 	'ethereumjs-default': makeEthereumjsDefaultBackend,
 	'ethereumjs-tuned': makeEthereumjsTunedBackend,
 	'embedded-eth-node': makeSlimNodeBackend,
-	// same node, ecrecover skipped — isolates the fixed ~2ms/tx signature-recovery
-	// cost from everything else.
+	// same node, ecrecover skipped — isolates the fixed signature-recovery cost
+	// (~1.2ms/tx here, on the default engine) from everything else.
 	'embedded-eth-node-trusted': makeSlimNodeTrustedBackend,
 	// same again but the client doesn't sign either (dummy signature) — shows the
 	// ceiling of the trusted primitive: NO secp256k1 anywhere in the round trip.

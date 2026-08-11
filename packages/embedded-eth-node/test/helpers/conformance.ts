@@ -530,7 +530,14 @@ const MIN_TRANSACTIONS_ON_THE_ENGINE = 20;
  * decided anything — including a transaction the engine goes on to reject, which
  * is still a transaction that ran nowhere else. The wrapper delegates and adds
  * nothing else: same `id`, same `connect` (only when the engine has one, so an
- * engine that needs no connection is not given a fake one), same `call`.
+ * engine that needs no connection is not given a fake one), same `call`, and the
+ * same `ecrecover` when the engine has one.
+ *
+ * FORWARDING THE OPTIONAL METHODS IS LOAD-BEARING, not tidiness: this wrapper
+ * rebuilds the engine object field by field, so an optional seam method it forgot
+ * would be SILENTLY ABSENT on the wrapped engine — and the node's answer to a
+ * missing `ecrecover` is to fall back to `@ethereumjs/tx`, quietly, which is
+ * exactly the vacuous run every suite using this wrapper exists to rule out.
  *
  * EXPORTED for any suite that installs an engine and would otherwise have no way
  * to tell a real run from a vacuous one (./state-roundtrip.ts uses it). The
@@ -548,6 +555,12 @@ export function countingEngines(
 				? {connect: (ctx: EngineContext) => engine.connect!(ctx)}
 				: {}),
 			call: (request) => engine.call(request),
+			...(engine.ecrecover
+				? {
+						ecrecover: (hash, recoveryId, r, s) =>
+							engine.ecrecover!(hash, recoveryId, r, s),
+					}
+				: {}),
 			transact: (request) => {
 				transactionsByEngine[engine.id] =
 					(transactionsByEngine[engine.id] ?? 0) + 1;

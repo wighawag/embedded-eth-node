@@ -1,8 +1,9 @@
 /**
  * trusted-sender.spec.ts — the gate for `senderMode:'trusted'`.
  *
- * `'trusted'` skips ecrecover (a FIXED ~2ms/tx, ~80% of a small tx) by pinning the
- * sender to a caller-supplied address. It is only worth having if it changes
+ * `'trusted'` skips ecrecover (a FIXED ~1.6ms/tx on the default engine, ~1.4ms of
+ * a small tx's 2.1ms — and ~0.4ms when the installed engine brings its own
+ * secp256k1) by pinning the sender to a caller-supplied address. It is only worth having if it changes
  * NOTHING else, so this asserts equivalence rather than speed:
  *   - the same signed raw txs produce receipts equal FIELD BY FIELD (gas, status,
  *     logs, effectiveGasPrice) and identical post-state, across both modes;

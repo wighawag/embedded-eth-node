@@ -49,6 +49,9 @@ function hexToBytes(s: string): Uint8Array {
 }
 import {keccak_256} from '@noble/hashes/sha3.js';
 import {connectEngine, createEthereumjsEngine} from './engine.js';
+// Sender derivation stays the node's on every engine; what an engine may lend it
+// is the CURVE step. See ./sender-recovery.ts.
+import {recoverSender} from './sender-recovery.js';
 // The engine reports EXECUTION gas for a read and the node adds intrinsic gas on top;
 // an engine that charges intrinsic gas itself (revm) subtracts the SAME formula,
 // so it has exactly one home. See ./intrinsic-gas.ts.
@@ -295,6 +298,18 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 			return sb ? hexToBytes(sb.header.hash as `0x${string}`) : undefined;
 		},
 	});
+
+	// THE ENGINE'S secp256k1, IF IT BROUGHT ONE. Read ONCE, after `connect`, so a
+	// transaction never pays a property lookup and — more to the point — so which
+	// implementation recovers this node's senders is fixed for the node's lifetime
+	// rather than able to change under it. `undefined` means the node recovers the
+	// way it always did (`tx.getSenderAddress()`); it is NOT filled in with a
+	// default, because the fallback IS `@ethereumjs/tx`'s own recovery and wrapping
+	// it as an engine method would only add a layer. See ./sender-recovery.ts.
+	const engineEcrecover =
+		typeof engine.ecrecover === 'function'
+			? engine.ecrecover.bind(engine)
+			: undefined;
 
 	let latestNumber = 0;
 	let parentHash = hexToBytes(ZERO_HASH);
@@ -581,12 +596,23 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 	 *       FABRICATES a signature, serialises the tx, and passes the claimed
 	 *       sender. Nothing here needs to know that happened.
 	 *
-	 * WHY it is worth a cheat method: ecrecover is a FIXED ~2ms per tx and it is the
-	 * single dominant cost of a small tx (~80% of a 21k-gas transfer; the crossover
-	 * where EVM execution overtakes it is ~33k gas). Measured ~13x on `runTx` in
-	 * isolation (2.52ms -> 0.19ms) and ~2.3x end-to-end through a viem-style client
-	 * (2.23ms -> 0.97ms/tx; the residual is the CLIENT's own signing, which only
-	 * case (b) avoids). Gas and status are byte-identical either way.
+	 * WHY it is worth a cheat method: ecrecover is a FIXED cost per tx and it is the
+	 * single dominant cost of a small one. Measured 2026-08-11
+	 * (`docs/spikes/sender-recovery-uses-the-engines-ecrecover/measurements.md`) at
+	 * ~6.2x on the isolated transaction path (2.09 -> 0.33 ms/tx, signing outside the
+	 * window) and ~3.6x end-to-end through a viem-style client (2.37 -> 0.66 ms/tx;
+	 * the residual is the CLIENT's own signing, which only case (b) avoids). Gas and
+	 * status are byte-identical either way.
+	 *
+	 * THE GAP DEPENDS ON THE ENGINE NOW, and it has NARROWED. With an engine that
+	 * brings its own secp256k1 (`Engine.ecrecover` in ./types.ts —
+	 * `embedded-eth-node/revm` does, at zero additional bytes) the recovery itself is
+	 * ~4.3x cheaper, so `'recover'` costs 0.65 ms/tx isolated instead of 2.02 and the
+	 * ratio falls to ~2.8x (~1.8x end to end). It stays worth having; it has stopped
+	 * being the dominant lever. The figures this paragraph used to carry (~13x, ~2.3x)
+	 * were measured on `runTx` in isolation before the storage re-layer of ADR 0009,
+	 * and had drifted by roughly half — not because recovery got slower, but because
+	 * everything around it got faster.
 	 *
 	 * HOW: the claimed address becomes this transaction's sender, full stop — nothing
 	 * on the transaction is touched. Everything else about it stays REAL — same wire
@@ -628,7 +654,21 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 		const raw = hexToBytes(String(rawHex));
 		if (claimedFrom === undefined) {
 			const tx = createTxFromRLP(raw, {common});
-			return {tx, raw, sender: tx.getSenderAddress()};
+			// THE CURVE STEP, ON THE ENGINE WHEN THE ENGINE HAS ONE. The DECISION
+			// (which message is signed, EIP-2's low-`s` rule, what the wire's `v`
+			// means) stays here either way — see ./sender-recovery.ts, and
+			// `Engine.ecrecover` in ./types.ts for why it is the seam's one optional
+			// operation. With no engine ecrecover this is `@ethereumjs/tx`'s own
+			// recovery, unchanged, and the two are proven to authenticate identically
+			// (test/helpers/sender-recovery.ts) — on the transactions they ACCEPT and
+			// on the ones they must REFUSE.
+			return {
+				tx,
+				raw,
+				sender: engineEcrecover
+					? recoverSender(tx, common, engineEcrecover)
+					: tx.getSenderAddress(),
+			};
 		}
 		if (senderMode !== 'trusted') {
 			throw new RpcError(

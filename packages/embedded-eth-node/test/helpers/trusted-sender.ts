@@ -2,8 +2,12 @@
  * trusted-sender.ts — the gate for `senderMode:'trusted'`.
  *
  * `'trusted'` skips ecrecover and pins the sender to a caller-supplied address.
- * That is a ~13x speedup on a small tx, and it removes the ONLY thing binding a
- * tx to its signer. So it is worth exactly as much as the proof that it changes
+ * That is a ~6.2x speedup on a small tx on the default engine — ~2.8x with a revm
+ * engine installed, which recovers with its own secp256k1 (measured 2026-08-11,
+ * `docs/spikes/sender-recovery-uses-the-engines-ecrecover/measurements.md`; the
+ * ~13x this file used to quote was measured on `runTx` before ADR 0009's storage
+ * re-layer and had drifted by half) — and it removes the ONLY thing binding a tx
+ * to its signer. So it is worth exactly as much as the proof that it changes
  * NOTHING ELSE. This file is that proof:
  *
  *   1. DIFFERENTIAL: the same signed raw txs, run through a `'recover'` node

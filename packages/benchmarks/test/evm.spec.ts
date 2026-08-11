@@ -90,7 +90,23 @@ const collected: Record<string, unknown>[] = [];
  * change that grows it, and say why in the changeset. A red assertion here means
  * either that or an accidental import into the core graph.
  *
- * RE-PINNED NINE TIMES SINCE. Most recent first:
+ * RE-PINNED TEN TIMES SINCE. Most recent first:
+ *
+ * 420.0 -> 421.1 KB raw / 126.7 -> 127.1 KB gzip, by
+ * `sender-recovery-uses-the-engines-ecrecover`: in `senderMode:'recover'`, the
+ * node now derives the sender with the ENGINE's `ecrecover` when the installed
+ * engine offers one (`embedded-eth-node/revm` does — the `0x01` precompile's own
+ * secp256k1, already in the wasm module), and with `tx.getSenderAddress()` when it
+ * does not. The 1.1 KB is `src/sender-recovery.ts`: the message hash, EIP-2's
+ * low-`s` rule, the wire `v` -> 0/1 recovery id conversion, and the refusals for
+ * each. It is in the CORE graph because deciding WHO SENT A TRANSACTION is the
+ * node's on every engine — an engine is lent the curve step and never the
+ * decision (`Engine.ecrecover` in `src/types.ts`) — and because a JS-only consumer
+ * reaches the same module the moment they pass an engine that has one. What it
+ * buys is 2.0 -> 0.66 ms per isolated transaction on a revm-backed node, ~3.0x,
+ * with the recover-versus-trusted gap narrowing from ~6.2x to ~2.8x
+ * (`docs/spikes/sender-recovery-uses-the-engines-ecrecover/measurements.md`).
+ * Still zero bytes of `revm-wasm`.
  *
  * 419.7 -> 420.0 KB raw / 126.6 -> 126.7 KB gzip, by
  * `eip-2930-access-lists-are-charged-and-warmed`: `eth_estimateGas` now charges a
@@ -204,7 +220,7 @@ const collected: Record<string, unknown>[] = [];
  * carries 1% of slack because the zlib shipped with different Node builds does
  * not compress byte-identically, which is noise rather than growth.
  */
-const DEFAULT_ENTRY_BASELINE = {rawKB: 420.0, gzipKB: 126.7};
+const DEFAULT_ENTRY_BASELINE = {rawKB: 421.1, gzipKB: 127.1};
 const GZIP_SLACK = 1.01;
 
 // Build + serve once for the whole file (the cut contains all backends).
