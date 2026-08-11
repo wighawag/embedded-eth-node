@@ -436,7 +436,22 @@ Caveats, all of them real:
   options, which would otherwise give you an opaque `DataCloneError`). To run
   revm in a Worker, build the engine INSIDE your own worker module —
   `createNode({engine: await createRevmEngine({wasm})})` there, then
-  comlink-expose the node.
+  comlink-expose the node. **That recipe is executed, not described:**
+  [`packages/embedded-eth-node/test/helpers/revm-worker.ts`](packages/embedded-eth-node/test/helpers/revm-worker.ts)
+  is a copyable worker module (it imports `embedded-eth-node` and
+  `embedded-eth-node/revm` by package name, as you would), and
+  [`test/revm-worker.spec.ts`](packages/embedded-eth-node/test/revm-worker.spec.ts)
+  drives it on Chromium and WebKit on every run: the engine identity crossing
+  the boundary reads `revm-wasm`, the reference execution gas measured THROUGH
+  the Worker is exact, a committing transaction lands and its state reads back,
+  and the main thread stays responsive throughout. Your main-thread code does
+  not change: `createWorkerNode()` drives your module unchanged, because it
+  exposes the same API `worker-entry` does. The `.wasm` is delivered into the
+  worker bundle as a bundler-resolved asset there (esbuild's `binary` loader),
+  which is the half a README cannot promise for you: your bundler has to apply
+  its asset rule to the WORKER entry too. What that costs, and what serving the
+  `.wasm` and passing a URL costs instead:
+  [`docs/spikes/prove-the-revm-in-a-worker-recipe-the-readme-recommends/`](docs/spikes/prove-the-revm-in-a-worker-recipe-the-readme-recommends/measurements.md).
 - **In Node.js**, `revm-wasm/wasm-url` is a `file:` URL and Node's `fetch` cannot
   resolve that scheme: read the bytes yourself
   (`readFileSync(fileURLToPath(wasmUrl))`) and pass those. In a browser the URL

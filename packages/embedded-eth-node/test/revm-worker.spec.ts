@@ -1,0 +1,141 @@
+/**
+ * revm-worker.spec.ts: the ONE combination the README recommends and nothing
+ * used to run: `embedded-eth-node/revm` INSIDE a Worker, driven from the main
+ * thread by the ordinary `createWorkerNode()` client.
+ *
+ * `createWorkerNode({engine})` is refused (an engine is a function-bearing object
+ * holding thread-bound live state, and the options are structured-cloned), so the
+ * supported shape is the consumer's OWN worker module: build the engine there,
+ * `createNode({engine})` there, comlink-expose the node. That file is
+ * ./helpers/revm-worker.ts and it imports `embedded-eth-node` /
+ * `embedded-eth-node/revm` BY PACKAGE NAME, so this spec also exercises the
+ * published export map the way a consumer resolves it.
+ *
+ * What is proven here, and why each part is needed:
+ *   - the engine identity crossing the boundary reads `revm-wasm`, not the
+ *     default engine's id (necessary, but weak on its own: it is what the node
+ *     was BUILT with);
+ *   - the REFERENCE GAS measured THROUGH the Worker is exact. That is the strong
+ *     evidence: those figures are identical across backends and a silent fall
+ *     back to `@ethereumjs/evm` would still produce them, but a revm engine that
+ *     failed to come up cannot produce them at all, because `createNode()` has no
+ *     fallback path, so the recipe either runs revm or throws;
+ *   - a committing TRANSACTION lands across the boundary and the state it wrote
+ *     is readable back through the node's own surface;
+ *   - the main thread stays responsive while the Worker computes, asserted as a
+ *     load-invariant RATIO in one window on one clock (never a fixed millisecond
+ *     bound, since WebKit clamps `performance.now()` to 1 ms; see worker.spec.ts).
+ *
+ * The integration risk this spec was written to find: the harness bundles the
+ * page and the worker SEPARATELY (two esbuild entry points), and the revm `.wasm`
+ * needs the `binary` loader to be an asset rather than a module the browser
+ * refuses. It reaches BOTH entry points (one `esbuild.build()` call, one loader
+ * map), so the bundler-resolved delivery shape works unchanged inside a Worker.
+ * Recorded in docs/spikes/prove-the-revm-in-a-worker-recipe-the-readme-recommends/.
+ */
+import {test, expect} from '@playwright/test';
+import {fileURLToPath} from 'node:url';
+import {dirname, resolve} from 'node:path';
+import {mountHarness} from 'playwright-browser-harness';
+
+const here = dirname(fileURLToPath(import.meta.url));
+// The revm cut (this bundle carries the `.wasm`; see helpers/cut-revm.ts)...
+const cut = resolve(here, './helpers/cut-revm.ts');
+// ...and the CONSUMER'S own worker module, which is what makes revm reachable
+// from a Worker at all. `src/worker-entry.ts` deliberately builds no engine.
+const workerEntry = resolve(here, './helpers/revm-worker.ts');
+
+/**
+ * Reference execution gas, identical on `@ethereumjs/evm` and revm-wasm, and
+ * therefore identical on whichever THREAD runs them. Pinned here as well as in
+ * revm-engine.spec.ts on purpose: these numbers are what say revm EXECUTED,
+ * rather than merely loaded, so this spec must state them itself.
+ */
+const REF = {
+	number: '2446',
+	sumTo2000: '498689',
+	keccakLoop2000: '1107052',
+	keccakResult:
+		'0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a',
+};
+
+test('revm in a Worker: the README recipe, executed', async ({page}) => {
+	const h = await mountHarness(page, {
+		cut,
+		worker: workerEntry,
+		coi: false,
+		nodePolyfills: ['buffer', 'process', 'global'],
+		// THE UNKNOWN THIS SPEC EXISTS TO SETTLE: the same `.wasm` loader the
+		// main-thread revm specs use, applied to a build whose SECOND entry point is
+		// the Worker. The harness's built-in loader is `copy`, which leaves a real
+		// module import the browser refuses to execute (`MIME type application/wasm`).
+		esbuild: {loader: {'.wasm': 'binary'}},
+	});
+	const workerUrl = new URL('worker.js', h.serverUrl).href;
+	const r = await h.run({
+		phase: 'once',
+		params: {mode: 'revm-worker', workerUrl, sumTo: 50000},
+	});
+
+	console.log('\n[revm-worker] errors:', r.errors);
+	const c = r.results.revmWorker as Record<string, any>;
+	console.log('[revm-worker]', JSON.stringify(c, null, 2));
+
+	expect(r.errors).toEqual([]);
+
+	// ---- the engine that answered lives in the WORKER, and it is revm ----
+	expect(c.engineId).toBe('revm-wasm');
+	expect(c.stateMode).toBe('none');
+	expect(c.senderMode).toBe('recover');
+	// ...and the constraint travelled unchanged: revm serves `stateMode:'none'`
+	// only and refuses anything else at `createNode()`, which here happens INSIDE
+	// the Worker, and the reason still reaches the caller of `createWorkerNode()`
+	// instead of arriving as an opaque worker failure. This is also the one
+	// reading here that ONLY a revm-backed node can produce: a node that had
+	// quietly fallen back to `@ethereumjs/evm` would have built the trie node
+	// without complaint.
+	expect(c.trieRefusal).not.toBe('DID_NOT_THROW');
+	expect(c.trieRefusal).toContain('trie');
+	expect(c.trieRefusal).toMatch(/revm/i);
+
+	// ---- IT RAN: the reference gas, measured THROUGH the Worker ----
+	// An engine id is what the node was built with; these are what it computed.
+	expect(c.executionGas.number).toBe(REF.number);
+	expect(c.executionGas.sumTo2000).toBe(REF.sumTo2000);
+	expect(c.executionGas.keccakLoop2000).toBe(REF.keccakLoop2000);
+	expect(c.callResults.keccakLoop2000).toBe(REF.keccakResult);
+
+	// ---- a COMMITTING transaction crossed the boundary ----
+	// Not only an `eth_call`: a signed transaction was executed and committed by
+	// revm in the Worker, and its state is readable back through the node's own
+	// surface afterwards (three independent readings of the same commit).
+	expect(c.deployStatus).toBe('0x1');
+	expect(c.txStatus).toBe('0x1');
+	expect(c.numberAfterTx).toBe('20');
+	expect(BigInt(c.storageAfterTx)).toBe(20n);
+	expect(BigInt(c.senderNonceAfterTx)).toBe(21n);
+	// ...and the money moved, which no receipt field can fake: the sender paid
+	// for every one of those transactions.
+	expect(c.senderPaid).toBe(true);
+
+	// ---- the main thread stayed responsive while revm computed ----
+	const t = Object.fromEntries(r.timings.map((x: any) => [x.label, x.ms]));
+	console.log(
+		'[revm-worker] main-thread max gap during Worker compute (ms):',
+		t.mainThreadMaxGap,
+		'| samples:',
+		c.mainThreadSampleCount,
+		'| worker compute (ms):',
+		t.workerCompute,
+	);
+	// THE PROPERTY, exactly as worker.spec.ts states it: a BLOCKED main thread
+	// cannot run the sampler at all, so "the sampler fired many times during the
+	// compute" proves it on no clock at all. The companion bar is a RATIO of two
+	// figures measured in the SAME window on the SAME clock, never a fixed
+	// millisecond bound (WebKit clamps `performance.now()` to 1 ms and a fixed
+	// bound reddened this gate before).
+	expect(c.mainThreadSampleCount).toBeGreaterThan(10);
+	expect(t.mainThreadMaxGap).toBeLessThan(t.workerCompute / 3);
+
+	await h.dispose();
+});

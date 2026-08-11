@@ -60,6 +60,13 @@
  *                      drives). Two formats that both work make every cross-route
  *                      read a MISS, which reads as ZERO at identical gas — invisible
  *                      to every other differential in this repo
+ *   - 'revm-worker'   : the engine OFF THE MAIN THREAD, i.e. the README's recipe,
+ *                      executed. The page drives ./revm-worker.ts (a consumer's
+ *                      own worker module, which builds the engine INSIDE the
+ *                      Worker) through the ordinary `createWorkerNode()` client,
+ *                      and reads the engine identity, the reference gas, a
+ *                      committing transaction's post-state and the main thread's
+ *                      responsiveness back across the boundary
  *   - 'invalid-transactions': the SHARED refusal battery
  *                      (helpers/invalid-transactions.ts) — a replayed nonce, a
  *                      far-future nonce, an unaffordable transaction and a gas
@@ -87,6 +94,7 @@ import {
 	runRevmPersistWrite,
 	runRevmPersistRead,
 } from './revm-persistence-reload.js';
+import {revmWorkerRoundtrip} from './revm-worker-roundtrip.js';
 
 const cut: CodeUnderTest = {
 	name: 'embedded-eth-node/revm',
@@ -103,6 +111,24 @@ const cut: CodeUnderTest = {
 				results.revmEngine = await runRevmEngineChecks({
 					runtimeWasmUrl: String(ctx.params.runtimeWasmUrl),
 				});
+			} catch (e) {
+				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
+			}
+			return {results, timings, errors, env: captureEnv()};
+		}
+
+		// The engine OFF THE MAIN THREAD. The Worker is built from ./revm-worker.ts,
+		// which is the file the README's recipe describes: the engine is constructed
+		// inside the Worker (it cannot cross the boundary; see src/worker-client.ts's
+		// refusal), and the main thread drives the result with unchanged client code.
+		if (ctx.params.mode === 'revm-worker') {
+			try {
+				const r = await revmWorkerRoundtrip(
+					String(ctx.params.workerUrl),
+					Number(ctx.params.sumTo),
+				);
+				results.revmWorker = r.results;
+				timings.push(...r.timings);
 			} catch (e) {
 				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
 			}
