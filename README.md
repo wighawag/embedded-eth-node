@@ -18,6 +18,9 @@ faking success.
 - **Optional Web-Worker hosting** via comlink helpers (`worker-entry` +
   `createWorkerNode()`), so `createNode()` (main thread) and `createWorkerNode()`
   (Worker) are interchangeable one-liners — the consumer never hand-rolls comlink.
+  A Worker that must build something first (an [engine](#engine-ethereumjsevm-default-vs-revm-wasm-opt-in),
+  which cannot cross the boundary) calls `exposeNode()` from
+  `embedded-eth-node/worker-host` instead: same api, same client, one line.
 - **IndexedDB persistence** (`createIndexedDBPersistence()`), verified to survive a
   real page reload (state + balances + `eth_getLogs`).
 - **Swappable ENGINE:** reads (`eth_call`/`eth_estimateGas`) and transactions both
@@ -85,6 +88,30 @@ const node = await createWorkerNode({worker, chainId: 31337, miningConfig: {type
 // node is the SAME { request, mine, dumpState, loadState, ... } shape — drive it
 // with the SAME viem client code as the main-thread node.
 ```
+
+### A Worker that builds its own engine
+
+`worker-entry` exposes the node the moment it is imported, which is what makes
+the snippet above a one-liner, and it is also why you cannot import it to *add*
+something. When your Worker has to build an [engine](#engine-ethereumjsevm-default-vs-revm-wasm-opt-in)
+first (an engine cannot cross the thread boundary), write your own worker module
+and call `exposeNode()`:
+
+```ts
+// my-worker.ts
+import {exposeNode} from 'embedded-eth-node/worker-host';
+import {createRevmEngine} from 'embedded-eth-node/revm';
+import wasm from 'revm-wasm/revm.wasm'; // your bundler's asset rule
+
+exposeNode({createEngine: () => createRevmEngine({wasm})});
+```
+
+That is the whole module. `createEngine` is called ONCE PER NODE (one engine
+instance serves one node) and is the only thing this thread decides: your main
+thread still passes `chainId`, `miningConfig` and the rest through
+`createWorkerNode({worker, ...})` unchanged, and drives the result with the same
+client code. The node proxy behind both paths is the same code in the package,
+so there is nothing to copy and nothing to keep in sync.
 
 ## RPC surface (the contract)
 
@@ -431,22 +458,34 @@ Caveats, all of them real:
   re-point the FIRST node's reads at the second node's state). Call
   `createRevmEngine()` per node, passing the same compiled `WebAssembly.Module`
   to skip recompiling.
-- **Not on the Worker path.** `createWorkerNode({engine})` is refused with a real
-  error (an engine is a function-bearing object; comlink structured-clones the
-  options, which would otherwise give you an opaque `DataCloneError`). To run
-  revm in a Worker, build the engine INSIDE your own worker module —
-  `createNode({engine: await createRevmEngine({wasm})})` there, then
-  comlink-expose the node. **That recipe is executed, not described:**
-  [`packages/embedded-eth-node/test/helpers/revm-worker.ts`](packages/embedded-eth-node/test/helpers/revm-worker.ts)
-  is a copyable worker module (it imports `embedded-eth-node` and
-  `embedded-eth-node/revm` by package name, as you would), and
-  [`test/revm-worker.spec.ts`](packages/embedded-eth-node/test/revm-worker.spec.ts)
-  drives it on Chromium and WebKit on every run: the engine identity crossing
-  the boundary reads `revm-wasm`, the reference execution gas measured THROUGH
-  the Worker is exact, a committing transaction lands and its state reads back,
-  and the main thread stays responsive throughout. Your main-thread code does
-  not change: `createWorkerNode()` drives your module unchanged, because it
-  exposes the same API `worker-entry` does. The `.wasm` is delivered into the
+- **Not on the Worker path; it is on `worker-host`'s.** `createWorkerNode({engine})`
+  is refused with a real error (an engine is a function-bearing object; comlink
+  structured-clones the options, which would otherwise give you an opaque
+  `DataCloneError`). To run revm in a Worker, build the engine INSIDE your own
+  worker module, which is the whole of it:
+
+  ```ts
+  // my-worker.ts
+  import {exposeNode} from 'embedded-eth-node/worker-host';
+  import {createRevmEngine} from 'embedded-eth-node/revm';
+  import wasm from 'revm-wasm/revm.wasm';
+
+  exposeNode({createEngine: () => createRevmEngine({wasm})});
+  ```
+
+  **That recipe is executed, not described.** This repository runs exactly those
+  lines on Chromium and WebKit on every test run. The module is
+  `packages/embedded-eth-node/test/helpers/revm-worker.ts` and the spec driving
+  it is `packages/embedded-eth-node/test/revm-worker.spec.ts`, both on
+  [GitHub](https://github.com/wighawag/embedded-eth-node/tree/main/packages/embedded-eth-node/test)
+  (they are test files in the repository, not files inside your `node_modules`;
+  the snippet above is what you copy). What that run proves: the engine identity
+  crossing the boundary reads `revm-wasm`, the reference execution gas measured
+  THROUGH the Worker is exact, a committing transaction lands and its state reads
+  back, and the main thread stays responsive throughout. Your main-thread code
+  does not change: `createWorkerNode()` drives your module unchanged, because
+  `exposeNode()` exposes the same api `worker-entry` does: the same proxy code in
+  the package, not a copy of it. The `.wasm` is delivered into the
   worker bundle as a bundler-resolved asset there (esbuild's `binary` loader),
   which is the half a README cannot promise for you: your bundler has to apply
   its asset rule to the WORKER entry too. What that costs, and what serving the

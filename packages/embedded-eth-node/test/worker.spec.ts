@@ -54,6 +54,13 @@ test('slim-node over a comlink Worker: same API + main-thread non-blocking', asy
 	// and nothing here asserted it. Assert the CLASS, not just the instance.
 	expect(r.results.senderMode).toBe('recover');
 	expect(r.results.stateMode).toBe('none');
+	// ...and the SAME question with no field named at all: the Worker-backed node
+	// is compared field for field against a main-thread `createNode()`, so a field
+	// added to `SlimNode` after this line was written is covered by it. This is the
+	// runtime half of the guard against the `senderMode` recurrence; the
+	// compile-time half is that the ONE proxy (src/worker-host.ts) is typed
+	// `SlimNode`, so dropping a field there stops building.
+	expect(r.results.shapeGaps).toEqual([]);
 
 	const t = Object.fromEntries(r.timings.map((x: any) => [x.label, x.ms]));
 	console.log(

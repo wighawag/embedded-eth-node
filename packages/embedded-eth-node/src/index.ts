@@ -1,9 +1,9 @@
 /**
  * embedded-eth-node — a slim, execution-only EIP-1193 Ethereum node
  * on @ethereumjs/vm. Transport-agnostic core: just an async `request()` +
- * mine/dumpState/loadState. Optional comlink Worker helpers are in ./worker-entry
- * (Worker side) and ./worker-client (main-thread side) so the core never imports
- * comlink.
+ * mine/dumpState/loadState. Optional comlink Worker helpers are in ./worker-host
+ * and ./worker-entry (Worker side) and ./worker-client (main-thread side) so the
+ * core never imports comlink.
  */
 export {createNode} from './node.js';
 export {
@@ -41,3 +41,6 @@ export {RpcError} from './types.js';
 // the core bundle. Import them directly:
 //   import {createWorkerNode} from 'embedded-eth-node/worker-client';
 //   new Worker(new URL('embedded-eth-node/worker-entry', import.meta.url));
+// ...and, for a Worker that must build its own engine (an engine cannot cross the
+// boundary), your own worker module:
+//   import {exposeNode} from 'embedded-eth-node/worker-host';

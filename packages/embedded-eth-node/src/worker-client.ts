@@ -6,11 +6,13 @@
  * the consumer never hand-rolls the comlink plumbing.
  */
 import {wrap, proxy} from 'comlink';
-import type {WorkerApi} from './worker-entry.js';
+// The api TYPE, from the module that defines it rather than from the one that
+// exposes it: this client drives ANY worker exposing it, including a consumer's
+// own `exposeNode({createEngine})` module. Type-only, so nothing is imported at
+// runtime and no `expose()` side effect is dragged onto the main thread.
+import type {NodeWorkerApi} from './worker-host.js';
 import type {
 	NodeOptions,
-	EngineInfo,
-	SenderMode,
 	SlimNode,
 	RequestArguments,
 	SerializedState,
@@ -18,8 +20,10 @@ import type {
 
 export interface WorkerNodeOptions extends NodeOptions {
 	/**
-	 * A Worker already pointing at this package's worker-entry (or a re-export of
-	 * it). Consumers create it themselves so the bundler controls chunking:
+	 * A Worker already pointing at this package's worker-entry, or at a module of
+	 * your own that called `exposeNode()` (`embedded-eth-node/worker-host`), which is the
+	 * shape for a Worker that builds its own engine. Consumers create it themselves
+	 * so the bundler controls chunking:
 	 *   new Worker(new URL('embedded-eth-node/worker-entry', import.meta.url),
 	 *              {type: 'module'})
 	 */
@@ -51,44 +55,49 @@ export async function createWorkerNode(
 	// worker module, and expose the node from there:
 	//
 	//   // my-worker.ts
-	//   import {expose, proxy} from 'comlink';
-	//   import {createNode} from 'embedded-eth-node';
+	//   import {exposeNode} from 'embedded-eth-node/worker-host';
 	//   import {createRevmEngine} from 'embedded-eth-node/revm';
-	//   const node = await createNode({engine: await createRevmEngine({wasm})});
-	//   expose({request: (a: any) => node.request(a), /* ... */});
+	//   import wasm from 'revm-wasm/revm.wasm';
+	//   exposeNode({createEngine: () => createRevmEngine({wasm})});
 	//
-	// This package's own `worker-entry` deliberately does not do that for you: it
-	// would mean the core naming engines by string and importing them, which is
-	// precisely what ADR 0006 refuses (a JS-only consumer would pay for revm).
+	// `exposeNode` supplies the node and the proxy; the ENGINE is yours, built on
+	// the thread that will use it. This package deliberately does not build it for
+	// you, because that would mean the core naming engines by string and importing them,
+	// which is precisely what ADR 0006 refuses (a JS-only consumer would pay for
+	// revm).
 	if ((nodeOptions as NodeOptions).engine !== undefined) {
 		throw new Error(
 			"embedded-eth-node/worker-client: `engine` is not supported by createWorkerNode(). The node's options are structured-cloned into the Worker and an Engine is a function-bearing object, so it cannot be cloned across the thread boundary (comlink would report only a DataCloneError). " +
-				'Build the engine INSIDE the Worker instead: write your own worker module that calls createNode({engine: await createRevmEngine({wasm})}) and comlink-exposes the node, then drive it with the same client code. ' +
+				'Build the engine INSIDE the Worker instead: write your own worker module that calls exposeNode({createEngine: () => createRevmEngine({wasm})}) from embedded-eth-node/worker-host, which exposes the node for you, then drive it with the same client code. ' +
 				'Or run the engine on the main thread with createNode().',
 		);
 	}
-	const api = wrap<WorkerApi>(worker);
+	const api = wrap<NodeWorkerApi>(worker);
 	const remote = await api.createNode(nodeOptions);
 	// stateMode/senderMode/engine are plain values on the node; over comlink
 	// they read as promises.
-	const stateMode = (await (remote as any).stateMode) as 'none' | 'trie';
-	const senderMode = (await (remote as any).senderMode) as SenderMode;
-	const engineInfo = (await (remote as any).engine) as EngineInfo;
+	//
+	// NO `as any` HERE, and that is load-bearing. The remote is a `SlimNode` (the
+	// one proxy in ./worker-host.ts is typed as one), so these three reads are
+	// CHECKED: `senderMode` was silently absent from that proxy for a month, and
+	// what hid it from the compiler was the cast that used to be on this line.
+	const stateMode = await remote.stateMode;
+	const senderMode = await remote.senderMode;
+	const engineInfo = await remote.engine;
 
 	return {
-		request: (args: RequestArguments) =>
-			remote.request(args as any) as Promise<unknown>,
-		mine: () => remote.mine() as any,
-		dumpState: () => remote.dumpState() as Promise<SerializedState>,
-		loadState: (s: SerializedState) => remote.loadState(s as any),
+		request: (args: RequestArguments) => remote.request(args),
+		mine: () => remote.mine(),
+		dumpState: () => remote.dumpState(),
+		loadState: (s: SerializedState) => remote.loadState(s),
 		stateMode,
 		senderMode,
 		engine: engineInfo,
-		getStateRoot: () => (remote as any).getStateRoot() as Promise<string>,
+		getStateRoot: () => remote.getStateRoot(),
 		onNewHead(cb) {
 			// The callback must cross the thread boundary as a comlink proxy.
 			let unsub: (() => void) | undefined;
-			void (remote.onNewHead(proxy(cb)) as Promise<() => void>).then((u) => {
+			void remote.onNewHead(proxy(cb)).then((u) => {
 				unsub = u;
 			});
 			return () => {

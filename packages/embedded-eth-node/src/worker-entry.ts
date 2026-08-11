@@ -1,46 +1,31 @@
 /**
- * worker-entry.ts — the OPTIONAL Worker side. This is the ONLY file in the package
- * that imports comlink. The core (./node.ts) stays 100% transport-agnostic; this
- * entry just `expose()`s a factory that creates the node and proxies it back.
+ * worker-entry.ts: the OPTIONAL Worker side, AS A WORKER ENTRY POINT. The
+ * package's node api, exposed the moment this module is imported. That import-time
+ * `expose()` is the whole of what this file adds, and it is what makes the common
+ * case a one-liner:
  *
- * Consumers point a `new Worker(new URL('.../worker-entry.js', import.meta.url))`
- * at this file (or re-export it from their own worker module) and pair it with
- * `createWorkerNode()` (see ./worker-client.ts) on the main thread.
+ *   new Worker(new URL('embedded-eth-node/worker-entry', import.meta.url),
+ *              {type: 'module'});
  *
- * Why this split: heavy pure-JS EVM compute can hang the browser main thread.
- * Moving the node into a Worker fixes that — but it's the consumer's CHOICE. The
- * same `createNode()` runs fine on the main thread too.
+ * Pair it with `createWorkerNode()` (see ./worker-client.ts) on the main thread.
+ *
+ * THE NODE API ITSELF LIVES IN ./worker-host.ts, with no side effect, because a
+ * side effect cannot be imported: a consumer whose worker must build something
+ * first (an ENGINE, which cannot cross the boundary) used to hand-copy the
+ * `SlimNode` proxy, since importing THIS module would have exposed the default api
+ * on their thread. They call `exposeNode()` from `embedded-eth-node/worker-host`
+ * instead, and the proxy exists in exactly one place.
+ *
+ * Why the split exists at all: heavy pure-JS EVM compute can hang the browser main
+ * thread. Moving the node into a Worker fixes that, but it's the consumer's
+ * CHOICE. The same `createNode()` runs fine on the main thread too.
  */
-import {expose, proxy} from 'comlink';
-import {createNode} from './node.js';
-import type {NodeOptions} from './types.js';
+import {exposeNode, type NodeWorkerApi} from './worker-host.js';
 
-export const workerApi = {
-	async createNode(options: NodeOptions) {
-		const node = await createNode(options);
-		return proxy({
-			request: (args: any) => node.request(args),
-			mine: () => node.mine(),
-			dumpState: () => node.dumpState(),
-			loadState: (s: any) => node.loadState(s),
-			getStateRoot: () => node.getStateRoot(),
-			stateMode: node.stateMode,
-			// Plain values, so they clone across the boundary as-is. EVERY plain
-			// field of SlimNode belongs here: worker-client reads them off the
-			// remote, so one omitted here reads as `undefined` on a typed property
-			// (senderMode was missing until 2026-08-01 and nothing caught it,
-			// because worker-client's read is behind an `as any`).
-			senderMode: node.senderMode,
-			engine: node.engine,
-			// newHeads over comlink: the callback must be a comlink-proxied function.
-			onNewHead: (cb: (h: {number: number; hash: string}) => void) =>
-				proxy(node.onNewHead(cb)),
-			dispose: () => node.dispose(),
-		});
-	},
-};
+/**
+ * The exposed api. Kept exported (and exposed at import time) because consumers
+ * import this module for exactly that: nothing here changed when the proxy moved.
+ */
+export const workerApi = exposeNode();
 
-export type WorkerApi = typeof workerApi;
-
-// Auto-expose when loaded as a Worker module.
-expose(workerApi);
+export type WorkerApi = NodeWorkerApi;

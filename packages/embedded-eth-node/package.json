@@ -40,6 +40,10 @@
 			"types": "./dist/worker-entry.d.ts",
 			"default": "./dist/worker-entry.js"
 		},
+		"./worker-host": {
+			"types": "./dist/worker-host.d.ts",
+			"default": "./dist/worker-host.js"
+		},
 		"./worker-client": {
 			"types": "./dist/worker-client.d.ts",
 			"default": "./dist/worker-client.js"

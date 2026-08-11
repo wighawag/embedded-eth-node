@@ -221,11 +221,15 @@ const cut: CodeUnderTest = {
 				);
 				results.number = out.number;
 				results.engineId = out.engineId;
-				// Every plain field the worker-entry proxy must forward, read back
+				// Every plain field the worker-host proxy must forward, read back
 				// through comlink so an omission fails here instead of silently
 				// reading `undefined` in a consumer.
 				results.senderMode = out.senderMode;
 				results.stateMode = out.stateMode;
+				// ...and the same question with NO field named: every key a main-thread
+				// node has, compared across the boundary, so a field added to `SlimNode`
+				// later is covered without anybody remembering to add it here.
+				results.shapeGaps = out.shapeGaps;
 				results.mainThreadSampleCount = out.mainThreadSampleCount;
 				timings.push({label: 'workerRoundtripAvg', ms: out.roundtripAvgMs});
 				timings.push({label: 'mainThreadMaxGap', ms: out.mainThreadMaxGapMs});

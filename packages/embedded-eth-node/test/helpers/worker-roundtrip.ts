@@ -6,9 +6,16 @@
  *   2. Round-trip latency over comlink (send raw tx sync + read) is measured.
  *   2b. The node's IDENTITY fields survive the boundary as plain values — in
  *      particular `engine`, which is what a bug report quotes to say which
- *      EVM produced a result. It is proxied by worker-entry.ts and nothing else
+ *      EVM produced a result. It is proxied by worker-host.ts and nothing else
  *      asserts it round-trips (the same omission silently dropped `senderMode`;
  *      see work/notes/observations/worker-entry-drops-sendermode.md).
+ *   2c. ...and so does EVERY OTHER field, named by NOTHING: the Worker-backed
+ *      node is compared field for field against a main-thread `createNode()`,
+ *      so a field ADDED to `SlimNode` later is covered by this the day it is
+ *      added rather than the day somebody remembers to assert it. That is the
+ *      runtime half of the guard; the compile-time half is that the one proxy
+ *      in `src/worker-host.ts` is typed `SlimNode`, so dropping a field there
+ *      no longer builds.
  *   3. The main thread stays NON-BLOCKING while the Worker runs a heavy compute:
  *      we kick off a heavy sumTo() in the Worker and simultaneously tick a
  *      main-thread rAF/now() loop; if the main thread were blocked (as it is when
@@ -19,6 +26,8 @@
  * worker-entry served by the harness server).
  */
 import {createWorkerNode} from '../../src/worker-client.js';
+import {createNode} from '../../src/node.js';
+import type {SlimNode} from '../../src/types.js';
 import {createWalletClient, createPublicClient, custom} from 'viem';
 import {privateKeyToAccount} from 'viem/accounts';
 import {counterAbi, counterBytecode} from './counter.js';
@@ -139,11 +148,36 @@ export async function workerRoundtrip(workerUrl: string, sumTo: number) {
 	const workerComputeMs = performance.now() - tCompute;
 	stop = true;
 
-	// Read back THROUGH comlink: every plain SlimNode field the worker-entry
+	// Read back THROUGH comlink: every plain SlimNode field the worker-host
 	// proxy is supposed to forward. An omission here reads as `undefined`.
 	const engineId = node.engine?.id;
 	const senderMode = node.senderMode;
 	const stateMode = node.stateMode;
+
+	// THE SAME QUESTION, ASKED WITHOUT NAMING ANY FIELD. The three readings above
+	// are today's fields; this is the one that covers tomorrow's. A main-thread
+	// node built with the same options is the reference shape, and EVERY key it
+	// has must arrive across the boundary with the same kind of value. `senderMode`
+	// was dropped from the proxy for a month reading as `undefined` on a property
+	// typed `'recover' | 'trusted'`; this reports exactly that class of gap for any
+	// field, including one added after this test was written.
+	const reference = await createNode({
+		chainId: CHAIN_ID,
+		miningConfig: {type: 'auto'},
+	});
+	const shapeGaps: string[] = [];
+	for (const key of Object.keys(reference) as (keyof SlimNode)[]) {
+		const mine = reference[key];
+		const theirs = (node as SlimNode)[key];
+		if (theirs === undefined) {
+			shapeGaps.push(`${key}: absent across the boundary`);
+		} else if (typeof theirs !== typeof mine) {
+			shapeGaps.push(
+				`${key}: ${typeof theirs} across the boundary, ${typeof mine} on the main thread`,
+			);
+		}
+	}
+	await reference.dispose();
 
 	await node.dispose();
 	return {
@@ -151,6 +185,7 @@ export async function workerRoundtrip(workerUrl: string, sumTo: number) {
 		engineId,
 		senderMode,
 		stateMode,
+		shapeGaps,
 		roundtripAvgMs,
 		mainThreadMaxGapMs: maxGap,
 		mainThreadSampleCount: sampleCount,
