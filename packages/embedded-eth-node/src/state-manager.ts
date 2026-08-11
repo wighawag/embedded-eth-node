@@ -24,6 +24,24 @@
  *   just pops it, so an uncommitted write was never anywhere else to begin with.
  * - `clearStorage(address)` is one `delete` plus one tombstone: O(that account).
  *
+ * ## The key is PACKED, and both sides of it import ONE encoder
+ *
+ * The keys in that `Map<address, Map<slot, value>>` are the NODE'S — the point
+ * of owning the representation — so they are packed rather than `0x`-hex: two
+ * bytes per UTF-16 code unit, 10 code units for an account and 16 for a slot.
+ * That takes a cold revm storage access from 1.31-1.33 µs to 0.36-0.39 µs —
+ * 70-73%, nearly all of it JS-side key handling — and the encoder, the
+ * measurement and the fixed-width rule are in
+ * `src/storage-keys.ts` — build a key with {@link packAddressKey} /
+ * {@link packSlotKey} and never by hand, because the synchronous revm store
+ * (`src/revm-state-store.ts`) builds its keys with the same two functions and a
+ * silent disagreement between the two would read as ZERO rather than as an error.
+ *
+ * ACCOUNTS AND CODE ARE NOT AFFECTED: those stacks are `SimpleStateManager`'s and
+ * stay keyed `address.toString()`. Neither is `dumpState`'s output, which stays
+ * `0x`-hex — {@link OverlayStorageStateManager.liveStorage} converts on the way
+ * out.
+ *
  * ONE WORD FOR THE CONCEPT: **overlay**. The spike that produced this design
  * called the same thing an overlay, a diff frame and a journal frame in different
  * places; "frame" already means an EVM message frame (and, in `CONTEXT.md`, the
@@ -92,12 +110,17 @@
  */
 import {SimpleStateManager} from '@ethereumjs/statemanager';
 import type {Address} from '@ethereumjs/util';
-import {bytesToHex} from '@ethereumjs/util';
+import {
+	packAddressKey,
+	packSlotKey,
+	unpackAddressKey,
+	unpackSlotKey,
+	type HexKey,
+	type PackedAddressKey,
+	type PackedSlotKey,
+} from './storage-keys.js';
 
-/** `address.toString()` — `0x`-prefixed lowercase hex. */
-export type AddressKey = string;
-/** `bytesToHex(slot)` — `0x`-prefixed lowercase hex, exactly as upstream keys it. */
-export type SlotKey = string;
+export type {PackedAddressKey, PackedSlotKey, HexKey} from './storage-keys.js';
 
 /**
  * ONE CHECKPOINT'S WORTH OF STORAGE CHANGE: the slots written since that
@@ -111,10 +134,10 @@ export type SlotKey = string;
  * the account's slots forward as zeroes, which is the cost being removed.
  */
 export interface StorageOverlay {
-	/** address key -> (slot key -> value) written IN THIS overlay. */
-	readonly written: Map<AddressKey, Map<SlotKey, Uint8Array>>;
+	/** address key -> (slot key -> value) written IN THIS overlay, PACKED. */
+	readonly written: Map<PackedAddressKey, Map<PackedSlotKey, Uint8Array>>;
 	/** Accounts cleared in this overlay: every overlay below it is hidden for them. */
-	readonly cleared: Set<AddressKey>;
+	readonly cleared: Set<PackedAddressKey>;
 }
 
 function emptyOverlay(): StorageOverlay {
@@ -129,7 +152,8 @@ const STORAGE_STACK_IS_GONE =
 	'async `getStorage(address, key)`. This throws on purpose: an empty ' +
 	'`storageStack` left in place answers "that slot is zero" for a slot that ' +
 	'holds a value, and a plausible wrong answer is worse than an error. See ' +
-	'src/state-manager.ts.';
+	"src/state-manager.ts. (Its keys were not this layout's either: a storage " +
+	'key here is PACKED, built by src/storage-keys.ts.)';
 
 export class OverlayStorageStateManager extends SimpleStateManager {
 	/**
@@ -256,6 +280,11 @@ export class OverlayStorageStateManager extends SimpleStateManager {
 	/**
 	 * Read one slot SYNCHRONOUSLY, by key, walking the overlay stack downwards.
 	 *
+	 * BOTH KEYS ARE PACKED and must come from `src/storage-keys.ts`
+	 * ({@link packAddressKey} / {@link packSlotKey}). A hand-built key that happens
+	 * to be a string compiles and MISSES, and a miss here is indistinguishable from
+	 * a slot holding zero.
+	 *
 	 * `undefined` means "no overlay holds this slot", i.e. zero. A zero-LENGTH
 	 * `Uint8Array` is different: it means an overlay explicitly stored the empty
 	 * value (the interpreter strips leading zeros before `putStorage`, so a slot
@@ -266,7 +295,10 @@ export class OverlayStorageStateManager extends SimpleStateManager {
 	 * open checkpoint. Measured against frame depths 1/2/4/8 it is not
 	 * distinguishable from the flat map's single lookup; see the spike.
 	 */
-	storageAt(addressKey: AddressKey, slotKey: SlotKey): Uint8Array | undefined {
+	storageAt(
+		addressKey: PackedAddressKey,
+		slotKey: PackedSlotKey,
+	): Uint8Array | undefined {
 		const overlays = this.storageOverlays;
 		for (let i = overlays.length - 1; i >= 0; i--) {
 			const overlay = overlays[i];
@@ -293,8 +325,8 @@ export class OverlayStorageStateManager extends SimpleStateManager {
 	 * by the default engine.
 	 */
 	setStorageAt(
-		addressKey: AddressKey,
-		slotKey: SlotKey,
+		addressKey: PackedAddressKey,
+		slotKey: PackedSlotKey,
 		value: Uint8Array,
 	): void {
 		const top = this.topOverlay();
@@ -311,7 +343,7 @@ export class OverlayStorageStateManager extends SimpleStateManager {
 	 * without an `Address`, for the same synchronous-callback reason as
 	 * {@link setStorageAt}. Still O(1): one `delete` plus one tombstone.
 	 */
-	clearStorageAt(addressKey: AddressKey): void {
+	clearStorageAt(addressKey: PackedAddressKey): void {
 		const top = this.topOverlay();
 		top.written.delete(addressKey);
 		top.cleared.add(addressKey);
@@ -322,7 +354,8 @@ export class OverlayStorageStateManager extends SimpleStateManager {
 		key: Uint8Array,
 	): Promise<Uint8Array> {
 		return (
-			this.storageAt(address.toString(), bytesToHex(key)) ?? new Uint8Array(0)
+			this.storageAt(packAddressKey(address.bytes), packSlotKey(key)) ??
+			new Uint8Array(0)
 		);
 	}
 
@@ -331,7 +364,7 @@ export class OverlayStorageStateManager extends SimpleStateManager {
 		key: Uint8Array,
 		value: Uint8Array,
 	): Promise<void> {
-		this.setStorageAt(address.toString(), bytesToHex(key), value);
+		this.setStorageAt(packAddressKey(address.bytes), packSlotKey(key), value);
 	}
 
 	/**
@@ -353,7 +386,7 @@ export class OverlayStorageStateManager extends SimpleStateManager {
 	 */
 	override async clearStorage(address?: Address): Promise<void> {
 		if (address === undefined) return;
-		this.clearStorageAt(address.toString());
+		this.clearStorageAt(packAddressKey(address.bytes));
 	}
 
 	/**
@@ -388,7 +421,7 @@ export class OverlayStorageStateManager extends SimpleStateManager {
 	 */
 	override async deleteAccount(address: Address): Promise<void> {
 		await super.deleteAccount(address);
-		this.clearStorageAt(address.toString());
+		this.clearStorageAt(packAddressKey(address.bytes));
 	}
 
 	/**
@@ -401,20 +434,30 @@ export class OverlayStorageStateManager extends SimpleStateManager {
 	 * order the flat map produced, so the serialised `dumpState` output is
 	 * byte-identical to the pre-overlay node's for the same state.
 	 *
+	 * THE KEYS COME BACK AS `0x`-HEX, not as the packed keys the overlays hold.
+	 * This is the boundary where the internal format stops: `dumpState` output is
+	 * PERSISTED data (IndexedDB, `loadState` fixtures) with existing state behind
+	 * it, and `test/storage-overlay.spec.ts` asserts it byte-identical — key order
+	 * included — against a dump captured before the layout ever changed. So the
+	 * conversion lives here, on the dump path, rather than costing every read.
+	 *
 	 * O(live slots) and allocating, so it is a dump/persist operation, not a read
 	 * path. Read one slot with {@link storageAt}.
 	 */
-	liveStorage(): Map<AddressKey, Map<SlotKey, Uint8Array>> {
-		const out = new Map<AddressKey, Map<SlotKey, Uint8Array>>();
+	liveStorage(): Map<HexKey, Map<HexKey, Uint8Array>> {
+		const out = new Map<HexKey, Map<HexKey, Uint8Array>>();
 		for (const overlay of this.storageOverlays) {
-			for (const address of overlay.cleared) out.delete(address);
+			for (const address of overlay.cleared)
+				out.delete(unpackAddressKey(address));
 			for (const [address, inner] of overlay.written) {
-				let target = out.get(address);
+				const addressHex = unpackAddressKey(address);
+				let target = out.get(addressHex);
 				if (target === undefined) {
 					target = new Map();
-					out.set(address, target);
+					out.set(addressHex, target);
 				}
-				for (const [slot, value] of inner) target.set(slot, value);
+				for (const [slot, value] of inner)
+					target.set(unpackSlotKey(slot), value);
 			}
 		}
 		return out;
@@ -431,7 +474,10 @@ export class OverlayStorageStateManager extends SimpleStateManager {
 		copy.accountStack = this.accountStack.map((m) => new Map(m));
 		copy.codeStack = this.codeStack.map((m) => new Map(m));
 		copy.storageOverlays = this.storageOverlays.map((overlay) => {
-			const written = new Map<AddressKey, Map<SlotKey, Uint8Array>>();
+			const written = new Map<
+				PackedAddressKey,
+				Map<PackedSlotKey, Uint8Array>
+			>();
 			for (const [address, inner] of overlay.written)
 				written.set(address, new Map(inner));
 			return {written, cleared: new Set(overlay.cleared)};

@@ -33,6 +33,13 @@
  * 5. **The serialised format did not move with the layout.** `dumpState`'s output
  *    is compared byte for byte against a dump captured from the pre-overlay
  *    build, and that same dump is loaded back into a node running the new one.
+ * 6. **The storage KEY is packed, and both sides build the same one.**
+ *    `@ethereumjs/evm` writes through the ASYNC `putStorage` and revm reads
+ *    through the SYNCHRONOUS `storageAt`; two key formats that both "work" turn
+ *    every cross-route read into a MISS, which reads as ZERO rather than as an
+ *    error. Asserted here at the representation (the key really is 10 / 16 code
+ *    units, not 42 / 66 hex characters) and in BOTH directions across the two
+ *    routes; end to end, on two real engines, in ./revm-storage-keys.ts.
  */
 import {SimpleStateManager} from '@ethereumjs/statemanager';
 import {
@@ -49,6 +56,7 @@ import {
 	assertStateShape,
 	SimpleStateManagerStore,
 } from '../../src/revm-state-store.js';
+import {packAddressKey, packSlotKey} from '../../src/storage-keys.js';
 import flatLayoutDump from '../fixtures/dumpstate-flat-layout.json' with {type: 'json'};
 
 // ---------------------------------------------------------------- fixtures --
@@ -547,7 +555,10 @@ export async function runStorageOverlayChecks(): Promise<
 		out.clearIsOneTombstone =
 			top.written.size === 0 &&
 			top.cleared.size === 1 &&
-			top.cleared.has(addr(100).toString());
+			// The tombstone is keyed the way every storage key is: PACKED, built by
+			// src/storage-keys.ts. `addr(100).toString()` is the ACCOUNT key format
+			// (upstream's, for accountStack/codeStack) and would find nothing here.
+			top.cleared.has(packAddressKey(addr(100).bytes));
 		out.clearLeavesNeighbourAlone =
 			bytesToHex(await sm.getStorage(addr(101), slot(1))) === '0x02' &&
 			bytesToHex(await sm.getStorage(addr(100), slot(0))) === '0x';
@@ -692,6 +703,62 @@ export async function runStorageOverlayChecks(): Promise<
 			}),
 		);
 		await node.dispose?.();
+	}
+
+	// ---------- 7. the storage KEY, and the two-formats-that-both-work hazard --
+	// The node owns the key format (ADR 0009), so it is PACKED: two bytes per
+	// UTF-16 code unit, 10 code units for an account and 16 for a slot, which is
+	// worth half of every cold revm access. The hazard the change brings is that
+	// the async route (`putStorage`, which `@ethereumjs/evm` drives) and the
+	// synchronous one (`storageAt`, which revm drives) could disagree about the key
+	// and BOTH keep working on their own — every cross-route read then misses, and a
+	// miss reads as zero rather than as an error.
+	{
+		const sm = new OverlayStorageStateManager();
+		const A = createAddressFromString(WRITER);
+		const S = slot(0x2a);
+		// Written the way the DEFAULT engine writes: the async interface method.
+		await sm.putStorage(A, S, val(0x2a));
+
+		// (a) the representation really holds a PACKED key. The lengths are what say
+		// so: a hex key would be 42 and 66 characters, and comparing only against
+		// `packAddressKey()` would pass just as well if both sides went back to hex.
+		const top = sm.storageOverlays[sm.storageOverlays.length - 1];
+		const [addressKey, inner] = [...top.written][0];
+		const [slotKey] = [...inner.keys()];
+		out.writtenAddressKey = {
+			codeUnits: addressKey.length,
+			matchesEncoder: addressKey === packAddressKey(A.bytes),
+		};
+		out.writtenSlotKey = {
+			codeUnits: slotKey.length,
+			matchesEncoder: slotKey === packSlotKey(S),
+		};
+
+		// (b) ASYNC WRITE -> SYNCHRONOUS READ: the slot the default engine just wrote
+		// is the slot revm's store finds. This is the direction that turns a genesis
+		// account, a `loadState` and every `evm_setStorageAt` into zeroes.
+		const store = new SimpleStateManagerStore();
+		store.bind(sm);
+		const viaStore = store.getStorage(A.bytes, S);
+		out.syncReadOfAsyncWrite =
+			viaStore === undefined ? 'undefined, i.e. ZERO' : bytesToHex(viaStore);
+
+		// (c) SYNCHRONOUS WRITE -> ASYNC READ, the other direction: a slot revm's
+		// store commits is the slot `eth_getStorageAt` and `dumpState` report.
+		const S2 = slot(7);
+		store.setStorage(A.bytes, S2, slot(0x99));
+		out.asyncReadOfSyncWrite = bytesToHex(await sm.getStorage(A, S2));
+
+		// (d) ...and the view `dumpState` serialises still speaks `0x`-HEX, because
+		// that output is persisted data. The byte-identical fixture assertion above is
+		// the real bar; this names the property it rests on.
+		const live = sm.liveStorage();
+		const [liveAddressKey, liveInner] = [...live][0];
+		out.liveStorageKeys = {
+			address: liveAddressKey,
+			slots: [...liveInner.keys()],
+		};
 	}
 
 	return out;

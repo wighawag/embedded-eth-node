@@ -52,6 +52,14 @@
  *   - 'persist-reload': the SHARED IndexedDB persistence flow
  *                      (helpers/persistence-reload.ts) across a REAL page reload,
  *                      with revm executing the transactions whose state is persisted
+ *   - 'storage-keys' : the storage-key agreement battery
+ *                      (helpers/storage-keys.ts): the node's storage key is PACKED
+ *                      and the ASYNC route (`putStorage`, which `@ethereumjs/evm`,
+ *                      genesis, `loadState` and the cheats drive) must build the
+ *                      SAME key as the SYNCHRONOUS one (`storageAt`, which revm
+ *                      drives). Two formats that both work make every cross-route
+ *                      read a MISS, which reads as ZERO at identical gas — invisible
+ *                      to every other differential in this repo
  *   - 'invalid-transactions': the SHARED refusal battery
  *                      (helpers/invalid-transactions.ts) — a replayed nonce, a
  *                      far-future nonce, an unaffordable transaction and a gas
@@ -72,6 +80,7 @@ import {runRevmPostState} from './revm-post-state.js';
 import {runRevmFees} from './revm-fees.js';
 import {runRevmAccessList} from './revm-access-list.js';
 import {runRevmInvalidTransactions} from './revm-invalid-transactions.js';
+import {runRevmStorageKeys} from './revm-storage-keys.js';
 import {runRevmStateRoundTrip} from './revm-state-roundtrip.js';
 import {runRevmGenesisCheats} from './revm-genesis-cheats.js';
 import {
@@ -168,6 +177,18 @@ const cut: CodeUnderTest = {
 		if (ctx.params.mode === 'access-list') {
 			try {
 				results.revmAccessList = await runRevmAccessList();
+			} catch (e) {
+				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
+			}
+			return {results, timings, errors, env: captureEnv()};
+		}
+
+		// The storage KEY, on the one engine that reads it through a SECOND route.
+		// Nothing else here can fail this: an engine that both writes and reads through
+		// the async interface agrees with itself whatever the key format is.
+		if (ctx.params.mode === 'storage-keys') {
+			try {
+				results.revmStorageKeys = await runRevmStorageKeys();
 			} catch (e) {
 				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
 			}

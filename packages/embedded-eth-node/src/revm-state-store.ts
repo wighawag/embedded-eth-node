@@ -32,11 +32,17 @@
  *    frame below after the next checkpoint — silently, with no error and
  *    plausible values. Storage is read through `storageAt()`, which walks the
  *    overlay stack live for the same reason.
- * 2. **The key formats are the state manager's, not ours**, and must be
- *    reproduced byte for byte: `address.toString()` (`0x`-prefixed lowercase
- *    hex) for accounts and code, and the same address key plus a `0x`-prefixed
- *    slot key for storage. Storage values are stored in shortest form, so reads
- *    left-pad to 32 bytes.
+ * 2. **The ACCOUNT and CODE key format is the state manager's, not ours**, and
+ *    must be reproduced byte for byte: `address.toString()`, `0x`-prefixed
+ *    lowercase hex, because those two stacks are `SimpleStateManager`'s. THE
+ *    STORAGE KEY IS THE NODE'S (ADR 0009) and is PACKED — two bytes per UTF-16
+ *    code unit — which is worth 70-73% of every cold access. It is built by
+ *    `src/storage-keys.ts`, the SAME module `src/state-manager.ts` builds it
+ *    with, because `@ethereumjs/evm` writes storage through the async
+ *    `putStorage` while this store reads it through the synchronous `storageAt`:
+ *    two formats that each work on their own turn every cross-route read into a
+ *    MISS, and a miss reads as ZERO at identical gas. Storage values are stored
+ *    in shortest form, so reads left-pad to 32 bytes.
  * 3. **`@ethereumjs/statemanager` is version-pinned deliberately.** Renaming a
  *    stack is a compile error here (which is why this file uses the real
  *    `OverlayStorageStateManager` type and not `any`); changing the KEY FORMAT or
@@ -52,6 +58,9 @@
  */
 import {Account} from '@ethereumjs/util';
 import type {OverlayStorageStateManager} from './state-manager.js';
+// THE storage key encoder, shared with the async half in ./state-manager.ts so
+// the two cannot drift into two formats that both work. See its header.
+import {packAddressKey, packSlotKey} from './storage-keys.js';
 import {keccak_256} from '@noble/hashes/sha3.js';
 import type {AccountState, Address, Bytes32, StateStore} from 'revm-wasm';
 
@@ -104,21 +113,6 @@ function shortest(v: Uint8Array): Uint8Array {
 /** keccak256 of the empty byte string, i.e. the code hash of every EOA. */
 const EMPTY_CODE_HASH_HEX = /* @__PURE__ */ hexOf(keccak_256(new Uint8Array()));
 const EMPTY_CODE = /* @__PURE__ */ new Uint8Array();
-
-/**
- * A per-account view of storage: the address half of the key is bound once, and
- * each read supplies only the slot.
- *
- * The node's storage IS `Map<address, Map<slot, value>>` behind a stack of
- * overlays, so this is a thin binding rather than a translation — but it stays a
- * named seam because it is the ONE place a storage key is built, and the packed
- * key encoding (worth ~50% of a cold revm access, deferred to
- * `revm-state-store-packed-storage-keys`) replaces exactly this and nothing else.
- */
-interface AccountStorageView {
-	/** The raw (possibly zero-length, possibly short) stored value. */
-	get(slotHex: string): Uint8Array | undefined;
-}
 
 /** What the store needs from the node beyond its state manager. */
 export interface SimpleStateStoreOptions {
@@ -233,8 +227,6 @@ export class SimpleStateManagerStore implements StateStore {
 	 * clearing it.
 	 */
 	readonly #pendingCode = new Map<string, Uint8Array>();
-	/** Memoised per-account storage views, keyed by address key. */
-	readonly #storageViews = new Map<string, AccountStorageView>();
 
 	/**
 	 * Bind to the node's live state manager. Called once, from `connect`.
@@ -311,28 +303,26 @@ export class SimpleStateManagerStore implements StateStore {
 		return this.#sm;
 	}
 
-	/** The ONLY place a storage key is built. */
-	#storageOf(addressKey: string): AccountStorageView {
-		let view = this.#storageViews.get(addressKey);
-		if (view === undefined) {
-			// Walks the overlay stack afresh each time: the top of it moves.
-			view = {
-				get: (slotHex) =>
-					this.#connected().storageAt(addressKey, '0x' + slotHex),
-			};
-			this.#storageViews.set(addressKey, view);
-		}
-		return view;
-	}
-
 	getAccount(address: Address): AccountState | undefined {
 		const acc = this.#accounts.get(addrKey(address));
 		if (acc === undefined) return undefined;
 		return {balance: acc.balance, nonce: acc.nonce, codeHash: acc.codeHash};
 	}
 
+	/**
+	 * THE HOT PATH, and the reason `src/storage-keys.ts` exists: a cold access cost
+	 * 1.31-1.33 µs through the real wasm module with the `0x`-hex key and costs
+	 * 0.36-0.39 µs with the packed one, of which 0.17-0.18 µs is the wasm crossing
+	 * itself (`docs/spikes/revm-state-store-packed-storage-keys/measurements.md`).
+	 * Both keys are packed, both are built here and nowhere else on this side, and
+	 * `storageAt` walks the overlay stack afresh on every call because the top of it
+	 * moves under us (see the header's point 1).
+	 */
 	getStorage(address: Address, slot: Bytes32): Bytes32 | undefined {
-		const v = this.#storageOf(addrKey(address)).get(hexOf(slot));
+		const v = this.#connected().storageAt(
+			packAddressKey(address),
+			packSlotKey(slot),
+		);
 		if (v === undefined || v.length === 0) return undefined;
 		return pad32(v);
 	}
@@ -415,14 +405,14 @@ export class SimpleStateManagerStore implements StateStore {
 
 	setStorage(address: Address, slot: Bytes32, value: Bytes32): void {
 		this.#connected().setStorageAt(
-			addrKey(address),
-			'0x' + hexOf(slot),
+			packAddressKey(address),
+			packSlotKey(slot),
 			shortest(value),
 		);
 	}
 
 	clearStorage(address: Address): void {
-		this.#connected().clearStorageAt(addrKey(address));
+		this.#connected().clearStorageAt(packAddressKey(address));
 	}
 
 	removeAccount(address: Address): void {

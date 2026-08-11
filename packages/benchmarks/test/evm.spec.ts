@@ -90,7 +90,22 @@ const collected: Record<string, unknown>[] = [];
  * change that grows it, and say why in the changeset. A red assertion here means
  * either that or an accidental import into the core graph.
  *
- * RE-PINNED TEN TIMES SINCE. Most recent first:
+ * RE-PINNED ELEVEN TIMES SINCE. Most recent first:
+ *
+ * 421.1 -> 421.9 KB raw / 127.1 -> 127.4 KB gzip, by
+ * `revm-state-store-packed-storage-keys`: the `stateMode:'none'` storage key is
+ * now PACKED (two bytes per UTF-16 code unit) instead of `0x`-hex, which takes a
+ * cold revm storage access from 1.31-1.33 µs to 0.36-0.39 µs
+ * (`docs/spikes/revm-state-store-packed-storage-keys/measurements.md`). The 0.8
+ * KB is `src/storage-keys.ts`: two unrolled encoders (10 and 16 `String.fromCharCode`
+ * arguments, which is most of the bytes), the inverse pair `liveStorage()` uses to
+ * keep `dumpState` in hex, and a 256-entry hex table. It is in the CORE graph for
+ * the same reason the three `state-manager.ts` re-pins below are — this IS the
+ * default state manager's key format, so the async `putStorage` the DEFAULT engine
+ * drives builds keys with it too, and it must be the SAME module the revm store
+ * uses or the two routes into a slot could disagree silently. The JS-only consumer
+ * pays 0.8 KB and gets a slightly cheaper `getStorage`; the revm consumer gets the
+ * 3.4x. Still zero bytes of `revm-wasm`.
  *
  * 420.0 -> 421.1 KB raw / 126.7 -> 127.1 KB gzip, by
  * `sender-recovery-uses-the-engines-ecrecover`: in `senderMode:'recover'`, the
@@ -220,7 +235,7 @@ const collected: Record<string, unknown>[] = [];
  * carries 1% of slack because the zlib shipped with different Node builds does
  * not compress byte-identically, which is noise rather than growth.
  */
-const DEFAULT_ENTRY_BASELINE = {rawKB: 421.1, gzipKB: 127.1};
+const DEFAULT_ENTRY_BASELINE = {rawKB: 421.9, gzipKB: 127.4};
 const GZIP_SLACK = 1.01;
 
 // Build + serve once for the whole file (the cut contains all backends).

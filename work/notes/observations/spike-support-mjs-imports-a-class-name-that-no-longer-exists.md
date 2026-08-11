@@ -1,0 +1,5 @@
+# `spike-storage-layout-cost-for-the-revm-write-half/support.mjs` imports a class name that no longer exists
+
+2026-08-11 — `support.mjs` does `export const {SimpleStateManagerWithClearStorage} = await nodeDist('state-manager.js')`, but that class was renamed `OverlayStorageStateManager` by `re-layer-storage-as-per-account-maps-with-per-frame-diffs` (ADR 0009). Destructuring a missing export silently yields `undefined`, so the probes still IMPORT fine, but `assertSameStateManagerInstance()` now throws a `TypeError` on `.prototype` instead of making its point, and `probe-storage-layout.mjs` / `probe-transaction-shape.mjs` (which build that class) are presumably dead. `probe-cold-access-key-cost.mjs` does not touch it and still runs, which is how the same folder's Q4 was re-run today.
+
+Spotted while re-using that `support.mjs` from `docs/spikes/revm-state-store-packed-storage-keys/probe-shipped-store-key-cost.mjs` (`revm-state-store-packed-storage-keys`); left alone, being outside that task.

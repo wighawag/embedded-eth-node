@@ -101,5 +101,33 @@ test('storage overlays: checkpoint/commit/revert semantics, the readers, and the
 		'0x0000000000000000000000000000000000000000000000000000000000000000',
 	);
 
+	// ---- 7. the storage KEY is PACKED, and both routes build the same one ----
+	// The node owns the key format, so it is two bytes per UTF-16 code unit rather
+	// than `0x`-hex: 10 code units for an account, 16 for a slot (a hex key would
+	// be 42 and 66 characters). Worth half of every cold revm access —
+	// `docs/spikes/revm-state-store-packed-storage-keys/measurements.md`.
+	expect(c.writtenAddressKey).toEqual({codeUnits: 10, matchesEncoder: true});
+	expect(c.writtenSlotKey).toEqual({codeUnits: 16, matchesEncoder: true});
+
+	// ...and the two routes AGREE, which is the whole risk of moving the format:
+	// `@ethereumjs/evm` writes through the async `putStorage`, revm reads through
+	// the synchronous `storageAt`, and a disagreement is a MISS — indistinguishable
+	// from a slot holding zero, at identical gas, so no differential can see it.
+	expect(c.syncReadOfAsyncWrite).toBe(
+		'0x000000000000000000000000000000000000000000000000000000000000002a',
+	);
+	expect(c.asyncReadOfSyncWrite).toBe('0x99');
+
+	// ...while the view `dumpState` serialises still speaks `0x`-hex, in full
+	// 32-byte slot keys. The fixture comparison in 5 is what enforces it; this says
+	// what it enforces.
+	expect(c.liveStorageKeys).toEqual({
+		address: '0x00000000000000000000000000000000000000a1',
+		slots: [
+			'0x000000000000000000000000000000000000000000000000000000000000002a',
+			'0x0000000000000000000000000000000000000000000000000000000000000007',
+		],
+	});
+
 	await h.dispose();
 });
