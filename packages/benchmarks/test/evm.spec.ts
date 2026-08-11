@@ -90,7 +90,24 @@ const collected: Record<string, unknown>[] = [];
  * change that grows it, and say why in the changeset. A red assertion here means
  * either that or an accidental import into the core graph.
  *
- * RE-PINNED TWELVE TIMES SINCE. Most recent first:
+ * RE-PINNED THIRTEEN TIMES SINCE. Most recent first:
+ *
+ * 422.0 -> 422.5 KB raw / 127.4 -> 127.6 KB gzip, by
+ * `the-rpc-block-and-the-evm-disagree-about-coinbase-and-prevrandao`: the RPC
+ * block now reports the block the EVM actually ran. `miner` and `mixHash` are the
+ * block's real coinbase and prevRandao instead of a constant zero and an absent
+ * field, and `logsBloom` is the OR of the block's receipt blooms instead of 256
+ * hard-coded zero bytes, so pre-filtering blocks by the header bloom stops
+ * silently finding nothing. The 0.5 KB is `bloomOfReceipts` in `src/node.ts` (the
+ * OR loop, reached from `storeBlock` and again from `loadState` to rebuild the
+ * bloom of a dump too old to carry one), the three fields on the way into
+ * `SerializedBlock` and out through `blockToRpc`, and the coinbase/mixHash
+ * restoration in `loadState` — which is not cosmetic: `eth_call` executes against
+ * the STORED block object, so before it a reloaded node handed contracts a zero
+ * COINBASE / PREVRANDAO while its own mined blocks used the configured ones. It is
+ * in the CORE graph because block construction and the RPC layer are the node's on
+ * every engine, and it buys every consumer, JS-only included, a block that says
+ * what it ran. Still zero bytes of `revm-wasm`.
  *
  * 421.9 -> 422.0 KB raw (gzip unchanged at 127.4), by
  * `prune-bottom-overlay-tombstones-and-align-the-quoted-speedup`: the BOTTOM
@@ -256,7 +273,7 @@ const collected: Record<string, unknown>[] = [];
  * carries 1% of slack because the zlib shipped with different Node builds does
  * not compress byte-identically, which is noise rather than growth.
  */
-const DEFAULT_ENTRY_BASELINE = {rawKB: 422.0, gzipKB: 127.4};
+const DEFAULT_ENTRY_BASELINE = {rawKB: 422.5, gzipKB: 127.6};
 const GZIP_SLACK = 1.01;
 
 // Build + serve once for the whole file (the cut contains all backends).

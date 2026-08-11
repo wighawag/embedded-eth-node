@@ -68,5 +68,16 @@ test('IndexedDB persistence + eth_getLogs survive a real page reload', async ({
 	expect(read.logBlockNumbersPresent).toBe(true); // block numbers intact
 	expect(read.lastEventValue).toBe('3'); // event args still decode (newValue==number)
 
+	// The BLOCK HEADER survived too, and the read node was configured with no
+	// `blockEnv` of its own: a `miner` / `mixHash` it can still report came out of
+	// IndexedDB. The bloom of the block carrying a log survived with them, so a
+	// consumer's bloom pre-filter does not start finding nothing after a reload.
+	expect(read.headMiner).toBe(write.headMiner);
+	expect(read.headMixHash).toBe(write.headMixHash);
+	expect(read.logBlockLogsBloom).toBe(write.logBlockLogsBloom);
+	expect(read.headMiner).not.toBe('0x0000000000000000000000000000000000000000');
+	expect(read.headMixHash).not.toBe('0x' + '00'.repeat(32));
+	expect(read.logBlockLogsBloom).not.toBe('0x' + '00'.repeat(256));
+
 	await h.dispose();
 });

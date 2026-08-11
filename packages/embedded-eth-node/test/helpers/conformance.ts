@@ -1547,9 +1547,14 @@ async function runBattery(
 		cmp(m, 'TIMESTAMP', timestamp, BigInt(head.timestamp));
 		cmp(m, 'GASLIMIT', gaslimit, BigInt(head.gasLimit));
 		// COINBASE and PREVRANDAO are diffed against what the node was CONFIGURED
-		// with: `eth_getBlockByNumber` reports neither (its `miner` is a constant
-		// zero and it carries no `mixHash`), so the configuration is the only
-		// statement of what the block actually is.
+		// with, while the four above are diffed against the node's own block. That
+		// split is HISTORICAL as of 2026-08-11: `eth_getBlockByNumber` used to report
+		// neither (a constant-zero `miner`, no `mixHash` at all), so the configuration
+		// was the only statement of what the block was. It now reports both, so all
+		// six COULD be diffed against `head` — deliberately NOT done here, because
+		// swapping this step's oracle is a change to what it can catch and belongs to
+		// its own reasoning, not to the change that made it possible. See
+		// `work/notes/observations/conformance-block-env-oracle-can-now-diff-all-six.md`.
 		cmp(m, 'COINBASE', coinbase.toLowerCase(), BLOCK_ENV_COINBASE);
 		cmp(m, 'PREVRANDAO', prevrandao, BigInt(BLOCK_ENV_PREV_RANDAO));
 		// ...and the fixtures really are non-zero, so "reads zero" can never pass

@@ -14,6 +14,9 @@
  *   - 'engine-seam'        : the read path runs on an ENGINE — default
  *                            @ethereumjs/evm, injected engine serves all three
  *                            read-path callers, transactions stay on the VM
+ *   - 'rpc-block'          : the RPC block and the EVM describe the SAME block
+ *                            (miner / mixHash / logsBloom), on both sides of a
+ *                            dumpState/loadState round trip, plus an old dump
  *
  * `embedded-eth-node/revm` has its OWN cut (./cut-revm.ts), because its bundle
  * carries the revm `.wasm` asset and no other spec should pay for it.
@@ -49,6 +52,7 @@ import {captureEnv} from 'playwright-browser-harness/contract';
 import {slimNodeHonestyChecks} from './slim-node-checks.js';
 import {runStorageOverlayChecks} from './storage-overlay.js';
 import {runEngineSeamChecks} from './engine-seam.js';
+import {runRpcBlockChecks} from './rpc-block.js';
 import {runTrustedSenderChecks} from './trusted-sender.js';
 import {workerRoundtrip} from './worker-roundtrip.js';
 import {runConformance} from './conformance.js';
@@ -96,6 +100,19 @@ const cut: CodeUnderTest = {
 		if (ctx.params.mode === 'engine-seam') {
 			try {
 				results.engineSeam = await runEngineSeamChecks();
+			} catch (e) {
+				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
+			}
+			return {results, timings, errors, env: captureEnv()};
+		}
+
+		// rpc-block: the block header a consumer READS says what the block the EVM
+		// RAN actually was — coinbase, prevRandao and the logs bloom — and goes on
+		// saying it after a dumpState/loadState round trip, including for a state
+		// dumped by the previous version.
+		if (ctx.params.mode === 'rpc-block') {
+			try {
+				results.rpcBlock = await runRpcBlockChecks();
 			} catch (e) {
 				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
 			}

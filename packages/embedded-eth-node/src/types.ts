@@ -492,11 +492,23 @@ export interface NodeOptions {
 	 */
 	initialState?: Record<string, GenesisAccount>;
 	/**
-	 * Override the header fields of MINED blocks (not genesis). Lets a consumer
-	 * run a tx under a specific block environment (coinbase, base fee, number,
-	 * timestamp, prevRandao) — required to reproduce a GeneralStateTest `env`
-	 * (the coinbase is credited tx fees, so it affects the post-state root). When
-	 * omitted, the node uses its own constant fee market + a zero coinbase.
+	 * Override the header fields of MINED blocks. Lets a consumer run a tx under a
+	 * specific block environment (coinbase, base fee, number, timestamp,
+	 * prevRandao) — required to reproduce a GeneralStateTest `env` (the coinbase is
+	 * credited tx fees, so it affects the post-state root). When omitted, the node
+	 * uses its own constant fee market + a zero coinbase.
+	 *
+	 * GENESIS TAKES `coinbase` AND `prevRandao` FROM HERE TOO, and nothing else:
+	 * they describe the CHAIN's environment rather than one block's position in it,
+	 * so a block 0 that reported a zero miner while every block after it reported
+	 * the configured one would be the same disagreement this option's two fields
+	 * were made honest to remove. `number`, `timestamp` and `gasLimit` stay the
+	 * node's own for block 0 — genesis IS block 0 by definition, and `blockEnv.number`
+	 * exists to place a MINED block, not to renumber the genesis of the chain.
+	 *
+	 * Whatever is set here is REPORTED by `eth_getBlockByNumber` as `miner` and
+	 * `mixHash`, and survives a `dumpState` / `loadState` round trip, so the block
+	 * a consumer reads and the block a contract ran in cannot disagree.
 	 */
 	blockEnv?: BlockEnv;
 	/**
@@ -566,7 +578,19 @@ export interface SlimNode {
 	dispose(): Promise<void>;
 }
 
-/** Slim, live-set-sized serialized state. No trie, no RLP state-root walk. */
+/**
+ * Slim, live-set-sized serialized state. No trie, no RLP state-root walk.
+ *
+ * `version` IS STILL 1 AFTER THE BLOCK HEADER GREW `miner` / `mixHash` /
+ * `logsBloom` (2026-08-11), because those three fields were added as OPTIONAL
+ * reads rather than as a new shape: a dump written by an older version carries
+ * none of them and loads into this one unchanged (absent `miner` / `mixHash` read
+ * as zero, and the bloom is rebuilt from the receipts the dump already carries).
+ * A bump would have bought nothing a reader can act on and would have invalidated
+ * every IndexedDB record in the wild for a format they can still be read as. Bump
+ * it when a dump stops being loadable by the code that wrote it, which is the only
+ * question `version` can usefully answer.
+ */
 export interface SerializedState {
 	version: 1;
 	chainId: number;
@@ -594,6 +618,27 @@ export interface SerializedBlock {
 	baseFeePerGas: string;
 	/** Real Merkle-Patricia state root in `'trie'` mode; zero placeholder in `'none'`. */
 	stateRoot: string;
+	/**
+	 * The block's coinbase, under the name `eth_getBlockByNumber` reports it. Named
+	 * for the RPC rather than for the header (`coinbase`) or the option
+	 * ({@link BlockEnv.coinbase}) because this record exists to be SERVED: every
+	 * other field here already carries its RPC name.
+	 *
+	 * OPTIONAL, and absent means the zero address — a dump written before this field
+	 * existed has none. It is persisted rather than read off the `Block` object next
+	 * to it because `loadState` rebuilds that object from THIS record, so a node that
+	 * read the object would answer correctly until a reload and zero after one.
+	 */
+	miner?: string;
+	/** The block's `mixHash`, i.e. post-Merge its PREVRANDAO. Absent means zero. */
+	mixHash?: string;
+	/**
+	 * The block's logs bloom: the OR of its receipts' blooms, so a consumer
+	 * pre-filtering blocks by it before calling `eth_getLogs` finds the logs that
+	 * are really there. Absent (an older dump) means it is REBUILT on load from the
+	 * receipts, which the dump carries either way.
+	 */
+	logsBloom?: string;
 	transactions: string[]; // tx hashes
 	logsCount: number;
 }

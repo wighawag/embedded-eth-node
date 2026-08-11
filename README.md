@@ -98,7 +98,7 @@ method-not-found (`-32601`) — it never fakes a result.
 |---|---|
 | `eth_chainId`, `net_version` | from `chainId` option |
 | `eth_blockNumber` | latest mined block number |
-| `eth_getBlockByNumber`, `eth_getBlockByHash` | header + (optional) full txs; roots are zero in `'none'` mode |
+| `eth_getBlockByNumber`, `eth_getBlockByHash` | header + (optional) full txs; roots are zero in `'none'` mode. `miner`, `mixHash` and `logsBloom` are **real**: the first two are the block's [`blockEnv`](#genesis-pre-state--block-env) coinbase/prevRandao (the same values `COINBASE`/`PREVRANDAO` return to a contract), the third is the OR of the block's receipt blooms, so the standard pre-filter finds the logs that are there. `sha3Uncles`/`transactionsRoot`/`receiptsRoot`/`difficulty`/`totalDifficulty`/`size`/`nonce` are placeholders, and the header's `gasUsed` is **always `0x0`** (read the receipts' `gasUsed`) |
 | `eth_call` | **runs on the [engine](#engine-ethereumjsevm-default-vs-revm-wasm-opt-in)**; pure (never mutates); reverts throw `RpcError(3, 'execution reverted')` |
 | `eth_estimateGas` | **runs on the [engine](#engine-ethereumjsevm-default-vs-revm-wasm-opt-in)**; honest run-and-measure (`executionGasUsed` + intrinsic incl. EIP-3860, **+ the request's EIP-2930 `accessList`**: 2,400/address + 1,900/key, as geth charges it); verified == `runTx` `totalGasSpent` |
 | `eth_getBalance`, `eth_getCode`, `eth_getStorageAt`, `eth_getTransactionCount` | state reads at a block tag |
@@ -470,7 +470,14 @@ where execution runs OUT of gas.
   EOAs, pre-deployed contracts with storage).
 - **`blockEnv`** — override mined-block header (`coinbase`, `baseFeePerGas`,
   `number`, `timestamp`, `gasLimit`, `prevRandao`). Required to reproduce a
-  GeneralStateTest `env`.
+  GeneralStateTest `env`. `coinbase` and `prevRandao` are **reported back** by
+  `eth_getBlockByNumber` as `miner` and `mixHash`, are the same values
+  `COINBASE` / `PREVRANDAO` hand a contract, and **survive a `dumpState` /
+  `loadState` round trip** (an IndexedDB reload included), so the block a
+  consumer reads and the block a contract ran in cannot disagree. Those two
+  fields apply to the **genesis** block as well, describing the environment the
+  chain runs under; `number`, `timestamp` and `gasLimit` are mined-block-only
+  (block 0 is block 0).
 
 ## Persistence (IndexedDB)
 

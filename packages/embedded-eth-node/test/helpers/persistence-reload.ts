@@ -17,6 +17,18 @@
  * This is the canonical dapp scenario: persist a local chain to IndexedDB, reload
  * the tab, keep playing and keep querying event logs.
  *
+ * THE BLOCK HEADER RIDES ALONG, and only the write phase is CONFIGURED. The write
+ * node is created with a `blockEnv` carrying a distinctive coinbase and prevRandao;
+ * the read node is created with NONE, so a `miner` / `mixHash` it can still report
+ * after the reload came out of IndexedDB and not out of its own options. The bloom
+ * of the block that carries a log is reported beside them for the same reason: it
+ * is derived from the receipts at mine time, and a persistence layer that dropped
+ * it would leave a consumer's bloom pre-filter finding nothing after a reload while
+ * `eth_getLogs` (asserted above) still worked. Whether the bloom really admits that
+ * log is `test/rpc-block.spec.ts`'s question; here the question is only whether the
+ * value SURVIVED, which is why these are compared write-side against read-side
+ * rather than against a literal.
+ *
  * ENGINE-PARAMETERISED, like the conformance battery and the trusted-sender suite:
  * both phases take an optional engine factory, so the SAME flow runs on the default
  * `@ethereumjs/evm` engine (`persistence-reload.spec.ts`) and on
@@ -65,6 +77,40 @@ const chain = {
 const XFER_TO = '0x000000000000000000000000000000000000feed';
 const INCREMENTED = parseAbiItem('event Incremented(uint256 newValue)');
 
+/**
+ * The write phase's block environment. The READ phase is deliberately given none:
+ * these two values can only reach it through IndexedDB.
+ */
+const RELOAD_COINBASE = '0x00000000000000000000000000000000dbdbdbdb';
+const RELOAD_PREV_RANDAO =
+	'0xfeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface';
+
+/** What the RPC says about the header, on either side of the reload. */
+export interface HeaderFacts {
+	headMiner: string;
+	headMixHash: string;
+	/** The bloom of the block that carries the first Incremented log. */
+	logBlockLogsBloom: string;
+}
+
+async function headerFacts(
+	node: SlimNode,
+	logBlockNumber: number,
+): Promise<HeaderFacts> {
+	const at = async (tag: string) =>
+		(await node.request({
+			method: 'eth_getBlockByNumber',
+			params: [tag, false],
+		})) as any;
+	const head = await at('latest');
+	const logBlock = await at(`0x${logBlockNumber.toString(16)}`);
+	return {
+		headMiner: String(head.miner),
+		headMixHash: String(head.mixHash),
+		logBlockLogsBloom: String(logBlock.logsBloom),
+	};
+}
+
 function clientsFor(node: SlimNode) {
 	const transport = custom(
 		{request: ({method, params}: any) => node.request({method, params})},
@@ -77,7 +123,7 @@ function clientsFor(node: SlimNode) {
 	};
 }
 
-export interface WriteResult {
+export interface WriteResult extends HeaderFacts {
 	/** Which EVM the node came up on, so a run on the wrong engine is visible. */
 	engineId: string;
 	address: string;
@@ -97,6 +143,7 @@ export async function persistWrite(
 		miningConfig: {type: 'auto'},
 		persistence: createIndexedDBPersistence({db: opts.db ?? DB_NAME}),
 		initialBalances: {[account.address]: 10n ** 24n},
+		blockEnv: {coinbase: RELOAD_COINBASE, prevRandao: RELOAD_PREV_RANDAO},
 		engine: await opts.makeEngine?.(),
 	});
 	const {pub, wallet} = clientsFor(node);
@@ -133,6 +180,7 @@ export async function persistWrite(
 	const feedBalance = (await pub.getBalance({address: XFER_TO})).toString();
 	const blockNumber = Number(await pub.getBlockNumber());
 	const engineId = node.engine.id;
+	const header = await headerFacts(node, Number(logs[0]?.blockNumber ?? 0n));
 
 	await node.dispose();
 	return {
@@ -143,10 +191,11 @@ export async function persistWrite(
 		firstLogTopics: logs[0]?.topics ?? [],
 		blockNumber,
 		feedBalance,
+		...header,
 	};
 }
 
-export interface ReadResult {
+export interface ReadResult extends HeaderFacts {
 	/** Which EVM the POST-RELOAD node came up on. */
 	engineId: string;
 	loaded: boolean;
@@ -171,7 +220,8 @@ export async function persistRead(
 		chainId: CHAIN_ID,
 		miningConfig: {type: 'auto'},
 		persistence: createIndexedDBPersistence({db: opts.db ?? DB_NAME}),
-		// NOTE: no initialBalances — state must come ENTIRELY from IndexedDB.
+		// NOTE: no initialBalances and no blockEnv — state AND the block environment
+		// the header reports must come ENTIRELY from IndexedDB.
 		engine: await opts.makeEngine?.(),
 	});
 	const {pub} = clientsFor(node);
@@ -225,8 +275,10 @@ export async function persistRead(
 			: '0';
 
 	const engineId = node.engine.id;
+	const header = await headerFacts(node, Number(byAddr[0]?.blockNumber ?? 0n));
 	await node.dispose();
 	return {
+		...header,
 		engineId,
 		loaded,
 		number,

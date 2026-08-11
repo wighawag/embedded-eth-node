@@ -75,6 +75,14 @@ import {
 } from './types.js';
 
 const ZERO_HASH = '0x' + '00'.repeat(32);
+const ZERO_ADDRESS = '0x' + '00'.repeat(20);
+/**
+ * What a block's `logsBloom` reads as when it admits nothing: a block with no
+ * logs, and the defensive fallback for a stored header carrying none at all
+ * (`loadState` rebuilds one for an older dump, so this is reached only by a
+ * hand-built `SerializedBlock`). It is NO LONGER what EVERY block reports, which
+ * is what it was until 2026-08-11 — see `blockToRpc`.
+ */
 const EMPTY_LOGS_BLOOM = '0x' + '00'.repeat(256);
 
 /**
@@ -372,6 +380,14 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 	const minedBlockGasLimit = blockEnv?.gasLimit ?? blockGasLimit;
 
 	// Genesis block.
+	//
+	// IT TAKES `blockEnv`'s COINBASE AND PREVRANDAO, and nothing else from it. Those
+	// two describe the environment this CHAIN runs under, so a block 0 reporting a
+	// zero miner while every block after it reports the configured one would be the
+	// same RPC-vs-EVM disagreement the fields are stored to remove, one block wide.
+	// `number`, `timestamp` and `gasLimit` stay the node's own: genesis IS block 0,
+	// and `blockEnv.number` places a MINED block rather than renumbering the chain's
+	// genesis (`minedBlockGasLimit` above is likewise the MINED block's limit).
 	const genesis = createBlock(
 		{
 			header: {
@@ -379,6 +395,13 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 				gasLimit: blockGasLimit,
 				baseFeePerGas,
 				timestamp: BigInt(Math.floor(Date.now() / 1000)),
+				...(blockEnv?.coinbase
+					? {coinbase: createAddressFromString(blockEnv.coinbase)}
+					: {}),
+				difficulty: 0n,
+				...(blockEnv?.prevRandao
+					? {mixHash: hexToBytes(blockEnv.prevRandao)}
+					: {}),
 			},
 		},
 		{common},
@@ -400,6 +423,27 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 		}, miningConfig.intervalMs);
 	}
 
+	/**
+	 * THE BLOCK'S LOGS BLOOM: the OR of its receipts' own blooms, which is what a
+	 * block bloom IS. Derived here rather than carried out of the mining loop so
+	 * that `loadState` can rebuild it for a dump written before `SerializedBlock`
+	 * had the field — same function, same answer, both sides of a round trip.
+	 *
+	 * IT IS NOT READ OFF `block.header.logsBloom`, unlike the coinbase and the
+	 * mixHash beside it in `storeBlock`: the header is built (and frozen) BEFORE the
+	 * block's transactions execute, so the only truthful bloom is this one.
+	 */
+	function bloomOfReceipts(txHashes: string[]): string {
+		const acc = new Uint8Array(256);
+		for (const h of txHashes) {
+			const r = receipts.get(h);
+			if (!r) continue;
+			const bits = hexToBytes(r.logsBloom);
+			for (let i = 0; i < acc.length && i < bits.length; i++) acc[i] |= bits[i];
+		}
+		return hex(acc);
+	}
+
 	function storeBlock(
 		block: Block,
 		txHashes: string[],
@@ -417,6 +461,15 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 			gasLimit: numHex(block.header.gasLimit),
 			baseFeePerGas: numHex(block.header.baseFeePerGas ?? baseFeePerGas),
 			stateRoot,
+			// THE BLOCK'S OWN COINBASE AND MIXHASH, PERSISTED. They are read off the
+			// `Block` the EVM just ran — not off `blockEnv` — so "what the RPC reports"
+			// and "what COINBASE / PREVRANDAO returned" are one value with one source,
+			// and they are stored HERE because `loadState` rebuilds the block from this
+			// record: a reader that went to `sb.block` would answer correctly until a
+			// reload and zero afterwards.
+			miner: block.header.coinbase.toString(),
+			mixHash: hex(block.header.mixHash),
+			logsBloom: bloomOfReceipts(txHashes),
 			transactions: txHashes,
 			logsCount: logs.length,
 		};
@@ -894,6 +947,24 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 		return latestNumber;
 	}
 
+	/**
+	 * The stored block, as `eth_getBlockByNumber` / `eth_getBlockByHash` report it.
+	 *
+	 * IT READS THE SERIALISED HEADER AND NOTHING ELSE, deliberately. `sb.block` is
+	 * right there and carries the same coinbase and mixHash, but it is the object
+	 * `loadState` REBUILDS, so a field taken from it would be reported correctly by
+	 * a live node and as zero by the same node after a reload — which is worse than
+	 * a uniform zero, because nothing tells a consumer which side of the trip they
+	 * are on. Every value below is therefore one a dump carries.
+	 *
+	 * `stateRoot` is the one REAL value among the roots (in `'trie'` mode);
+	 * `sha3Uncles`, `transactionsRoot` and `receiptsRoot` stay honest zero
+	 * placeholders, named as such in the README, because this node builds no tries
+	 * over its transactions or receipts. `logsBloom` used to be in that list and is
+	 * not any more: it is the OR of the block's receipt blooms, so the standard
+	 * pre-filter (test the header bloom, then call `eth_getLogs`) finds what is
+	 * there instead of silently finding nothing.
+	 */
 	function blockToRpc(sb: StoredBlock, fullTx: boolean) {
 		const h = sb.header;
 		return {
@@ -902,11 +973,15 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 			parentHash: h.parentHash,
 			nonce: '0x0000000000000000',
 			sha3Uncles: ZERO_HASH,
-			logsBloom: EMPTY_LOGS_BLOOM,
+			logsBloom: h.logsBloom ?? EMPTY_LOGS_BLOOM,
 			transactionsRoot: ZERO_HASH,
 			stateRoot: h.stateRoot,
 			receiptsRoot: ZERO_HASH,
-			miner: '0x0000000000000000000000000000000000000000',
+			// A dump written before these fields existed carries neither, and absent
+			// means ZERO rather than `undefined`: an old state loads into a block that
+			// really had a zero coinbase, not into an RPC result missing a field.
+			miner: h.miner ?? ZERO_ADDRESS,
+			mixHash: h.mixHash ?? ZERO_HASH,
 			difficulty: '0x0',
 			totalDifficulty: '0x0',
 			extraData: '0x',
@@ -1464,6 +1539,25 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 			transactions.set(h, t);
 
 		for (const sh of state.blocks) {
+			// THE REBUILT BLOCK CARRIES THE COINBASE AND THE MIXHASH, because it is not
+			// only the RPC that reads it: `eth_call` executes against the STORED `Block`
+			// object of the latest block, so a reconstruction that dropped them would
+			// hand a contract a zero COINBASE / PREVRANDAO after a reload while the same
+			// node's mined blocks used the configured ones. `difficulty` is pinned to 0
+			// here for the same reason it is pinned when mining: post-Merge, PREVRANDAO
+			// lives in `mixHash` and the difficulty must be zero beside it.
+			//
+			// AND ITS OWN HASH HAS TO COME OUT RIGHT, which is the second thing this
+			// list is load-bearing for and the easier one to break. `parentHash` for the
+			// next mined block is taken from THIS object's `hash()` (below), and the
+			// default engine answers BLOCKHASH from it through `mockBlockchain`, so the
+			// header built here must be field-for-field the one `storeBlock` recorded or
+			// a reloaded chain names a parent no lookup resolves. That is an INVARIANT
+			// between three places, not a local property: a header field added to the
+			// mined block in `executeAndMine` has to be recorded in `SerializedBlock` and
+			// restored here, or the hash silently diverges on the far side of a reload.
+			// `test/rpc-block.spec.ts` mines a block after a reload and checks its parent
+			// resolves, which is that invariant stated where a consumer would meet it.
 			const block = createBlock(
 				{
 					header: {
@@ -1473,6 +1567,9 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 						baseFeePerGas: BigInt(sh.baseFeePerGas),
 						parentHash: hexToBytes(sh.parentHash),
 						timestamp: BigInt(sh.timestamp),
+						...(sh.miner ? {coinbase: createAddressFromString(sh.miner)} : {}),
+						difficulty: 0n,
+						...(sh.mixHash ? {mixHash: hexToBytes(sh.mixHash)} : {}),
 					},
 				},
 				{common},
@@ -1483,7 +1580,15 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 				const r = receipts.get(th);
 				if (r) logs.push(...r.logs);
 			}
-			blockStore.set(sh.number, {block, header: sh, logs});
+			// A dump from before `SerializedBlock` had a bloom gets one REBUILT rather
+			// than defaulted to zero: its receipts carry their own blooms, so the block
+			// bloom is derivable, and an old state that pre-filtered to nothing would be
+			// the very defect this field was added to close.
+			const header: SerializedBlock =
+				sh.logsBloom === undefined
+					? {...sh, logsBloom: bloomOfReceipts(sh.transactions)}
+					: sh;
+			blockStore.set(sh.number, {block, header, logs});
 			blockByHash.set(sh.hash, sh.number);
 			allLogs.push(...logs);
 			latestNumber = sh.number;
