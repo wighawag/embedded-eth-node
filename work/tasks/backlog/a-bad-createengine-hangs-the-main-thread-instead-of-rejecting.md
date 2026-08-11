@@ -52,3 +52,13 @@ The bar is that neither thread is left guessing: the main thread's promise REJEC
 > Note the ordering constraint that causes this: `expose()` adds a message listener, and a module that throws before reaching it answers nothing at all. Any fix has to leave the worker ABLE to answer, or the main thread has nothing to receive a rejection from.
 >
 > This package's convention is that a refusal says what happened and what to do about it, and that a plausible-looking failure is worse than a loud one. A hang is the least legible failure available, which is why this is worth a task rather than a note.
+
+## Requeue 2026-08-11
+
+RECOVERY HANDOFF (2026-08-11, conductor). The previous run COMPLETED this work; it was lost to a disk-full failure in the runner's own commit step, not to anything wrong with the approach. Nothing of it survives on the branch, so build it again, but do not re-derive the design: it was reviewed and it was right.
+
+The shape that worked: make the createEngine refusal a VALUE, not control flow. exposeNode() must still call expose() so comlink's message listener is registered, and createNode() then rejects with the recorded message, which crosses the boundary as a rejection the main-thread caller can read. A throw before expose() is exactly what causes the hang, because the worker then answers nothing at all. Keep the worker-side signal too, so both threads say something.
+
+Detect the promise case specifically: typeof value?.then === 'function' means the caller wrote createEngine: await createRevmEngine({wasm}) instead of createEngine: () => createRevmEngine({wasm}), and the message should say precisely that, naming both forms.
+
+A HARD LIMIT you must document rather than engineer away, measured on Chromium and WebKit and now landed at work/notes/observations/a-top-level-await-in-a-worker-module-loses-the-first-message.md: a top-level await in a worker module before exposeNode() loses the main thread's FIRST message, so createWorkerNode() hangs regardless of what the refusal does. Nothing in worker-host can fix it, since there is no listener to register before the consumer's module gets that far. Test the promise form rather than the await form for that reason, and say so on the exposeNode doc comment and the README Worker section, which is where a consumer would look.
