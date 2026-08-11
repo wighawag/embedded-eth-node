@@ -11,3 +11,11 @@ The build prompt (`work/protocol/CLAIM-PROTOCOL.md`) tells an agent to record a 
 The consequence is mild per task and compounds across a board: the done record is the one artifact addressed by slug, and it is the last place a decision is findable from.
 
 Worth considering rather than assuming: the runner owns the ready-to-done move, so the pointer is arguably the RUNNER's to write rather than the agent's, which would fix it once instead of asking every agent to remember. That is a dorfl change, not an embedded-eth-node one. Alternatively the repo could stop asking for the link and treat the changeset plus the spike doc as sufficient, which is what actually happens today.
+
+## Update, 2026-08-11 (fifth instance, and now a contract question too)
+
+Raised again on `the-conformance-differential-covers-transactions-on-revm`, which additionally INVENTED a home for the decisions rather than choosing one of the sanctioned ones: `work/notes/observations/decisions-<slug>-<date>.md`, carrying a new `decisionsFor` frontmatter field.
+
+That deserves a decision of its own, because the bucket does not fit. `WORK-CONTRACT.md` defines `notes/observations/` as SPOTTED, UNVERIFIED, append-only signals that leave by DELETION when they stop being live, and it explicitly warns against back-filling an observation to narrate work that is already done. A decision record is none of those things: it is verified, it is durable, and it should not become deletable merely because it stopped being newsworthy. Two of these files now exist in the bucket alongside genuine live signals, which blurs what `ls work/notes/observations/` means.
+
+The maintainer's call, and it pairs with the linkage question above: either bless a real home for build decisions (a `## Decisions` block in the done record itself is the option the protocol already names, and it solves the linkage problem in the same stroke), or say that the changeset plus `docs/spikes/<slug>/measurements.md` are sufficient and stop asking for more. These notes are LEFT IN PLACE pending that call rather than discharged, since they are decision records awaiting ratification and not signals this drive may retire.
