@@ -5,7 +5,11 @@
  * This is the strongest correctness bar in the repo pointed at the engine a
  * consumer actually ships: the same signed transactions, the same trie-backed
  * `@ethereumjs/vm` `runTx` reference, the same field-by-field diff — with revm
- * answering `eth_call` and `eth_estimateGas`.
+ * answering BOTH halves of the seam, `eth_call` and `eth_estimateGas` as well as
+ * every transaction the battery mines. Which engine actually executed them is
+ * COUNTED rather than assumed (`transactionsByEngine`), because a battery whose
+ * transactions had quietly gone back to `@ethereumjs/vm` would diff the reference
+ * against itself and pass every assertion in it.
  *
  * WHICH MODES, and why it is not a choice. The engine serves `stateMode:'none'`
  * and REFUSES `'trie'` at construction (`MerkleStateManager` has no synchronous

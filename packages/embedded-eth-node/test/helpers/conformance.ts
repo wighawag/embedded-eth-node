@@ -30,6 +30,13 @@
  * built PER NODE by a factory, not shared: an engine instance serves exactly one
  * node (the revm engine refuses a second `createNode()` outright), and the
  * battery builds two.
+ *
+ * ...AND WHICH ENGINE EXECUTED THEM IS COUNTED, NOT ASSUMED (see
+ * {@link BatteryReport.transactionsByEngine}). The failure this guards against is
+ * a VACUOUS PASS: a battery whose transactions quietly went back to running on
+ * `@ethereumjs/vm` while the report still named the injected engine would diff
+ * the reference against itself and pass every assertion below while proving
+ * nothing at all.
  */
 import {createVM, runTx, type VM} from '@ethereumjs/vm';
 import {MerkleStateManager} from '@ethereumjs/statemanager';
@@ -56,6 +63,7 @@ import {privateKeyToAccount} from 'viem/accounts';
 import {
 	createNode,
 	type Engine,
+	type EngineContext,
 	type SlimNode,
 	type StateMode,
 } from '../../src/index.js';
@@ -176,6 +184,28 @@ const OVER_DEFAULT_TX_GAS = 40_000_000n;
 /** Above BOTH, so the raised node refuses it against its OWN configured limit. */
 const OVER_RAISED_TX_GAS = RAISED_BLOCK_GAS_LIMIT + 1n;
 const account = privateKeyToAccount(PK);
+
+/**
+ * The AFFORDABILITY case's sender: a second signer funded by NOBODY — not by the
+ * node's `initialBalances`, not by the reference's genesis — so a transaction
+ * from it is unaffordable on both chains for the one reason under test.
+ *
+ * A SECOND KEY rather than draining the funded one: the battery's whole sequence
+ * runs on {@link account}'s nonce, and a sender that could not pay for its own
+ * next transaction would end the battery rather than make one statement in it.
+ */
+const UNFUNDED_PK =
+	'0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d';
+const unfundedAccount = privateKeyToAccount(UNFUNDED_PK);
+
+/**
+ * The storage-clearing refund's fixtures: a slot on the `ConformanceProbe` that
+ * nothing else in this battery writes (its own `last` is slot 0, and `store`
+ * reaches any slot through a raw `SSTORE`), and a non-zero value to put in it so
+ * that writing zero over it CLEARS it.
+ */
+const REFUND_SLOT = 7n;
+const REFUND_VALUE = 42n;
 
 function hx(b: Uint8Array): string {
 	return bytesToHex(b) as string;
@@ -434,6 +464,15 @@ async function sign2930(args: any): Promise<string> {
 		...args,
 	});
 }
+/** ...and the same transaction shape signed by the sender that holds nothing. */
+async function sign1559Unfunded(args: any): Promise<string> {
+	return unfundedAccount.signTransaction({
+		chainId: CHAIN_ID,
+		type: 'eip1559',
+		...COMMON_FEES,
+		...args,
+	});
+}
 
 /**
  * Builds ONE engine for ONE node. `undefined` (or no factory) leaves the node on
@@ -446,8 +485,72 @@ export interface BatteryReport {
 	stateMode: StateMode;
 	/** Which EVM the node was created with, as the node itself reports it. */
 	engineId: string;
+	/**
+	 * WHICH EVM ACTUALLY EXECUTED THIS BATTERY'S TRANSACTIONS, and how many it was
+	 * handed — counted at the seam, across every node the battery builds.
+	 *
+	 * WHY IT IS NOT {@link engineId}. That is the engine the node was BUILT with,
+	 * and it would go on saying so if the mining path stopped using it: the battery
+	 * would then be diffing the `@ethereumjs/vm` reference against `@ethereumjs/vm`
+	 * and passing every assertion in this file while measuring nothing. That is the
+	 * VACUOUS PASS this field exists to make impossible — the same reason the specs
+	 * assert their steps BY LABEL rather than by counting them.
+	 *
+	 * `null` when NO engine was injected: the node then builds its own default
+	 * engine from its own VM, inside `createNode()`, and nothing out here can wrap
+	 * it. Nor is there anything to prove in that case — the default IS
+	 * `@ethereumjs/vm`, so "it ran on the reference EVM" is the premise rather than
+	 * the risk. The risk arrives with an injected engine, and so does the count.
+	 */
+	transactionsByEngine: Record<string, number> | null;
 	steps: {label: string; mismatches: string[]}[];
 	totalMismatches: number;
+}
+
+/**
+ * The default engine's id, as `node.engine` reports it — the one id that must
+ * NEVER appear in {@link BatteryReport.transactionsByEngine} for a run with an
+ * engine installed, because seeing it there IS the vacuous pass.
+ */
+const DEFAULT_ENGINE_ID = '@ethereumjs/evm';
+
+/**
+ * The floor on how many transactions an installed engine must have been handed.
+ * A FLOOR, not a count: the battery hands it close to thirty, and pinning the
+ * exact number would turn every new step into a failing assertion. What it rules
+ * out is the reading that would otherwise satisfy "the engine executed
+ * transactions" — one, or none.
+ */
+const MIN_TRANSACTIONS_ON_THE_ENGINE = 20;
+
+/**
+ * The injected engine, with a COUNTER in front of its `transact`.
+ *
+ * It counts what the NODE HANDED THE ENGINE, at entry, before the engine has
+ * decided anything — including a transaction the engine goes on to reject, which
+ * is still a transaction that ran nowhere else. The wrapper delegates and adds
+ * nothing else: same `id`, same `connect` (only when the engine has one, so an
+ * engine that needs no connection is not given a fake one), same `call`.
+ */
+function countingEngines(
+	makeEngine: EngineFactory,
+	transactionsByEngine: Record<string, number>,
+): EngineFactory {
+	return async () => {
+		const engine = await makeEngine();
+		return {
+			id: engine.id,
+			...(engine.connect
+				? {connect: (ctx: EngineContext) => engine.connect!(ctx)}
+				: {}),
+			call: (request) => engine.call(request),
+			transact: (request) => {
+				transactionsByEngine[engine.id] =
+					(transactionsByEngine[engine.id] ?? 0) + 1;
+				return engine.transact(request);
+			},
+		};
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -456,8 +559,19 @@ export interface BatteryReport {
 // ---------------------------------------------------------------------------
 async function runBattery(
 	stateMode: StateMode,
-	makeEngine?: EngineFactory,
+	installedEngine?: EngineFactory,
 ): Promise<BatteryReport> {
+	// EVERY node below is built through THIS factory, so the count covers the whole
+	// battery and not only its first node. `undefined` when nothing was injected:
+	// the node then builds its own default engine and there is nothing to count
+	// (see {@link BatteryReport.transactionsByEngine}).
+	const transactionsByEngine: Record<string, number> | null = installedEngine
+		? {}
+		: null;
+	const makeEngine =
+		installedEngine && transactionsByEngine
+			? countingEngines(installedEngine, transactionsByEngine)
+			: undefined;
 	const node: SlimNode = await createNode({
 		chainId: CHAIN_ID,
 		stateMode,
@@ -601,6 +715,61 @@ async function runBattery(
 		}
 		steps.push({label, mismatches: m});
 	}
+
+	// ---- one submission, and what the two chains DID with it ----------------
+	// Most of the battery MINES, and `oneTxBlock` above is enough for that. The
+	// negative cases are REFUSED, and a refusal has to be read off both sides rather
+	// than thrown: `submitTo` reports one submission to a slim node as either the
+	// mined receipt's status or the refusal text, and `offerToReference` offers the
+	// SAME raw transaction to the trie-backed reference `runTx` and reports it the
+	// same way — which is what makes "refused" a differential statement instead of
+	// this file's opinion.
+	/** One submission to `n`, as the mined status or the refusal it came back with. */
+	const submitTo = async (n: SlimNode, raw: string) => {
+		try {
+			const rcpt = (await n.request({
+				method: 'eth_sendRawTransactionSync',
+				params: [raw],
+			})) as any;
+			return {outcome: `mined ${String(rcpt?.status)}`, message: ''};
+		} catch (e) {
+			return {outcome: 'refused', message: String((e as Error)?.message ?? e)};
+		}
+	};
+	/**
+	 * ...and the same raw transaction offered to the REFERENCE.
+	 *
+	 * `Reference.mineBlock` advances its chain only after every transaction in the
+	 * block has run, and `runTx` reverts its own checkpoint before it throws, so a
+	 * refused transaction leaves the reference exactly where it was — which is what
+	 * lets the battery go on diffing against it afterwards.
+	 */
+	const offerToReference = async (raw: string) => {
+		try {
+			const [r] = await ref.mineBlock([raw]);
+			return {outcome: `mined 0x${r.status.toString(16)}`, message: ''};
+		} catch (e) {
+			return {outcome: 'refused', message: String((e as Error)?.message ?? e)};
+		}
+	};
+	const blockNumberOf = async (n: SlimNode) =>
+		BigInt(
+			(await n.request({method: 'eth_blockNumber', params: []})) as string,
+		);
+	const nonceOf = async (n: SlimNode, addr: string = account.address) =>
+		BigInt(
+			(await n.request({
+				method: 'eth_getTransactionCount',
+				params: [addr, 'latest'],
+			})) as string,
+		);
+	const balanceOf = async (n: SlimNode, addr: string) =>
+		BigInt(
+			(await n.request({
+				method: 'eth_getBalance',
+				params: [addr, 'latest'],
+			})) as string,
+		);
 
 	// === BATTERY ===
 
@@ -1635,30 +1804,8 @@ async function runBattery(
 	//     limit in them.
 	{
 		const m: string[] = [];
-		/** One submission, as either the mined receipt's status or the refusal text. */
-		const sendTx = async (n: SlimNode, raw: string) => {
-			try {
-				const rcpt = (await n.request({
-					method: 'eth_sendRawTransactionSync',
-					params: [raw],
-				})) as any;
-				return {outcome: `mined ${String(rcpt?.status)}`, message: ''};
-			} catch (e) {
-				const message = String((e as Error)?.message ?? e);
-				return {outcome: 'refused', message};
-			}
-		};
-		const blockNumberOf = async (n: SlimNode) =>
-			BigInt(
-				(await n.request({method: 'eth_blockNumber', params: []})) as string,
-			);
-		const nonceOf = async (n: SlimNode) =>
-			BigInt(
-				(await n.request({
-					method: 'eth_getTransactionCount',
-					params: [account.address, 'latest'],
-				})) as string,
-			);
+		// `submitTo` / `blockNumberOf` / `nonceOf` are the shared helpers above: one
+		// submission read as either the mined status or the refusal text.
 
 		// ---- a node at the DEFAULT block gas limit refuses the over-limit tx ----
 		const nodeDefault = await createNode({
@@ -1685,7 +1832,7 @@ async function runBattery(
 			value: 1n,
 			gas: OVER_DEFAULT_TX_GAS,
 		});
-		const refused = await sendTx(nodeDefault, overLimitRaw);
+		const refused = await submitTo(nodeDefault, overLimitRaw);
 		cmp(m, 'over-limit tx at the default limit', refused.outcome, 'refused');
 		/**
 		 * A word the refusal must contain, reported AS THE REFUSAL when it does not:
@@ -1732,7 +1879,7 @@ async function runBattery(
 		cmp(
 			m,
 			'within-limit tx at the default limit',
-			(await sendTx(nodeDefault, withinRaw)).outcome,
+			(await submitTo(nodeDefault, withinRaw)).outcome,
 			'mined 0x1',
 		);
 		await nodeDefault.dispose();
@@ -1749,7 +1896,7 @@ async function runBattery(
 		cmp(
 			m,
 			'over-limit tx on a node configured for it',
-			(await sendTx(nodeRaised, overLimitRaw)).outcome,
+			(await submitTo(nodeRaised, overLimitRaw)).outcome,
 			'mined 0x1',
 		);
 		// THE BLOCK REALLY IS THAT BIG: the permissiveness is a property of the
@@ -1796,7 +1943,7 @@ async function runBattery(
 			value: 1n,
 			gas: OVER_RAISED_TX_GAS,
 		});
-		const refusedRaised = await sendTx(nodeRaised, wayOverRaw);
+		const refusedRaised = await submitTo(nodeRaised, wayOverRaw);
 		cmp(m, 'tx above the RAISED limit', refusedRaised.outcome, 'refused');
 		cmp(
 			m,
@@ -1811,11 +1958,290 @@ async function runBattery(
 		});
 	}
 
+	// 19) A REPLAYED NONCE IS REFUSED, and by BOTH sides.
+	//
+	//     THE ORACLE IS THE REFERENCE, as it is for every receipt step: the same
+	//     signed transaction is offered to the trie-backed `runTx`, which refuses it
+	//     too. That is the half this battery can say and an absolute assertion
+	//     cannot — not "the node refuses what we decided it should" but "the node
+	//     refuses what a real EVM refuses". (The node's WORDS for it, the JSON-RPC
+	//     code, and the wei-exact boundaries are a different question with a
+	//     different oracle, and they are covered in depth in ./invalid-transactions.ts
+	//     against a default-engine node. What that pair cannot say is this one:
+	//     its reference runs the SAME node code, so a refusal invented by the node
+	//     is refused identically on both of its chains and diffs clean.)
+	//
+	//     ...AND NOTHING MOVED. A refusal that half-ran would leave the block number
+	//     up or a nonce spent, so both are read after it, and the sender's nonce and
+	//     balance are diffed against the reference. The step AFTER this one mines
+	//     from the same sender at the very next nonce, which is what says the
+	//     refusal was about this transaction rather than about the node having
+	//     broken.
+	//
+	//     THESE THREE CASES RUN LAST, on the main node and its reference, because
+	//     they are the only steps that depend on the whole sequence above having
+	//     happened: a nonce can only be REPLAYED once it has been spent.
+	{
+		const m: string[] = [];
+		const replayedNonce = ctx.nonce - 1;
+		const raw = await sign1559({
+			nonce: replayedNonce,
+			to: VALUE_SINK_ADDR,
+			value: 1n,
+			gas: 21_000n,
+		});
+		const blockBefore = await blockNumberOf(node);
+		const nodeOutcome = await submitTo(node, raw);
+		const refOutcome = await offerToReference(raw);
+		cmp(m, 'the node refuses the replay', nodeOutcome.outcome, 'refused');
+		cmp(m, 'the reference runTx refuses it too', refOutcome.outcome, 'refused');
+		cmp(m, 'no block was mined for it', await blockNumberOf(node), blockBefore);
+		// ...and the nonce it claimed really WAS already spent, so the refusal is
+		// about a replay rather than about a nonce this sender never reached.
+		cmp(m, 'sender nonce, unchanged', await nonceOf(node), BigInt(ctx.nonce));
+		if (replayedNonce < 0)
+			m.push('no nonce had been spent yet, so nothing was replayed');
+		steps.push({
+			label: 'a replayed nonce is refused, and nothing moved',
+			mismatches: m,
+		});
+		await readsMatch('a replayed nonce moved no state', {
+			nonces: [account.address],
+			balances: [account.address, VALUE_SINK_ADDR],
+		});
+	}
+
+	// 20) AN UNAFFORDABLE TRANSACTION IS REFUSED — AND THE SAME ONE MINES ONCE THE
+	//     SENDER CAN PAY, which is what makes the refusal a statement about FUNDS
+	//     rather than about that sender, that recipient or that call site.
+	//
+	//     ONE TRANSACTION, THREE BALANCES, and the third is the boundary: the sender
+	//     holds NOTHING (refused), then EXACTLY ONE WEI LESS than the transaction's
+	//     upfront cost `gasLimit * maxFeePerGas + value` (refused — and note the MAX
+	//     fee, since a sender must cover the whole gas limit at the price it OFFERED,
+	//     not at the price it will be charged), then exactly that cost (MINED). Same
+	//     transaction bytes every time, so nothing but the balance moved between the
+	//     refusal and the receipt.
+	//
+	//     ...AND THE SENDER ENDS HOLDING NOTHING, because a 21,000-gas transfer at
+	//     the fee cap is charged its whole upfront cost: a reading only correct fee
+	//     arithmetic produces, and one no partial refund of the unused gas allowance
+	//     could survive.
+	{
+		const m: string[] = [];
+		const value = 1n;
+		const gas = 21_000n;
+		const upfront = gas * COMMON_FEES.maxFeePerGas + value;
+		const poor = unfundedAccount.address;
+		// The fixture is CHECKED, not assumed: a sender that had somehow acquired a
+		// balance would make the refusals below mean something else entirely.
+		cmp(
+			m,
+			'the unfunded sender holds nothing',
+			await balanceOf(node, poor),
+			0n,
+		);
+		const raw = await sign1559Unfunded({
+			nonce: 0,
+			to: VALUE_SINK_ADDR,
+			value,
+			gas,
+		});
+		/** Offer the SAME transaction to both chains and read what each did. */
+		const offerToBoth = async (at: string) => {
+			const blockBefore = await blockNumberOf(node);
+			const nodeOutcome = await submitTo(node, raw);
+			const refOutcome = await offerToReference(raw);
+			cmp(m, `the node, ${at}`, nodeOutcome.outcome, 'refused');
+			cmp(m, `the reference runTx, ${at}`, refOutcome.outcome, 'refused');
+			cmp(
+				m,
+				`no block was mined, ${at}`,
+				await blockNumberOf(node),
+				blockBefore,
+			);
+			cmp(m, `the sender's nonce, ${at}`, await nonceOf(node, poor), 0n);
+		};
+		/** ...and one funding transfer, mined on both chains and diffed. */
+		const fund = async (label: string, amount: bigint) => {
+			const fundRaw = await sign1559({
+				nonce: ctx.nonce,
+				to: poor,
+				value: amount,
+				gas: 21_000n,
+			});
+			await oneTxBlock(label, fundRaw);
+			ctx.nonce++;
+		};
+		await offerToBoth('holding nothing');
+		await readsMatch('an unaffordable transaction moved no state', {
+			balances: [poor],
+			nonces: [poor],
+		});
+		// ---- one wei short of the upfront cost: still refused ----
+		await fund('fund the sender one wei short', upfront - 1n);
+		cmp(
+			m,
+			'the sender is one wei short',
+			await balanceOf(node, poor),
+			upfront - 1n,
+		);
+		await offerToBoth('one wei short');
+		// ---- ...and that last wei is the whole difference ----
+		await fund('fund the sender the last wei', 1n);
+		const nr = await oneTxBlock('the same transaction, now affordable', raw);
+		cmp(m, 'the funded retry mines', nr.status, '0x1');
+		cmp(m, 'it cost exactly its gas limit', BigInt(nr.gasUsed), gas);
+		cmp(
+			m,
+			'and the sender is left with nothing',
+			await balanceOf(node, poor),
+			0n,
+		);
+		steps.push({
+			label:
+				'an unaffordable transaction is refused, and mines once the sender can pay',
+			mismatches: m,
+		});
+		await readsMatch('the funded retry post-state', {
+			balances: [poor, VALUE_SINK_ADDR],
+			nonces: [poor],
+		});
+	}
+
+	// 21) A STORAGE-CLEARING REFUND, PRICED AT THE EFFECTIVE GAS PRICE.
+	//
+	//     WHY THIS IS THE VALUABLE ONE. A refund is not a receipt field: it is
+	//     subtracted from `gasUsed` before the sender is charged, so a second
+	//     implementation that values it at the BASE fee (or credits it to the
+	//     coinbase, or applies EIP-3529's cap differently) leaves the sender's
+	//     balance short by `refund * tip` while every field on the receipt still
+	//     reads perfectly. Nothing else in this battery clears a slot, so no other
+	//     step exercises the arithmetic at all.
+	//
+	//     THREE TRANSACTIONS, and the third is what makes the second mean anything:
+	//     write a non-zero value, write zero over it (the clear, and the refund),
+	//     then write zero over the now-zero slot. The last one clears nothing and is
+	//     refunded nothing, so it must cost MORE than the transaction that did —
+	//     without it, this step would hold on a chain where refunds do not exist.
+	//     All three receipts are diffed against the trie-backed reference field by
+	//     field, so the net `gasUsed` a refund produces is judged by an EVM rather
+	//     than by a number written here.
+	//
+	//     ...AND THE PRICE IS READ OFF THE MONEY, not off the receipt: the sender's
+	//     balance drop across the clearing transaction must be exactly
+	//     `gasUsed * effectiveGasPrice`, both taken from that receipt. (./fees.ts
+	//     asks the same question of BALANCES on a hand-built fee market and pins the
+	//     literals; what this step adds is the same money statement inside the
+	//     reference differential, where the net `gasUsed` it is computed from has
+	//     been diffed against `@ethereumjs/vm` on the node's own default fees.)
+	{
+		const m: string[] = [];
+		const storeCall = (val: bigint) =>
+			encodeFunctionData({
+				abi: probeAbi,
+				functionName: 'store',
+				args: [REFUND_SLOT, val],
+			});
+		const write = async (label: string, val: bigint) => {
+			const raw = await sign1559({
+				nonce: ctx.nonce,
+				to: ctx.probeAddr,
+				data: storeCall(val),
+				gas: 200_000n,
+			});
+			const rcpt = await oneTxBlock(label, raw);
+			ctx.nonce++;
+			return rcpt;
+		};
+		await write('refund-setup(store a non-zero slot)', REFUND_VALUE);
+		// The slot really does hold something, so the next transaction really clears.
+		const slotBefore = (await node.request({
+			method: 'eth_getStorageAt',
+			params: [ctx.probeAddr!, '0x' + REFUND_SLOT.toString(16), 'latest'],
+		})) as string;
+		if (BigInt(slotBefore) === 0n)
+			m.push(
+				`slot ${REFUND_SLOT} is already zero, so the transaction below clears nothing`,
+			);
+		const paidBefore = await balanceOf(node, account.address);
+		const cleared = await write('refund-clear(write zero over it)', 0n);
+		const paidAfter = await balanceOf(node, account.address);
+		cmp(
+			m,
+			'the sender paid gasUsed * effectiveGasPrice',
+			paidBefore - paidAfter,
+			BigInt(cleared.gasUsed) * BigInt(cleared.effectiveGasPrice),
+		);
+		// ...and that price is not the base fee, so valuing a refund at either is not
+		// the same arithmetic — the whole point of the assertion above.
+		if (BigInt(cleared.effectiveGasPrice) === BASE_FEE)
+			m.push(
+				'the effective gas price equals the base fee, so this step cannot tell a refund priced at one from the other',
+			);
+		const noop = await write('refund-noop(write zero over zero)', 0n);
+		if (BigInt(cleared.gasUsed) >= BigInt(noop.gasUsed))
+			m.push(
+				`the clearing tx cost ${BigInt(cleared.gasUsed)} gas and the same call against the now-zero slot cost ${BigInt(noop.gasUsed)}, so no refund happened`,
+			);
+		steps.push({
+			label: 'a storage-clearing refund is priced at the effective gas price',
+			mismatches: m,
+		});
+		await readsMatch('storage-clearing refund post-state', {
+			storage: [{addr: ctx.probeAddr!, slot: REFUND_SLOT}],
+			balances: [account.address],
+		});
+	}
+
+	// 22) ...AND WHO EXECUTED ALL OF THE ABOVE, stated rather than assumed.
+	//
+	//     THE FAILURE THIS STEP EXISTS FOR IS A VACUOUS PASS, and it is the only
+	//     failure in this file that would make every OTHER step pass. If the
+	//     transactions above quietly ran on the node's own `@ethereumjs/vm` while
+	//     the report still named the installed engine, the battery would be diffing
+	//     the reference against itself: every receipt identical, every post-state
+	//     read identical, zero mismatches, nothing measured. `engineId` cannot see
+	//     it — that is what the node was BUILT with — so the count comes from a
+	//     wrapper in front of the injected engine's `transact`
+	//     ({@link countingEngines}), across every node this battery built.
+	//
+	//     ONLY WITH AN ENGINE INSTALLED. Without one the node builds its own default
+	//     engine inside `createNode()`, which nothing out here can wrap — and there
+	//     is nothing to prove either, since that engine IS the reference EVM. The
+	//     absence is asserted in `conformance.spec.ts` so it reads as deliberate.
+	if (transactionsByEngine) {
+		const m: string[] = [];
+		cmp(
+			m,
+			'engines that executed transactions',
+			Object.keys(transactionsByEngine),
+			[node.engine.id],
+		);
+		// Named explicitly as well as excluded by the line above, because THIS is the
+		// reading that means the battery measured nothing.
+		cmp(
+			m,
+			`transactions executed on the default '${DEFAULT_ENGINE_ID}' engine`,
+			transactionsByEngine[DEFAULT_ENGINE_ID] ?? 0,
+			0,
+		);
+		const executed = transactionsByEngine[node.engine.id] ?? 0;
+		if (executed < MIN_TRANSACTIONS_ON_THE_ENGINE)
+			m.push(
+				`only ${executed} transactions reached the engine '${node.engine.id}', fewer than the ${MIN_TRANSACTIONS_ON_THE_ENGINE} this battery mines — so most of it ran somewhere else`,
+			);
+		steps.push({
+			label: 'every transaction ran on the installed engine',
+			mismatches: m,
+		});
+	}
+
 	const engineId = node.engine.id;
 	await node.dispose();
 
 	const totalMismatches = steps.reduce((n, s) => n + s.mismatches.length, 0);
-	return {stateMode, engineId, steps, totalMismatches};
+	return {stateMode, engineId, transactionsByEngine, steps, totalMismatches};
 }
 
 export async function runConformance(): Promise<{

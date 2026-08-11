@@ -110,6 +110,22 @@ test('slim-node differential conformance vs trie-backed @ethereumjs/vm reference
 		);
 	}
 
+	// The THREE NEGATIVE CASES ran too, in both modes. Their oracle IS the
+	// trie-backed reference — the same `runTx` refuses the same two transactions,
+	// and the refund's receipt and post-state are diffed against it field by field
+	// — but each also carries an absolute statement the reference cannot make (no
+	// block was mined; the sender ends at exactly zero; a refund really happened),
+	// so they are named rather than counted.
+	for (const mode of ['none', 'trie'] as const) {
+		for (const label of [
+			'a replayed nonce is refused, and nothing moved',
+			'an unaffordable transaction is refused, and mines once the sender can pay',
+			'a storage-clearing refund is priced at the effective gas price',
+		]) {
+			expect(c[mode].steps.map((s: any) => s.label)).toContain(label);
+		}
+	}
+
 	// The BLOCK-GAS-LIMIT step ran too, in both modes, and it is the third step
 	// whose oracle is NOT the reference: this file's reference `runTx` passes
 	// `skipBlockGasLimitValidation` itself, so a node that went back to mining a
@@ -119,6 +135,22 @@ test('slim-node differential conformance vs trie-backed @ethereumjs/vm reference
 	for (const mode of ['none', 'trie'] as const) {
 		expect(c[mode].steps.map((s: any) => s.label)).toContain(
 			'block gas limit refuses an over-limit tx; blockGasLimit lifts it',
+		);
+	}
+
+	// AND NOTHING WAS RECORDED AT THE SEAM, because there is nothing to record
+	// here: this battery installs no engine, so the node builds its own default
+	// `@ethereumjs/evm` and no recorder can sit in front of it (the battery says so
+	// itself — `transactionsByEngine` in test/helpers/conformance.ts). Asserted so
+	// the `null` reads as the deliberate absence it is rather than as a recorder
+	// that quietly stopped counting; the engine-parameterised run
+	// (revm-conformance.spec.ts) is where the recording is the point.
+	expect(c.none.transactionsByEngine).toBeNull();
+	expect(c.trie.transactionsByEngine).toBeNull();
+	// ...and the step that reports it is likewise absent, for the same reason.
+	for (const mode of ['none', 'trie'] as const) {
+		expect(c[mode].steps.map((s: any) => s.label)).not.toContain(
+			'every transaction ran on the installed engine',
 		);
 	}
 });

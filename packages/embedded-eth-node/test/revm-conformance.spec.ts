@@ -8,9 +8,13 @@
  * changes here is WHICH EVM answers, and it answers everything: `eth_call` return
  * data, `eth_estimateGas`, and every mined transaction — deploys, storage writes,
  * logs, a real EIP-2930 access list, a legacy fee, a revert, two transactions in
- * one block — executed and COMMITTED by revm against the node's own state. So
- * this file is where a revm-executed chain is asserted to be the SAME chain as an
- * `@ethereumjs/vm` one, receipt for receipt and account for account.
+ * one block, a storage-clearing refund — executed and COMMITTED by revm against
+ * the node's own state, plus the two it must REFUSE (a replayed nonce, a sender
+ * who cannot pay), which the reference `runTx` refuses too. So this file is where
+ * a revm-executed chain is asserted to be the SAME chain as an `@ethereumjs/vm`
+ * one, receipt for receipt and account for account — and where the battery is
+ * held to having actually executed those transactions on revm, rather than
+ * reporting that it did.
  *
  * STATE-MODE COVERAGE IS EXPLICIT, and it is the shipped engine's refusal that
  * decides the split, not a convenience:
@@ -64,12 +68,33 @@ test('differential conformance with the revm engine installed (stateMode:none)',
 		);
 	}
 	console.log('[revm-conformance] refusals:', JSON.stringify(c.refusals));
+	console.log(
+		'[revm-conformance] transactions by engine:',
+		JSON.stringify(served.transactionsByEngine),
+	);
 
 	expect(r.errors).toEqual([]);
 
 	// The battery really ran ON REVM (not silently on the default engine).
 	expect(served.engineId).toBe('revm-wasm');
 	expect(served.stateMode).toBe('none');
+
+	// ...AND ITS TRANSACTIONS REALLY EXECUTED THERE, COUNTED AT THE SEAM rather
+	// than inferred from the line above.
+	//
+	// THE FAILURE MODE THIS EXISTS FOR IS A VACUOUS PASS. `engineId` is what the
+	// node was BUILT with; it would still say `revm-wasm` if the mining path went
+	// back to running `@ethereumjs/vm` itself, and then every receipt diff below
+	// would pass while comparing that reference against itself — a whole battery
+	// proving nothing, silently. So the battery counts the transactions each engine
+	// was actually handed (`transactionsByEngine`, recorded by a wrapper in front
+	// of the injected engine) and this is the assertion that reads it: revm
+	// executed them, the default engine executed NONE, and there were a great many
+	// of them rather than one.
+	expect(served.transactionsByEngine).not.toBeNull();
+	expect(Object.keys(served.transactionsByEngine)).toEqual(['revm-wasm']);
+	expect(served.transactionsByEngine['@ethereumjs/evm']).toBeUndefined();
+	expect(served.transactionsByEngine['revm-wasm']).toBeGreaterThanOrEqual(20);
 
 	// Field-by-field equality against the trie-backed reference → zero diffs.
 	expect(served.totalMismatches).toBe(0);
@@ -134,6 +159,26 @@ test('differential conformance with the revm engine installed (stateMode:none)',
 	expect(labels).toContain(
 		'block gas limit refuses an over-limit tx; blockGasLimit lifts it',
 	);
+	// ...and the THREE NEGATIVE CASES, which are transaction-path statements this
+	// engine could not be held to until it had a write half: a replayed nonce and
+	// an unaffordable transaction refused by the node AND by the reference `runTx`
+	// alike, and a storage-clearing REFUND whose net `gasUsed` and whose price are
+	// diffed against that reference. The refund is the one that earns its place:
+	// it is charged at the EFFECTIVE gas price, so a second implementation valuing
+	// it at the base fee leaves the sender short while every receipt field still
+	// reads correctly.
+	expect(labels).toContain('a replayed nonce is refused, and nothing moved');
+	expect(labels).toContain(
+		'an unaffordable transaction is refused, and mines once the sender can pay',
+	);
+	expect(labels).toContain(
+		'a storage-clearing refund is priced at the effective gas price',
+	);
+	// ...and the step that STATES who executed all of the above, named here for the
+	// same reason every other absolute step is: counting steps would not notice it
+	// going away, and it is the one that stands between this file and a vacuous
+	// pass.
+	expect(labels).toContain('every transaction ran on the installed engine');
 
 	// ...and the OTHER state mode is refused rather than covered here — which is
 	// exactly why `conformance.spec.ts` keeps running it on the default engine.
