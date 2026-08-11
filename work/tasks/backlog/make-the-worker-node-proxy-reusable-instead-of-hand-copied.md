@@ -14,13 +14,27 @@ covers: []
 
 That is exactly the block which silently dropped `senderMode` once, reading as `undefined` on a property typed `'recover' | 'trusted'`, hidden from the compiler by `worker-client`'s `as any`. There are now three copies of it (the package's, the example's, and every consumer's), so the same omission can recur in any of them independently. The new spec asserts `stateMode`, `senderMode` and `engine` on the example, so those three would be caught there; a plain field added to `SlimNode` in future would not.
 
-`workerApi` is already exported, so the smallest honest fix keeps the side effect where it is and lets a consumer COMPOSE the rest: export a factory (a `createWorkerApi({engine})`-shaped thing), or move the `expose()` call into a thin `worker-entry` wrapper around an exposable module. Weigh a parity assertion as the cheaper alternative: a test that fails when a plain `SlimNode` field is missing from the proxy would catch the recurrence without changing the published surface. Prefer removing the duplication if it can be done without making the core name engines by string, which ADR 0006 refuses.
+**THE DIRECTION IS DECIDED (maintainer, 2026-08-11): ship the EXPORT.** The package should make revm-in-a-Worker easy rather than leaving every consumer to hand-copy a proxy block. Do not implement the parity-assertion alternative instead; a single shared proxy solves the future-field problem structurally, by there being one copy rather than a test that watches three.
+
+The shape: keep the side effect where it is, and let a consumer COMPOSE the rest. Split `worker-entry` into an exposable module plus a thin wrapper that calls `expose()`, and export a factory that takes the ENGINE the worker thread built. The consumer's whole worker module should then reduce to roughly three lines, something in the spirit of:
+
+```ts
+import {exposeNode} from 'embedded-eth-node/worker-entry';
+import {createRevmEngine} from 'embedded-eth-node/revm';
+import wasm from 'revm-wasm/revm.wasm';
+
+exposeNode({engine: () => createRevmEngine({wasm})});
+```
+
+Treat that sketch as the INTENT, not the required signature; pick the naming and the exact form that fit this package, and say why. Two things it must get right whatever the shape: the main thread keeps passing its own options (`chainId`, `miningConfig`, and the rest) through `createWorkerNode()` unchanged, while the ENGINE is supplied entirely on the worker side, and accepting a lazy supplier (a function returning a promise) rather than only a built engine is worth it, because building the engine is async and belongs inside the factory's own await.
 
 **2. The file a consumer is told to copy is not in the tarball.** The README links the example at `packages/embedded-eth-node/test/helpers/revm-worker.ts`, and `package.json`'s `files` is `[dist, src]`, so it is absent from the published package and the link resolves only on GitHub. That matches the existing `docs/spikes/` links in the README, so it may be acceptable, but those are reference material a reader browses, whereas this one is a file the text tells them to COPY. Decide deliberately: ship it, or reword the README so it is clearly a GitHub reference rather than something in their `node_modules`.
 
 ## Acceptance criteria
 
-- [ ] A consumer can write the README's revm worker module without hand-copying the `SlimNode` proxy block, OR a test fails when a plain `SlimNode` field is missing from a proxy, so the `senderMode` class of omission cannot silently recur.
+- [ ] The package EXPORTS something that lets a consumer host a revm-backed node in a Worker without hand-copying the `SlimNode` proxy block. The proxy exists in exactly ONE place in the package.
+- [ ] The existing example (`test/helpers/revm-worker.ts`) is rewritten to USE that export, so the duplication is gone rather than merely avoidable, and it stays the file the README points at.
+- [ ] The main thread's options still flow through `createWorkerNode()` unchanged, and the engine is supplied purely on the worker side; an engine passed from the main thread is still refused as it is today.
 - [ ] If the published surface changes, `worker-entry`'s existing import-time `expose()` behaviour still works unchanged for consumers who rely on it today.
 - [ ] The core still does NOT name engines by string or import them, per ADR 0006; a JS-only consumer's bundle is unaffected.
 - [ ] The README's pointer to the example is either backed by a file the published package actually contains, or reworded so it is unambiguously a repository reference.
@@ -43,4 +57,8 @@ That is exactly the block which silently dropped `senderMode` once, reading as `
 >
 > Note the history: this exact proxy block silently dropped `senderMode` once, and `worker-client`'s `as any` hid it from the compiler. Whatever you build, make that recurrence impossible rather than merely unlikely, and prefer a mechanism that covers a field added in future over one that enumerates today's fields.
 >
-> A parity assertion is a legitimate answer and may be the better one; it changes no published surface. Weigh it honestly against the factory rather than assuming the bigger change is the right one.
+> The maintainer has DECIDED to ship the export, so do not substitute the parity-assertion alternative. Making one shared proxy is what removes the recurrence, because there is then one copy rather than three under a watch.
+>
+> Backward compatibility is a hard requirement: a consumer who today does `import 'embedded-eth-node/worker-entry'` for its import-time `expose()` must keep working untouched, and `workerApi` must remain exported. This is additive.
+>
+> The engine must be supplied BY THE WORKER THREAD, never imported by the core. If your design has the package importing `./revm.js` from a core path, it is wrong: that is precisely what ADR 0006 refuses and it would put revm in a JS-only consumer's bundle.
