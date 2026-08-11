@@ -5,11 +5,17 @@
  *  2. runtime `evm_set*` cheats round-trip in BOTH state modes;
  *  3. measure + report the trie-vs-none perf delta (the price of a real
  *     Merkle-Patricia root).
+ *
+ * (1) and (2) also run on `embedded-eth-node/revm` (`revm-genesis-cheats.spec.ts`),
+ * against the SAME literals (./genesis-cheats-expected.ts). (3) does not: it is a
+ * comparison BETWEEN the state modes and needs a `'trie'` node, which that engine
+ * refuses at construction.
  */
 import {test, expect} from '@playwright/test';
 import {fileURLToPath} from 'node:url';
 import {dirname, resolve} from 'node:path';
 import {mountHarness} from 'playwright-browser-harness';
+import {GENESIS_CHEATS} from './genesis-cheats-expected.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const cut = resolve(here, './helpers/cut.ts');
@@ -31,19 +37,25 @@ test('custom genesis + runtime cheats + trie-vs-none perf', async ({page}) => {
 	expect(r.errors).toEqual([]);
 
 	// (1) custom genesis
-	expect(s.customGenesis.eoaBalance).toBe((1234n * 10n ** 18n).toString());
-	expect(s.customGenesis.eoaNonce).toBe('7');
+	expect(s.customGenesis.eoaBalance).toBe(GENESIS_CHEATS.eoaBalance);
+	expect(s.customGenesis.eoaNonce).toBe(GENESIS_CHEATS.eoaNonce);
 	expect(s.customGenesis.preDeployedCodePresent).toBe(true);
-	expect(s.customGenesis.preDeployedNumber).toBe('41'); // seeded storage slot 0
-	expect(s.customGenesis.numberAfterIncrement).toBe('42'); // increment() worked
+	// seeded storage slot 0
+	expect(s.customGenesis.preDeployedNumber).toBe(
+		GENESIS_CHEATS.preDeployedNumber,
+	);
+	// increment() worked
+	expect(s.customGenesis.numberAfterIncrement).toBe(
+		GENESIS_CHEATS.numberAfterIncrement,
+	);
 
 	// (2) runtime cheats, both modes
 	for (const mode of ['none', 'trie'] as const) {
 		const c = s.cheats[mode];
-		expect(c.balance).toBe((5n * 10n ** 18n).toString());
-		expect(c.nonce).toBe('42');
-		expect(c.code).toBe('0x60016002');
-		expect(c.storageSlot7).toBe('99');
+		expect(c.balance).toBe(GENESIS_CHEATS.cheatBalance);
+		expect(c.nonce).toBe(GENESIS_CHEATS.cheatNonce);
+		expect(c.code).toBe(GENESIS_CHEATS.cheatCode);
+		expect(c.storageSlot7).toBe(GENESIS_CHEATS.cheatStorageSlot7);
 	}
 
 	// (3) perf: both produce correct outputs; trie has a real root, none throws.

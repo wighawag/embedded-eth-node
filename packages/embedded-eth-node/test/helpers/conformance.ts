@@ -531,8 +531,12 @@ const MIN_TRANSACTIONS_ON_THE_ENGINE = 20;
  * is still a transaction that ran nowhere else. The wrapper delegates and adds
  * nothing else: same `id`, same `connect` (only when the engine has one, so an
  * engine that needs no connection is not given a fake one), same `call`.
+ *
+ * EXPORTED for any suite that installs an engine and would otherwise have no way
+ * to tell a real run from a vacuous one (./state-roundtrip.ts uses it). The
+ * counter object is the CALLER's, so one count can span every node a suite builds.
  */
-function countingEngines(
+export function countingEngines(
 	makeEngine: EngineFactory,
 	transactionsByEngine: Record<string, number>,
 ): EngineFactory {

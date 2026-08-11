@@ -518,6 +518,23 @@ the repo's strongest correctness bar rather than a softer one of its own. Nothin
 is relaxed for it: `test/conformance.spec.ts` still runs both modes on the
 default engine, unchanged.
 
+The node's own state-owning features are held to that same bar rather than
+assumed to survive: `dumpState`, `loadState`, IndexedDB persistence and the
+`evm_set*` cheats run with the revm engine installed, through the suites that
+already covered them — parameterised by engine and asserting exactly what they
+asserted before (`test/revm-persistence-reload.spec.ts`,
+`test/revm-genesis-cheats.spec.ts`). Two cases are new, and both are about a
+WRITE crossing a transaction boundary (`test/state-roundtrip.spec.ts` and
+`test/revm-state-roundtrip.spec.ts`): a cheat applied BETWEEN two transactions
+must be seen by the next one, and a `dumpState` taken AFTER one must reload into
+a fresh node that keeps behaving — the same receipt and the same post-state for
+the same signed transaction. Every other differential above lives inside ONE
+transaction and would pass unchanged for an engine that cached state between
+them; these two would not, and neither failure throws (measured with the cheats
+skipped, in
+`docs/spikes/every-node-feature-survives-a-revm-write-engine/measurements.md`:
+success receipts, empty mismatches, and only the absolute readings move).
+
 ## Development
 
 ```sh

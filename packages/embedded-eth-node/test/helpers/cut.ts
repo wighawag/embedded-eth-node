@@ -25,8 +25,15 @@
  *   - 'conformance'        : differential vs a trie-backed @ethereumjs/vm runTx
  *   - 'statetest'          : real ethereum/tests GeneralStateTests vs trie mode
  *   - 'viem-surface'       : a typical viem/wagmi lifecycle + method-gap report
- *   - 'genesis-cheats-perf': custom genesis + evm_set* cheats + trie-vs-none perf
- *   - 'persist-reload'     : IndexedDB persistence + eth_getLogs across a reload
+ *   - 'genesis-cheats-perf': custom genesis + evm_set* cheats + trie-vs-none perf.
+ *                            ENGINE-PARAMETERISED: the genesis + cheats halves run
+ *                            on revm through ./cut-revm.ts
+ *   - 'state-roundtrip'    : the cheats and dumpState/loadState ACROSS a transaction
+ *                            boundary. ENGINE-PARAMETERISED: the same suite runs on
+ *                            revm through ./cut-revm.ts
+ *   - 'persist-reload'     : IndexedDB persistence + eth_getLogs across a reload.
+ *                            ENGINE-PARAMETERISED: the same suite runs on revm
+ *                            through ./cut-revm.ts
  *   - 'worker'             : the comlink Worker wrapper (same API, non-blocking)
  *
  * The cross-backend PERFORMANCE benchmark (vs raw @ethereumjs/* and tevm) lives in
@@ -48,6 +55,7 @@ import {runConformance} from './conformance.js';
 import {viemSurfaceProbe} from './viem-surface.js';
 import {runStateTests} from './statetest.js';
 import {runGenesisCheatsPerf} from './genesis-cheats-perf.js';
+import {runStateRoundTrip} from './state-roundtrip.js';
 import {persistWrite, persistRead} from './persistence-reload.js';
 
 const cut: CodeUnderTest = {
@@ -118,6 +126,19 @@ const cut: CodeUnderTest = {
 				} else {
 					results.read = await persistRead(String(ctx.params.address));
 				}
+			} catch (e) {
+				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
+			}
+			return {results, timings, errors, env: captureEnv()};
+		}
+
+		// state-roundtrip: the state-owning features ACROSS a transaction boundary —
+		// the four evm_set* cheats applied BETWEEN two transactions and observed by the
+		// execution of the next one, and a dumpState taken AFTER a transaction reloaded
+		// into a fresh node that then keeps behaving identically.
+		if (ctx.params.mode === 'state-roundtrip') {
+			try {
+				results.stateRoundTrip = await runStateRoundTrip();
 			} catch (e) {
 				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
 			}

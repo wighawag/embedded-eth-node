@@ -13,6 +13,18 @@
  *  3. TRIE vs NONE PERF: run the SAME deploy + N increments in `stateMode:'none'`
  *     and `stateMode:'trie'` and report the per-call / deploy timing delta (trie
  *     pays for a real Merkle-Patricia root each block; none does not).
+ *
+ * ENGINE-PARAMETERISED for (1) and (2), like the conformance battery: state stays
+ * the node's on every engine (ADR 0010), so a custom genesis and the `evm_set*`
+ * cheats must behave identically whichever EVM is installed, and
+ * {@link runGenesisCheatsOnEngine} runs those two halves on an injected engine
+ * rather than duplicating them for it.
+ *
+ * (3) IS NOT ENGINE-PARAMETERISED, and that is a property of what it measures
+ * rather than an omission: it is a comparison BETWEEN THE TWO STATE MODES, so it
+ * needs a node in `stateMode:'trie'` — which `embedded-eth-node/revm` refuses at
+ * construction (ADR 0005). Engine performance is measured in `packages/benchmarks`,
+ * which is where this repo keeps numbers it looks at.
  */
 import {
 	createWalletClient,
@@ -22,6 +34,7 @@ import {
 } from 'viem';
 import {privateKeyToAccount} from 'viem/accounts';
 import {createNode, type SlimNode, type StateMode} from '../../src/index.js';
+import type {EngineFactory} from './conformance.js';
 import {counterAbi, counterBytecode} from './counter.js';
 
 const PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
@@ -37,11 +50,12 @@ const chain = {
 // The deployed runtime bytecode of Counter (constructor stripped). We get this by
 // reading getCode after a normal deploy; hardcoding here would be brittle, so the
 // custom-genesis check deploys ONCE in a throwaway node to capture runtime code.
-async function counterRuntimeCode(): Promise<string> {
+async function counterRuntimeCode(makeEngine?: EngineFactory): Promise<string> {
 	const n = await createNode({
 		chainId: CHAIN_ID,
 		miningConfig: {type: 'auto'},
 		initialBalances: {[account.address]: 10n ** 24n},
+		engine: await makeEngine?.(),
 	});
 	const transport = custom(
 		{request: ({method, params}: any) => n.request({method, params})},
@@ -63,20 +77,31 @@ async function counterRuntimeCode(): Promise<string> {
 	return code;
 }
 
+/** What (1) reports: a node booted from an arbitrary `initialState`. */
+export interface CustomGenesisReadings {
+	eoaBalance: string;
+	eoaNonce: string;
+	preDeployedCodePresent: boolean;
+	preDeployedNumber: string; // storage slot 0 we seeded == 41, then +1 = 42
+	numberAfterIncrement: string;
+	/** Which EVM the node came up on, so a run on the wrong engine is visible. */
+	engineId: string;
+}
+
+/** What (2) reports, per state mode: the four `evm_set*` cheats, read back. */
+export interface CheatReadings {
+	balance: string;
+	nonce: string;
+	code: string;
+	storageSlot7: string;
+	engineId: string;
+}
+
 export interface GenesisCheatsPerfReport {
 	// (1) custom genesis
-	customGenesis: {
-		eoaBalance: string;
-		eoaNonce: string;
-		preDeployedCodePresent: boolean;
-		preDeployedNumber: string; // storage slot 0 we seeded == 41, then +1 = 42
-		numberAfterIncrement: string;
-	};
+	customGenesis: CustomGenesisReadings;
 	// (2) runtime cheats (per mode)
-	cheats: Record<
-		StateMode,
-		{balance: string; nonce: string; code: string; storageSlot7: string}
-	>;
+	cheats: Record<StateMode, CheatReadings>;
 	// (3) perf
 	perf: {
 		none: {deployMs: number; avgCallMs: number; getRootThrows: boolean};
@@ -89,13 +114,22 @@ export interface GenesisCheatsPerfReport {
 const PRE_ADDR = '0x00000000000000000000000000000000c0ffee01';
 const RICH_EOA = '0x00000000000000000000000000000000dec0de02';
 
-export async function runGenesisCheatsPerf(): Promise<GenesisCheatsPerfReport> {
-	const runtimeCode = await counterRuntimeCode();
+/**
+ * (1) CUSTOM GENESIS, on whichever engine is installed. A node booted from an
+ * arbitrary `initialState` — funded EOAs with nonces and a PRE-DEPLOYED contract
+ * carrying code AND storage — is read through a viem client, and the pre-deployed
+ * contract is CALLED, so the genesis code and storage have to reach EXECUTION and
+ * not merely `eth_getCode`.
+ */
+async function customGenesisChecks(
+	makeEngine?: EngineFactory,
+): Promise<CustomGenesisReadings> {
+	const runtimeCode = await counterRuntimeCode(makeEngine);
 
-	// ---------- (1) CUSTOM GENESIS ----------
 	const genesisNode = await createNode({
 		chainId: CHAIN_ID,
 		miningConfig: {type: 'auto'},
+		engine: await makeEngine?.(),
 		initialState: {
 			// the signing account, funded, so it can send the increment tx
 			[account.address]: {balance: 10n ** 24n, nonce: 0n},
@@ -150,60 +184,82 @@ export async function runGenesisCheatsPerf(): Promise<GenesisCheatsPerfReport> {
 			functionName: 'number',
 		})
 	).toString();
+	const engineId = genesisNode.engine.id;
 	await genesisNode.dispose();
 
-	const customGenesis = {
+	return {
 		eoaBalance: BigInt(eoaBalance).toString(),
 		eoaNonce: BigInt(eoaNonce).toString(),
 		preDeployedCodePresent: preCode.length > 2,
 		preDeployedNumber: preNumber,
 		numberAfterIncrement: afterInc,
+		engineId,
 	};
+}
+
+/**
+ * (2) THE RUNTIME CHEATS, in ONE state mode, on whichever engine is installed. The
+ * `evm_set*` methods mutate the node's live state with no transaction, and the
+ * readings come back through the standard `eth_get*` calls.
+ */
+async function cheatChecks(
+	mode: StateMode,
+	makeEngine?: EngineFactory,
+): Promise<CheatReadings> {
+	const n = await createNode({
+		chainId: CHAIN_ID,
+		stateMode: mode,
+		miningConfig: {type: 'auto'},
+		engine: await makeEngine?.(),
+	});
+	const target = '0x00000000000000000000000000000000ca11ab1e';
+	await n.request({
+		method: 'evm_setBalance',
+		params: [target, '0x' + (5n * 10n ** 18n).toString(16)],
+	});
+	await n.request({method: 'evm_setNonce', params: [target, '0x2a']}); // 42
+	await n.request({method: 'evm_setCode', params: [target, '0x60016002']});
+	await n.request({
+		method: 'evm_setStorageAt',
+		params: [target, '0x07', '0x' + 99n.toString(16)],
+	});
+	const readings: CheatReadings = {
+		balance: BigInt(
+			(await n.request({
+				method: 'eth_getBalance',
+				params: [target, 'latest'],
+			})) as string,
+		).toString(),
+		nonce: BigInt(
+			(await n.request({
+				method: 'eth_getTransactionCount',
+				params: [target, 'latest'],
+			})) as string,
+		).toString(),
+		code: (await n.request({
+			method: 'eth_getCode',
+			params: [target, 'latest'],
+		})) as string,
+		storageSlot7: BigInt(
+			(await n.request({
+				method: 'eth_getStorageAt',
+				params: [target, '0x07', 'latest'],
+			})) as string,
+		).toString(),
+		engineId: n.engine.id,
+	};
+	await n.dispose();
+	return readings;
+}
+
+export async function runGenesisCheatsPerf(): Promise<GenesisCheatsPerfReport> {
+	// ---------- (1) CUSTOM GENESIS ----------
+	const customGenesis = await customGenesisChecks();
 
 	// ---------- (2) RUNTIME CHEATS (both modes) ----------
 	const cheats = {} as GenesisCheatsPerfReport['cheats'];
 	for (const mode of ['none', 'trie'] as StateMode[]) {
-		const n = await createNode({
-			chainId: CHAIN_ID,
-			stateMode: mode,
-			miningConfig: {type: 'auto'},
-		});
-		const target = '0x00000000000000000000000000000000ca11ab1e';
-		await n.request({
-			method: 'evm_setBalance',
-			params: [target, '0x' + (5n * 10n ** 18n).toString(16)],
-		});
-		await n.request({method: 'evm_setNonce', params: [target, '0x2a']}); // 42
-		await n.request({method: 'evm_setCode', params: [target, '0x60016002']});
-		await n.request({
-			method: 'evm_setStorageAt',
-			params: [target, '0x07', '0x' + 99n.toString(16)],
-		});
-		cheats[mode] = {
-			balance: BigInt(
-				(await n.request({
-					method: 'eth_getBalance',
-					params: [target, 'latest'],
-				})) as string,
-			).toString(),
-			nonce: BigInt(
-				(await n.request({
-					method: 'eth_getTransactionCount',
-					params: [target, 'latest'],
-				})) as string,
-			).toString(),
-			code: (await n.request({
-				method: 'eth_getCode',
-				params: [target, 'latest'],
-			})) as string,
-			storageSlot7: BigInt(
-				(await n.request({
-					method: 'eth_getStorageAt',
-					params: [target, '0x07', 'latest'],
-				})) as string,
-			).toString(),
-		};
-		await n.dispose();
+		cheats[mode] = await cheatChecks(mode);
 	}
 
 	// ---------- (3) TRIE vs NONE PERF ----------
@@ -282,6 +338,39 @@ export async function runGenesisCheatsPerf(): Promise<GenesisCheatsPerfReport> {
 	};
 
 	return {customGenesis, cheats, perf};
+}
+
+export interface GenesisCheatsOnEngineReport {
+	/** The one mode this engine serves — both halves ran here. */
+	servedMode: StateMode;
+	customGenesis: CustomGenesisReadings;
+	cheats: CheatReadings;
+}
+
+/**
+ * (1) and (2) with an injected engine, in the one state mode that engine serves.
+ *
+ * Deliberately NOT "run every mode on every engine", following
+ * `runConformanceOnEngine`: an engine that cannot serve a mode says so at
+ * construction, and covering it anyway would mean either relaxing an assertion or
+ * running the mode on the default engine while claiming the engine was under test.
+ * The unparameterised {@link runGenesisCheatsPerf} keeps covering BOTH modes on the
+ * default engine, so no mode loses coverage — and the refusal itself is asserted in
+ * `revm-conformance.spec.ts`, where the mode split is decided.
+ *
+ * (3), the trie-vs-none perf comparison, is absent by construction: it needs a
+ * `stateMode:'trie'` node, which is the configuration an engine like this one
+ * refuses.
+ */
+export async function runGenesisCheatsOnEngine(opts: {
+	makeEngine: EngineFactory;
+	serves: StateMode;
+}): Promise<GenesisCheatsOnEngineReport> {
+	return {
+		servedMode: opts.serves,
+		customGenesis: await customGenesisChecks(opts.makeEngine),
+		cheats: await cheatChecks(opts.serves, opts.makeEngine),
+	};
 }
 
 function round(n: number): number {

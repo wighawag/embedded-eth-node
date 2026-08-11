@@ -16,12 +16,21 @@
  *
  * This is the canonical dapp scenario: persist a local chain to IndexedDB, reload
  * the tab, keep playing and keep querying event logs.
+ *
+ * ENGINE-PARAMETERISED, like the conformance battery and the trusted-sender suite:
+ * both phases take an optional engine factory, so the SAME flow runs on the default
+ * `@ethereumjs/evm` engine (`persistence-reload.spec.ts`) and on
+ * `embedded-eth-node/revm` (`revm-persistence-reload.spec.ts`) rather than being
+ * duplicated for it. Persistence is the node's, on either engine: state never left
+ * it (ADR 0010), so what is dumped after a transaction is what the engine wrote
+ * through the host callbacks and nothing else has to be collected first.
  */
 import {
 	createNode,
 	createIndexedDBPersistence,
 	type SlimNode,
 } from '../../src/index.js';
+import type {EngineFactory} from './conformance.js';
 import {
 	createWalletClient,
 	createPublicClient,
@@ -34,6 +43,18 @@ import {counterAbi, counterBytecode} from './counter.js';
 const PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const CHAIN_ID = 31337;
 const DB_NAME = 'slim-reload-test';
+
+/**
+ * Per-engine options. The DATABASE NAME is one of them, and not for tidiness:
+ * IndexedDB is per ORIGIN, so two runs of this flow sharing a database could have
+ * the second one's `read` phase load what the FIRST one persisted and report
+ * `loaded: true` without the engine under test having written anything. Each engine
+ * gets its own database, so a run only ever reads its own writes.
+ */
+export interface PersistenceOptions {
+	makeEngine?: EngineFactory;
+	db?: string;
+}
 const account = privateKeyToAccount(PK);
 const chain = {
 	id: CHAIN_ID,
@@ -57,6 +78,8 @@ function clientsFor(node: SlimNode) {
 }
 
 export interface WriteResult {
+	/** Which EVM the node came up on, so a run on the wrong engine is visible. */
+	engineId: string;
 	address: string;
 	number: string;
 	logCount: number;
@@ -66,12 +89,15 @@ export interface WriteResult {
 }
 
 /** phase 'write': build state + persist to IndexedDB, then report pre-reload facts. */
-export async function persistWrite(): Promise<WriteResult> {
+export async function persistWrite(
+	opts: PersistenceOptions = {},
+): Promise<WriteResult> {
 	const node = await createNode({
 		chainId: CHAIN_ID,
 		miningConfig: {type: 'auto'},
-		persistence: createIndexedDBPersistence({db: DB_NAME}),
+		persistence: createIndexedDBPersistence({db: opts.db ?? DB_NAME}),
 		initialBalances: {[account.address]: 10n ** 24n},
+		engine: await opts.makeEngine?.(),
 	});
 	const {pub, wallet} = clientsFor(node);
 
@@ -106,9 +132,11 @@ export async function persistWrite(): Promise<WriteResult> {
 	});
 	const feedBalance = (await pub.getBalance({address: XFER_TO})).toString();
 	const blockNumber = Number(await pub.getBlockNumber());
+	const engineId = node.engine.id;
 
 	await node.dispose();
 	return {
+		engineId,
 		address,
 		number,
 		logCount: logs.length,
@@ -119,6 +147,8 @@ export async function persistWrite(): Promise<WriteResult> {
 }
 
 export interface ReadResult {
+	/** Which EVM the POST-RELOAD node came up on. */
+	engineId: string;
 	loaded: boolean;
 	number: string;
 	blockNumber: number;
@@ -133,12 +163,16 @@ export interface ReadResult {
 }
 
 /** phase 'read' (after reload): fresh node auto-loads IndexedDB; re-query all. */
-export async function persistRead(address: string): Promise<ReadResult> {
+export async function persistRead(
+	address: string,
+	opts: PersistenceOptions = {},
+): Promise<ReadResult> {
 	const node = await createNode({
 		chainId: CHAIN_ID,
 		miningConfig: {type: 'auto'},
-		persistence: createIndexedDBPersistence({db: DB_NAME}),
+		persistence: createIndexedDBPersistence({db: opts.db ?? DB_NAME}),
 		// NOTE: no initialBalances — state must come ENTIRELY from IndexedDB.
+		engine: await opts.makeEngine?.(),
 	});
 	const {pub} = clientsFor(node);
 
@@ -190,8 +224,10 @@ export async function persistRead(address: string): Promise<ReadResult> {
 				).toString()
 			: '0';
 
+	const engineId = node.engine.id;
 	await node.dispose();
 	return {
+		engineId,
 		loaded,
 		number,
 		blockNumber,

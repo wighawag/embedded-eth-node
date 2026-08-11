@@ -33,6 +33,19 @@
  *                      EMPTY one, so the list is proven CHARGED (2,400 per address,
  *                      1,900 per key) and WARMED (the access inside execution costs
  *                      the warm price), which no cross-engine diff can see
+ *   - 'state-roundtrip': the SHARED state round trips (helpers/state-roundtrip.ts)
+ *                      — the four `evm_set*` cheats applied BETWEEN two revm
+ *                      transactions and observed by the execution of the next, and a
+ *                      `dumpState` taken AFTER one, reloaded into a fresh node that
+ *                      keeps behaving identically. The two moments a cache spanning
+ *                      a transaction would break, and nothing else does
+ *   - 'genesis-cheats': the SHARED custom-genesis + `evm_set*` halves
+ *                      (helpers/genesis-cheats-perf.ts) in the one state mode this
+ *                      engine serves. Its trie-vs-none perf half stays on the
+ *                      default engine, being a comparison BETWEEN the state modes
+ *   - 'persist-reload': the SHARED IndexedDB persistence flow
+ *                      (helpers/persistence-reload.ts) across a REAL page reload,
+ *                      with revm executing the transactions whose state is persisted
  *   - 'invalid-transactions': the SHARED refusal battery
  *                      (helpers/invalid-transactions.ts) — a replayed nonce, a
  *                      far-future nonce, an unaffordable transaction and a gas
@@ -52,6 +65,12 @@ import {runRevmPostState} from './revm-post-state.js';
 import {runRevmFees} from './revm-fees.js';
 import {runRevmAccessList} from './revm-access-list.js';
 import {runRevmInvalidTransactions} from './revm-invalid-transactions.js';
+import {runRevmStateRoundTrip} from './revm-state-roundtrip.js';
+import {runRevmGenesisCheats} from './revm-genesis-cheats.js';
+import {
+	runRevmPersistWrite,
+	runRevmPersistRead,
+} from './revm-persistence-reload.js';
 
 const cut: CodeUnderTest = {
 	name: 'embedded-eth-node/revm',
@@ -143,6 +162,49 @@ const cut: CodeUnderTest = {
 		if (ctx.params.mode === 'invalid-transactions') {
 			try {
 				results.revmInvalidTransactions = await runRevmInvalidTransactions();
+			} catch (e) {
+				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
+			}
+			return {results, timings, errors, env: captureEnv()};
+		}
+
+		// The SHARED state round trips, with the revm engine installed. Every other
+		// differential in this repo lives inside ONE transaction and would pass unchanged
+		// for an engine that cached state between them; a cheat applied BETWEEN two
+		// transactions and a dump taken AFTER one are the two moments that would not.
+		if (ctx.params.mode === 'state-roundtrip') {
+			try {
+				results.revmStateRoundTrip = await runRevmStateRoundTrip();
+			} catch (e) {
+				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
+			}
+			return {results, timings, errors, env: captureEnv()};
+		}
+
+		// The SHARED custom-genesis + cheat halves, with the revm engine installed. Both
+		// write the node's state with no transaction to announce them, so they are what an
+		// engine holding its own copy of state would execute AGAINST the wrong version of.
+		if (ctx.params.mode === 'genesis-cheats') {
+			try {
+				results.revmGenesisCheats = await runRevmGenesisCheats();
+			} catch (e) {
+				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
+			}
+			return {results, timings, errors, env: captureEnv()};
+		}
+
+		// The SHARED persistence flow, with the revm engine installed. phase 'write'
+		// builds + persists; the test reloads the page (wiping JS state); phase 'read'
+		// creates a fresh revm-backed node that auto-loads from IndexedDB — which is the
+		// harshest reader of a dump taken after a revm transaction, since nothing else
+		// survives the reload.
+		if (ctx.params.mode === 'persist-reload') {
+			try {
+				if (ctx.phase === 'write') {
+					results.write = await runRevmPersistWrite();
+				} else {
+					results.read = await runRevmPersistRead(String(ctx.params.address));
+				}
 			} catch (e) {
 				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
 			}

@@ -272,8 +272,18 @@ async function readAccount(
 	return out;
 }
 
-/** A `dumpState` reduced to what a STRUCTURAL comparison is about. */
-function structuralDump(dump: any): {
+/**
+ * A `dumpState` reduced to what a STRUCTURAL comparison is about: the same
+ * accounts, the same code, the same slots, the same values, with every key order
+ * removed by sorting.
+ *
+ * EXPORTED because it is the ONE definition of "two dumps are the same dump" in
+ * this repo, and a second copy of it would be a second opinion. ./state-roundtrip.ts
+ * compares a dump against the node it was RELOADED into with it, for the same
+ * reason this file compares one across engines: key order follows write order and
+ * is not part of the state.
+ */
+export function structuralDump(dump: any): {
 	accounts: [string, string][];
 	code: [string, string][];
 	storage: [string, [string, string][]][];
