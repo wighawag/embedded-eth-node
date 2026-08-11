@@ -16,6 +16,8 @@ covers: []
 
 **3. Added 2026-08-11 from Gate 2 on `the-conformance-differential-covers-transactions-on-revm`: the engine-execution bar is a FLOOR where an exact count is available.** That task added an assertion that transactions ran on the installed engine, pinned as `MIN_TRANSACTIONS_ON_THE_ENGINE = 20` (mirrored as a bare `20` literal in `test/revm-conformance.spec.ts`), while the battery actually hands the engine close to thirty. So a PARTIAL regression, say five of thirty reverting to an in-node path, still passes. The battery already knows exactly how many transactions it submitted, so asserting that number closes the slack at no cost. Remove the duplicated bare literal while you are there.
 
+**4. Added 2026-08-11 from Gate 2 on `every-node-feature-survives-a-revm-write-engine`: a vacuous field presented as evidence.** In `test/helpers/state-roundtrip.ts`, `cheats.secondTxNonce` is filled from the compile-time constant `CHEAT_SENDER_NONCE` and then asserted against that same constant in both specs. It cannot fail, while being documented as the cheated nonce the second transaction was accepted at, which is exactly the kind of assertion a reader counts as coverage and gets none from. The load-bearing evidence next to it is real (`cheatSenderNonceAfter`, read from the node via `eth_getTransactionCount`, plus the transaction being admitted at all), so the fix is to read the value from the node or drop the field rather than to add more around it.
+
 ## Acceptance criteria
 
 - [ ] The coupling the bloom-absence assertion depends on is enforced or made explicit, so that changing a probe function's address or topics cannot silently turn the assertion into a re-baselining exercise. Asserting the two transactions' log addresses and topics agree, at the point the baseline is taken, is sufficient.
@@ -23,6 +25,7 @@ covers: []
 - [ ] The engine-execution assertion pins the EXACT number of transactions the battery submitted rather than a floor, and the duplicated bare literal in the revm spec is gone.
 - [ ] The battery stays green on both engines and both state modes, with no step's meaning changed.
 - [ ] Reference gas is unchanged: `number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 returning `0x26812edce879c319b6c7baf99bf3c2f65aa4b81b023d72cd6dfc7ac31caafe5a`.
+- [ ] No assertion in the touched helpers compares a constant against itself; `secondTxNonce` is either read from the node or removed.
 - [ ] No changeset: test-only.
 
 ## Blocked by

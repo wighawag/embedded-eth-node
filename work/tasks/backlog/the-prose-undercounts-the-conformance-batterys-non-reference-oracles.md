@@ -22,6 +22,8 @@ Fix them together, since both are the same paragraph.
 
 **4. Added 2026-08-11: counting the comment blocks is now itself unreliable.** The newest step (every transaction ran on the installed engine) has NO reference oracle at all and carries no oracle block, so a recount driven by grepping those blocks will miss it. Two steps earlier also pin BOTH the node and the reference to a literal refusal rather than diffing one against the other, while their comment says the oracle IS the reference; that is stronger in practice, but it means a reference which stopped refusing would surface as that step failing rather than as a divergence. Prefer a formulation that survives this: describe which classes of question the reference can and cannot answer, rather than enumerating steps or trusting a comment census.
 
+**5. Added 2026-08-11: a loose generalisation now in the README.** The new state-round-trip paragraph, and the headers of the suites it describes, assert that every OTHER differential in this repo lives inside ONE transaction. That is not true as written: the conformance battery and the post-state differential each run many transactions against a single node. The accurate and narrower claim, which is what actually makes a write-through cache invisible to them, is that they never mutate state OUTSIDE a transaction. The substance of the argument survives; only the generalisation is wrong, and it is wrong in the README.
+
 ## Acceptance criteria
 
 - [ ] The prose account of the battery's oracles covers all THREE non-reference classes, on both surfaces that state it (the README and `CONTEXT.md`'s glossary), or states the count in a way that cannot go stale as steps are added.
@@ -29,6 +31,7 @@ Fix them together, since both are the same paragraph.
 - [ ] The README's clause is trimmed to the consumer-voice size the parent task asked for, leaning on the `CONTEXT.md` pointer it already carries rather than restating the glossary's reasoning.
 - [ ] `CONTEXT.md`'s glossary remains the full definition, and the two surfaces do not contradict each other.
 - [ ] It is stated which of the two post-state differentials owns which question, so a new post-state shape has an obvious home.
+- [ ] The README's claim about other differentials says they never mutate state outside a transaction, rather than that they live inside one transaction.
 - [ ] No changeset: documentation only.
 
 ## Blocked by
