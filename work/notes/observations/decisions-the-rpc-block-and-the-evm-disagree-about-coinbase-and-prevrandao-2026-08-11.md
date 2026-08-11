@@ -17,7 +17,7 @@ The done record's `## Decisions` block, kept here because the task body is moved
 
 **Rejected:** stating the omission in the README (it leaves a `blockEnv.coinbase` option whose value nothing reports, and would not have fixed the post-reload `eth_call`); reading the values off `sb.block` in `blockToRpc` without persisting them (right before a reload, zero after it — the trap the task named).
 
-**What it touches:** the RPC output of two methods (a consumer whose tooling read a constant zero `miner` now gets the configured one), the persisted format, and `packages/embedded-eth-node/README.md`'s RPC surface row. A `minor` changeset accompanies it.
+**What it touches:** the RPC output of two methods (a consumer whose tooling read a constant zero `miner` now gets the configured one), the persisted format, and `README.md (repo root)`'s RPC surface row. A `minor` changeset accompanies it.
 
 ## 2. The persisted format is BACKWARD-COMPATIBLE optional fields, `version` stays `1`
 
