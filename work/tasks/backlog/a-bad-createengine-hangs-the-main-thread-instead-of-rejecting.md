@@ -14,7 +14,9 @@ covers: []
 
 That is the opposite of what the refusal was added for, and it is squarely against this package's honest-edge convention: a plausible-looking failure with the explanation hidden. An infinite pending promise is worse than the `DataCloneError` the sibling refusal exists to prevent, because it produces no error at all.
 
-Fix it so the misuse reaches the caller. Deferring the validation into the exposed `createNode()` so comlink rejects the main thread's promise is the obvious route, and it is probably right, but weigh it: validating early is genuinely better when it CAN be seen, so an option is to keep the early check AND make the failure observable (still `expose()` an api whose `createNode()` rejects with the recorded reason). Whatever you choose, the main thread must end up with a rejected promise carrying the real message, not a pending one.
+Fix it so the misuse reaches the caller. **The maintainer's steer (2026-08-11) is that the errors should be NICE: whoever made the mistake should read a message that names it and says what to do, from the thread they made it on.** That resolves the fork this task originally left open in favour of keeping BOTH signals rather than moving the check: keep validating early, where a developer with the worker console open sees it immediately, AND make the failure observable to the main thread by still calling `expose()` with an api whose `createNode()` rejects carrying the recorded reason. Simply deferring the validation into `createNode()` also fixes the hang, but it trades away the early signal, and there is no need to pay that.
+
+The bar is that neither thread is left guessing: the main thread's promise REJECTS with the real explanation rather than pending forever, and the worker still says something at the moment the mistake is made. Match the voice of this package's other refusals, which name what happened, what was expected, and what to do about it.
 
 **2. The revm worker spec's header describes the OLD recipe.** `test/revm-worker.spec.ts` still says the worker module builds the engine there, calls `createNode({engine})` there and comlink-exposes the node. The helper it drives now calls `exposeNode()`; the spec file was not touched. The prose that explains the recipe is now the only place still describing the superseded one.
 
@@ -25,6 +27,8 @@ Fix it so the misuse reaches the caller. Deferring the validation into the expos
 ## Acceptance criteria
 
 - [ ] A `createEngine` that is present but not a function causes the main thread's `createWorkerNode()` promise to REJECT with the real explanation. It never leaves the caller with a pending promise, and the reason is not confined to the worker console.
+- [ ] The worker side ALSO still reports the mistake at the moment it is made, so the early signal is kept rather than traded for the late one.
+- [ ] The message names what was expected and what to do, in the voice of this package's other refusals, and is legible to someone who has never read this source.
 - [ ] That failure path is asserted from the main thread, in a browser, on both engines' specs as applicable, so a regression back to the hang is caught.
 - [ ] `test/revm-worker.spec.ts`'s header describes the recipe as it now is, via `exposeNode()`.
 - [ ] Neither dead citation in `worker-roundtrip.ts` remains; each names where the reasoning now lives.
