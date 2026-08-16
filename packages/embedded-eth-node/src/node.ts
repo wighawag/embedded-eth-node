@@ -35,6 +35,7 @@ import {
 	Account,
 	hexToBytes as hexToBytesStrict,
 	bytesToHex,
+	bytesToBigInt,
 	bigIntToHex,
 	setLengthLeft,
 	bigIntToBytes,
@@ -93,6 +94,71 @@ const EMPTY_LOGS_BLOOM = '0x' + '00'.repeat(256);
  */
 const DEFAULT_READ_BUDGET = 30_000_000n;
 
+/**
+ * HOW MANY EXECUTIONS `eth_estimateGas`'s SEARCH MAY SPEND, after the two it
+ * always spends (the run at the upper bound, and the one that confirms the
+ * measured consumption).
+ *
+ * The bound is not a safety net for a search that might not terminate — the
+ * search below bisects a bigint window and always does — it is a COST CEILING.
+ * This node runs in a browser tab and every probe is a full execution of the
+ * request, so an estimate is the one read that can cost tens of them.
+ *
+ * WHY THIS MANY. Bisection alone closes any window this node can produce
+ * (30,000,000 gas at the widest) in 25 halvings, and the search reaches phase 2
+ * with a window far narrower than that — so 32 is enough to be EXACT for every
+ * transaction whose minimum limit is near what it consumes, which is every
+ * transaction that is not deliberately gas-sensitive. What can exhaust it is a
+ * contract that reads `GAS` and spends what it finds: there the search stops and
+ * returns the smallest limit it has PROVEN to succeed, an over-estimate, which is
+ * the safe direction (unused gas is not charged, while an under-estimate is a
+ * transaction that runs out of gas in the user's face).
+ */
+const MAX_ESTIMATE_PROBES = 32n;
+
+/**
+ * A standard `Error(string)` revert reason, if that is what these bytes are.
+ *
+ * Used to put WHY into the failure `eth_estimateGas` throws when a request
+ * cannot succeed at ANY gas limit. The raw bytes travel on the error's `data`
+ * as they always have (a client decodes them), but a human reading a console
+ * gets the sentence too.
+ *
+ * DEFENSIVE BY CONSTRUCTION: it decodes the one shape Solidity emits for
+ * `require(false, "...")` / `revert("...")` and answers `undefined` for
+ * everything else — a custom error, a bare `revert()`, a halt with no data,
+ * truncated bytes. Never throws: an estimate must not fail differently because
+ * a callee reverted in a shape this decoder does not know.
+ */
+function revertReason(returnValue: Uint8Array): string | undefined {
+	// 4-byte selector of `Error(string)` + head (32) + length (32).
+	if (returnValue.length < 68) return undefined;
+	if (
+		returnValue[0] !== 0x08 ||
+		returnValue[1] !== 0xc3 ||
+		returnValue[2] !== 0x79 ||
+		returnValue[3] !== 0xa0
+	)
+		return undefined;
+	try {
+		// THE HEAD OFFSET IS CHECKED, not assumed. A `revert("...")` from any
+		// compiler puts the string's data immediately after the head, i.e. offset
+		// 0x20, and the length is then the word at [36,68). A legal-but-unusual
+		// encoding with a different offset would make that word something else
+		// entirely, and decoding it as a length yields a plausible-looking garbled
+		// sentence in an error message — worse than no sentence at all.
+		if (bytesToBigInt(returnValue.subarray(4, 36)) !== 32n) return undefined;
+		const length = Number(bytesToBigInt(returnValue.subarray(36, 68)));
+		if (length === 0 || 68 + length > returnValue.length) return undefined;
+		const text = new TextDecoder().decode(
+			returnValue.subarray(68, 68 + length),
+		);
+		return text.length > 0 ? text : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 function hex(b: Uint8Array): string {
 	return bytesToHex(b) as string;
 }
@@ -106,8 +172,11 @@ function txHashOf(tx: TypedTransaction): string {
 /**
  * Intrinsic gas: 21000 base (+32000 create) + calldata (16/non-zero, 4/zero) +
  * the EIP-3860 initcode word cost (2 gas per 32-byte word) for creates, from
- * Shanghai on. runCall's executionGasUsed omits all of this, so we add it back to
- * get the REAL estimate (verified against runTx totalGasSpent — exact, no fudge).
+ * Shanghai on. An engine reports EXECUTION gas only (`runCall`'s
+ * `executionGasUsed` omits all of this), so the node adds it back: it is what a
+ * transaction pays before its first opcode, and therefore the part of a gas LIMIT
+ * that never reaches the frame. `eth_estimateGas` uses it as the LOWER BOUND of
+ * its search (see `estimateGas` below), not as the answer.
  *
  * `common` is threaded rather than captured, and it is THE node's `Common` — the
  * same instance the engine is handed at `connect`, so the two callers of the
@@ -1070,7 +1139,10 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 	 * because that EVM requires it; an engine that cannot commit pays for neither.
 	 * See ./engine.ts.
 	 */
-	async function evmCall(params: any): Promise<ReadCallResult> {
+	async function evmCall(
+		params: any,
+		budget?: bigint,
+	): Promise<ReadCallResult> {
 		const from = params.from
 			? createAddressFromString(params.from)
 			: createAddressFromString('0x0000000000000000000000000000000000000000');
@@ -1100,7 +1172,16 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 		//    make wrong for some nodes and right for others.
 		// A caller who wants a bigger budget passes `gas` on the call itself, which is
 		// the standard `eth_call` field for exactly this and needs no configuration.
-		const gasLimit = params.gas ? BigInt(params.gas) : DEFAULT_READ_BUDGET;
+		//
+		// `budget` OVERRIDES BOTH, and exactly one caller passes it: the
+		// `estimateGas` search below, which is asking a different question from
+		// "how long may this call run". It probes a candidate gas LIMIT, and the
+		// gas that reaches the frame under that limit is the limit MINUS the
+		// intrinsic cost the transaction pays first — so the search computes the
+		// budget itself and this function must not re-derive one from `params.gas`,
+		// which for `eth_estimateGas` is a CAP on the limit rather than a budget.
+		const gasLimit =
+			budget ?? (params.gas ? BigInt(params.gas) : DEFAULT_READ_BUDGET);
 		return engine.call({
 			from,
 			to,
@@ -1109,6 +1190,228 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 			gasLimit,
 			block: blockStore.get(latestNumber)!.block,
 		});
+	}
+
+	/**
+	 * THE SMALLEST GAS LIMIT AT WHICH THIS REQUEST SUCCEEDS — a SEARCH, not a
+	 * measurement, and the difference is the whole point of this function.
+	 *
+	 * ## Why measuring is the wrong answer
+	 *
+	 * This method used to run the request once and report what it CONSUMED
+	 * (`executionGasUsed` + intrinsic gas), which is exact and is not what the
+	 * caller asked for. A client turns this number into a transaction's gas LIMIT,
+	 * and under EIP-150's 63/64 rule a `CALL` or `CREATE` forwards at most 63/64 of
+	 * the gas remaining at that point: a transaction whose limit equals its total
+	 * consumption therefore starves its own sub-call by the 1/64 the outer frame
+	 * keeps. Consumption is a LOWER BOUND on the limit, never the limit.
+	 *
+	 * That is not theoretical. Deploying through the standard CREATE2 factory
+	 * (`0x4e59b448...`, a plain call whose body does one `CREATE2`) with a limit
+	 * taken from this method returned a receipt with `status: 0x0` and no created
+	 * contract, while the factory itself, the funding transfer and a proxy pointing
+	 * at the address that was never deployed all mined fine — so the failure landed
+	 * nowhere near its cause: a proxy delegatecalling an address with no code, which
+	 * answers `0x` rather than failing. The same shape is recorded from the other
+	 * side in `test/helpers/post-state.ts`, where an estimate-sized limit made an
+	 * inner `SSTORE` run out of gas while the receipt still said success.
+	 *
+	 * So this searches for the smallest limit at which the request SUCCEEDS, which
+	 * is what geth's `eth_estimateGas` has always done and for exactly this reason.
+	 *
+	 * ## The shape, and what each step costs
+	 *
+	 * 1. ONE RUN AT THE UPPER BOUND (the caller's `gas` if it named one, capped at
+	 *    the block gas limit — see below). If the request fails there it fails
+	 *    everywhere, and this method throws instead of returning a plausible number
+	 *    that would fail on submission.
+	 * 2. ONE PROBE AT THE MEASURED CONSUMPTION. A request that makes no sub-call and
+	 *    no create succeeds at exactly what it consumed, so the common case (a
+	 *    transfer, an `SSTORE`, a deployment) is answered EXACTLY, in one extra
+	 *    execution, and the search below never runs. This is the short-circuit, and
+	 *    it is a probe rather than a static "does this request call out?" test
+	 *    because only the EVM knows: the answer lives in the callee's bytecode.
+	 * 3. A SEARCH in `(consumption, upper bound]`, which brackets the answer from
+	 *    BELOW at the scale of the 63/64 rule before bisecting, so a window that
+	 *    starts 30,000,000 wide is never walked down from the top. Bounded by
+	 *    {@link MAX_ESTIMATE_PROBES}; on exhaustion it returns the smallest limit it
+	 *    has PROVEN to succeed, which over-estimates rather than under-estimates.
+	 *
+	 * ## Consumption as the lower bound, and the one case it is not one
+	 *
+	 * `low` starts at the measured consumption and is treated as KNOWN-FAILING
+	 * (step 2 has just proven it), which is safe for every transaction whose cost
+	 * does not depend on the gas it is given. A transaction that reads `GAS` and
+	 * spends what it finds consumes MORE at a higher limit, so its consumption at
+	 * the upper bound is not a lower bound on the minimum successful limit. geth
+	 * documents the same caveat and makes the same choice: the alternative is to
+	 * start the search at the intrinsic floor and pay ~11 more executions on every
+	 * estimate, to serve a transaction whose "minimum" limit is meaningless anyway.
+	 * The result stays a limit at which the transaction SUCCEEDS, which is the
+	 * property that matters.
+	 *
+	 * ## The intrinsic terms are the search's floor, not an addend to its result
+	 *
+	 * `overhead` is what the transaction pays before its first opcode: the shared
+	 * intrinsic formula (base + calldata + the EIP-3860 initcode term) PLUS the
+	 * request's EIP-2930 access list, which the engine never sees (`ReadCallRequest`
+	 * carries none on either engine), charged here by the one caller that has a
+	 * request to read it off. Every candidate limit is probed as
+	 * `budget = limit - overhead`, so the frame gets exactly the gas the mined
+	 * transaction would give it, and every number this method can return is at least
+	 * `overhead`. That last clause is load-bearing: `refuseIfBelowIntrinsicGas`
+	 * points callers HERE for "the number a transaction needs", so the node must
+	 * never refuse a limit it has just recommended.
+	 */
+	async function estimateGas(p: any): Promise<bigint> {
+		const dataHex: string = p.data ?? p.input ?? '0x';
+		const isCreate = !p.to;
+		const overhead =
+			intrinsicGas(dataHex, isCreate, common) + accessListGas(p.accessList);
+
+		// THE UPPER BOUND, and why it is capped at the block gas limit even when the
+		// caller named a larger `gas`: a limit above it is REFUSED at submit by
+		// `refuseIfOverBlockGasLimit`, so recommending one would be the node handing
+		// back a number it will not accept. `gas` on an `eth_estimateGas` request is
+		// geth's cap on the SEARCH ("do not consider limits above this"), which is a
+		// different thing from `gas` on an `eth_call` ("let it run this long").
+		const supplied = p.gas != null ? BigInt(p.gas) : undefined;
+		const cap =
+			supplied === undefined || supplied > minedBlockGasLimit
+				? minedBlockGasLimit
+				: supplied;
+
+		// Nothing to search: the cap cannot pay for the transaction's own bytes, so
+		// no limit within it reaches an opcode. Said in the vocabulary of the refusal
+		// that would meet such a limit at submit, and NOT as `execution reverted`:
+		// nothing executed, and a client reading a revert here would look for return
+		// data that does not exist.
+		if (cap < overhead) {
+			throw new RpcError(
+				-32000,
+				`gas required exceeds allowance (${cap}): this transaction pays ${overhead} gas ` +
+					`for its 21000 base, its calldata and its access list before its first opcode ` +
+					`runs, so no gas limit within the allowance could start it. ` +
+					(supplied !== undefined && supplied <= minedBlockGasLimit
+						? `The allowance is the \`gas\` you passed on the request; raise it or omit it.`
+						: `The allowance is this node's block gas limit; raise it with createNode({blockGasLimit: ...}).`),
+			);
+		}
+
+		const probe = (limit: bigint) => evmCall(p, limit - overhead);
+
+		// 1) THE UPPER BOUND, run first: a request that cannot succeed with all the
+		// gas there is cannot succeed at all, and the caller learns that here rather
+		// than from a receipt.
+		const top = await probe(cap);
+		if (top.error) {
+			// TWO WAYS TO FAIL AT THE TOP, AND THEY ARE DIFFERENT PROBLEMS. A request
+			// that BURNED THE WHOLE ALLOWANCE and produced no callee bytes ran out of
+			// gas: nothing reverted, there is no revert data to decode, and the caller's
+			// problem is the allowance rather than the contract. geth says `gas required
+			// exceeds allowance` to that, at -32000, which is what the `cap < overhead`
+			// refusal above already says — so this branch keeps the two consistent
+			// instead of flattening one of them into a revert a client would then hunt
+			// for return data on.
+			//
+			// THE TEST IS STRUCTURAL, not a vocabulary: "did it consume everything it
+			// was given, with nothing to show for it". Both engines report the whole
+			// budget as spent when a frame halts for want of gas (revm's
+			// `totalGasSpent` less the intrinsic the engine added back, the default
+			// engine's `executionGasUsed`), and neither's WORDS for it are the other's
+			// — matching on `out of gas` would be one engine's string asserted on both,
+			// the mistake `rejectionMessage` in ./revm.ts exists to avoid. A REVERT
+			// keeps its bytes and its gas, and a refusal BEFORE execution (an
+			// unaffordable value) spends none, so both fall through to the clause below.
+			// `budget > 0` because a zero budget makes "spent everything" vacuously
+			// true, and a caller who passed `gas` equal to the intrinsic floor exactly
+			// is better served by the engine's own words.
+			const budget = cap - overhead;
+			if (
+				budget > 0n &&
+				top.executionGasUsed >= budget &&
+				top.returnValue.length === 0
+			) {
+				throw new RpcError(
+					-32000,
+					`gas required exceeds allowance (${cap}): the transaction consumed the ENTIRE ` +
+						`allowance and still did not succeed, so it needs more gas than the allowance ` +
+						`permits (or it cannot succeed at all — an invalid opcode also spends everything). ` +
+						`Nothing reverted, so there is no revert reason to decode. ` +
+						(supplied !== undefined && supplied <= minedBlockGasLimit
+							? `The allowance is the \`gas\` you passed on the request; raise it or omit it.`
+							: `The allowance is this node's block gas limit, which is also the most a transaction ` +
+								`it mines may ask for; raise it with createNode({blockGasLimit: ...}). `) +
+						`The engine reported: ${String(top.error)}.`,
+				);
+			}
+			const reason = revertReason(top.returnValue);
+			// The LEADING CLAUSE stays `execution reverted` and the return data stays
+			// on `data`, because that pair is what a client decodes (viem turns it into
+			// a typed revert error and reads the reason out of the bytes) and because
+			// the node flattens every engine failure into it on the read path. What is
+			// added is the part only this method knows: that the failure is not a
+			// shortage of gas (the branch above owns that case), so there is no number
+			// to report.
+			throw new RpcError(
+				3,
+				`execution reverted: the transaction fails at EVERY gas limit up to ${cap}, ` +
+					`so there is no limit that would make it succeed and no estimate to report. ` +
+					(reason !== undefined
+						? `Revert reason: ${reason}. `
+						: top.returnValue.length > 0
+							? `It reverted with data (see \`data\`), which is not a standard Error(string). `
+							: `It returned no revert data. `) +
+					`The engine reported: ${String(top.error)}.`,
+				hex(top.returnValue),
+			);
+		}
+
+		// 2) WHAT IT CONSUMED, and the probe that tests whether consumption is also a
+		// workable limit. `consumed >= cap` means the request needs everything the
+		// cap allows, and the cap has just been proven to work, so it IS the answer.
+		const consumed = top.executionGasUsed + overhead;
+		if (consumed >= cap) return cap;
+		if (!(await probe(consumed)).error) return consumed;
+
+		// 3) THE SEARCH, in two phases. `low` FAILS and `high` SUCCEEDS at every
+		// point, so `high` is at all times a limit this transaction has been PROVEN
+		// to succeed at — including when the probe budget runs out mid-search.
+		let low = consumed;
+		let high = cap;
+		let probes = 0n;
+
+		// PHASE 1 — BRACKET THE ANSWER FROM BELOW, at the scale of the rule that
+		// causes the gap. A frame that hands 63/64 of its gas to a sub-call is short
+		// by about 1/64 of what it held, and by about another 1/64 per nesting level
+		// below that, so the first candidate above the measured consumption is
+		// `low + low/64` and the step DOUBLES until it brackets the answer. Starting
+		// at the top of the window instead (a plain bisection of `consumption`..`the
+		// block gas limit`) means executing the request at 15,000,000 gas to learn
+		// what a probe 3,000 gas above consumption would have said.
+		let step = low / 64n;
+		if (step < 1n) step = 1n;
+		while (probes < MAX_ESTIMATE_PROBES && low + step < high) {
+			const candidate = low + step;
+			probes++;
+			if ((await probe(candidate)).error) {
+				low = candidate;
+				step *= 2n;
+			} else {
+				high = candidate;
+				break;
+			}
+		}
+
+		// PHASE 2 — BISECT WHAT PHASE 1 BRACKETED, which is the ordinary binary
+		// search and the only part that can make the answer EXACT.
+		while (probes < MAX_ESTIMATE_PROBES && low + 1n < high) {
+			const mid = low + (high - low) / 2n;
+			probes++;
+			if ((await probe(mid)).error) low = mid;
+			else high = mid;
+		}
+		return high;
 	}
 
 	// ---------- the EIP-1193 dispatcher ----------
@@ -1138,36 +1441,12 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 					throw new RpcError(3, 'execution reverted', hex(r.returnValue));
 				return hex(r.returnValue);
 			}
-			case 'eth_estimateGas': {
-				// Run and measure, NO fudge. We compute the REAL number =
-				// executionGasUsed (from a pure, reverted runCall) + the intrinsic gas
-				// (21000 base, +32000 for creation, + per-byte calldata cost). This
-				// matches what the tx actually pays in runTx (verified against
-				// totalGasSpent) without mutating state.
-				//
-				// PLUS THE REQUEST'S ACCESS LIST, which the engine never saw: a read is
-				// executed with no access list on either engine (`ReadCallRequest` carries
-				// none), so EIP-2930's 2,400 per address and 1,900 per storage key are
-				// charged HERE, above the seam, by the one caller that has a request to
-				// read them off. Without it this method answers 21,000 for a type-1
-				// transaction whose intrinsic floor is 27,200, and
-				// `refuseIfBelowIntrinsicGas` above sends the caller to THIS method for the
-				// number a transaction needs, so the node would refuse the figure it had
-				// just recommended. Why it is a separate term rather than one more line in
-				// the shared formula, and why it deliberately over-estimates a list whose
-				// entries are touched: `accessListGas` in ./intrinsic-gas.ts.
-				const p = params[0] ?? {};
-				const r = await evmCall(p);
-				if (r.error)
-					throw new RpcError(3, 'execution reverted', hex(r.returnValue));
-				const dataHex: string = p.data ?? p.input ?? '0x';
-				const isCreate = !p.to;
-				return numHex(
-					r.executionGasUsed +
-						intrinsicGas(dataHex, isCreate, common) +
-						accessListGas(p.accessList),
-				);
-			}
+			case 'eth_estimateGas':
+				// THE SMALLEST GAS LIMIT AT WHICH THIS REQUEST SUCCEEDS, found by
+				// re-executing it. The whole method is {@link estimateGas} above,
+				// including why it is a search rather than the run-and-measure it used to
+				// be, and where the request's EIP-2930 access list is charged.
+				return numHex(await estimateGas(params[0] ?? {}));
 
 			case 'eth_fillTransaction': {
 				// Fill the missing fields of a tx request and return {tx, raw} like geth
@@ -1186,16 +1465,21 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 				const value = p.value != null ? BigInt(p.value) : 0n;
 				const dataHex: string = p.data ?? p.input ?? '0x';
 				const isCreate = !p.to;
-				// Gas: estimate (executionGasUsed + intrinsic) unless caller fixed it.
-				let gas: bigint;
-				if (p.gas != null) {
-					gas = BigInt(p.gas);
-				} else {
-					const r = await evmCall(p);
-					if (r.error)
-						throw new RpcError(3, 'execution reverted', hex(r.returnValue));
-					gas = r.executionGasUsed + intrinsicGas(dataHex, isCreate, common);
-				}
+				// Gas: the SAME search `eth_estimateGas` runs, unless the caller fixed it.
+				// It has to be the same one: what this method fills is a gas LIMIT, and a
+				// limit equal to measured consumption starves a sub-call under EIP-150's
+				// 63/64 rule exactly as it does there (see {@link estimateGas}).
+				//
+				// WITH THE ACCESS LIST DELIBERATELY DROPPED, which is this method's one
+				// documented difference and is unchanged: the transaction it FILLS AND
+				// RETURNS carries no access list (it builds a type-0 or type-2 envelope
+				// and drops the field), so charging for a list its own answer does not
+				// contain would hand back a gas limit for a different transaction. See
+				// `accessListGas` in ./intrinsic-gas.ts.
+				const gas: bigint =
+					p.gas != null
+						? BigInt(p.gas)
+						: await estimateGas({...p, gas: undefined, accessList: undefined});
 				// Fee fields: legacy iff caller passed gasPrice (and no 1559 fields),
 				// otherwise EIP-1559 with the node's constant fee market.
 				const isLegacy =

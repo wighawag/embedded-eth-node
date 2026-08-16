@@ -141,9 +141,20 @@ export interface ReadCallResult {
 	 */
 	readonly returnValue: Uint8Array;
 	/**
-	 * EXECUTION gas only — NOT a transaction's total. `eth_estimateGas` adds the
-	 * intrinsic gas (21000 base, +32000 create, calldata bytes, EIP-3860 initcode)
-	 * on top, exactly as it did before the seam existed.
+	 * EXECUTION gas only — NOT a transaction's total, and NOT by itself an answer
+	 * to `eth_estimateGas`. The node adds the intrinsic gas (21000 base, +32000
+	 * create, calldata bytes, EIP-3860 initcode) to it, exactly as it did before
+	 * the seam existed, and that sum is what a request CONSUMES. `eth_estimateGas`
+	 * uses it as the FLOOR of a search for the smallest gas LIMIT the request
+	 * succeeds at, because EIP-150's 63/64 rule makes consumption unusable as a
+	 * limit for anything that calls out or creates (see `estimateGas` in
+	 * ./node.ts) — so an engine may be asked for the same call several times, at
+	 * descending {@link ReadCallRequest.gasLimit}s.
+	 *
+	 * WHEN A FRAME HALTS FOR WANT OF GAS, THIS IS THE WHOLE BUDGET IT WAS GIVEN,
+	 * and that is load-bearing rather than incidental: it is how the node tells
+	 * "needs more gas than the allowance" apart from "reverted" without matching on
+	 * either engine's words for it.
 	 */
 	readonly executionGasUsed: bigint;
 	/**

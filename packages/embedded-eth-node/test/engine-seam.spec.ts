@@ -53,15 +53,18 @@ test('engine seam (default @ethereumjs/evm, injected engine, reads and transacti
 	// engine EXECUTION gas + node intrinsic gas
 	expect(c.stubEstimate).toBe(c.stubEstimateExpected);
 	expect(c.stubFilledGas).toBe(c.stubEstimateExpected);
-	// eth_call + eth_estimateGas + eth_fillTransaction = three engine calls
-	expect(c.stubCallsSeen).toBe(3);
+	// eth_call (1) + eth_estimateGas (2) + eth_fillTransaction (2) = five engine
+	// calls. The two methods that answer with a gas LIMIT search for it: one run at
+	// the upper bound, then one probe confirming that what the request consumed is
+	// itself a workable limit — which it is here, so neither pays for a bisection.
+	expect(c.stubCallsSeen).toBe(5);
 
 	// reads and transactions are TWO OPERATIONS ON ONE ENGINE: mining the tx added
 	// no `call`, went to this engine's own `transact`, and — because that `transact`
 	// deliberately touches no state — moved no ether. There is no longer a fallback
 	// to the node's own @ethereumjs/vm, which would have credited the recipient for
 	// real and hidden the fact that the engine never ran.
-	expect(c.stubCallsAfterTx).toBe(3);
+	expect(c.stubCallsAfterTx).toBe(5);
 	expect(c.stubTransactCount).toBe(1);
 	expect(c.stubTxStatus).toBe('success');
 	expect(c.stubTxGasUsed).toBe('21000');

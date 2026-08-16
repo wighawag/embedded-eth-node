@@ -90,7 +90,22 @@ const collected: Record<string, unknown>[] = [];
  * change that grows it, and say why in the changeset. A red assertion here means
  * either that or an accidental import into the core graph.
  *
- * RE-PINNED THIRTEEN TIMES SINCE. Most recent first:
+ * RE-PINNED FOURTEEN TIMES SINCE. Most recent first:
+ *
+ * 422.5 -> 424.0 KB raw / 127.6 -> 128.2 KB gzip, by
+ * `estimategas-returns-a-gas-limit-not-the-gas-consumed`: `eth_estimateGas` no
+ * longer reports what a request CONSUMES, it SEARCHES for the smallest gas limit
+ * the request succeeds at, because EIP-150's 63/64 rule makes consumption an
+ * unusable limit for anything that calls out or creates (a deployment through the
+ * standard CREATE2 factory mined `status: 0x0` at an estimate-sized limit). The
+ * 1.5 KB is the search itself in `src/node.ts` (an upper-bound run, a
+ * short-circuit probe at consumption, then a bracket-and-bisect loop), the
+ * `Error(string)` revert-reason decoder that puts WHY into the failure, and the
+ * prose of the two refusals it can now throw. It is in the CORE graph because
+ * `eth_estimateGas` is, and it is the feature twice over: every consumer,
+ * JS-only included, gets a number their transaction survives, and a request that
+ * cannot succeed at any limit gets an error instead of one that cannot. Still
+ * zero bytes of `revm-wasm`.
  *
  * 422.0 -> 422.5 KB raw / 127.4 -> 127.6 KB gzip, by
  * `the-rpc-block-and-the-evm-disagree-about-coinbase-and-prevrandao`: the RPC
@@ -273,7 +288,7 @@ const collected: Record<string, unknown>[] = [];
  * carries 1% of slack because the zlib shipped with different Node builds does
  * not compress byte-identically, which is noise rather than growth.
  */
-const DEFAULT_ENTRY_BASELINE = {rawKB: 422.5, gzipKB: 127.6};
+const DEFAULT_ENTRY_BASELINE = {rawKB: 424.0, gzipKB: 128.2};
 const GZIP_SLACK = 1.01;
 
 // Build + serve once for the whole file (the cut contains all backends).

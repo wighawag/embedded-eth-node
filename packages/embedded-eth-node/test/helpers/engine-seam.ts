@@ -9,7 +9,10 @@
  *      `eth_fillTransaction`'s gas estimation) go through the engine — proven by
  *      an injected stub engine whose answers show up in all three.
  *   3. `eth_estimateGas` keeps its split: the ENGINE reports EXECUTION gas and
- *      the NODE adds intrinsic gas.
+ *      the NODE adds intrinsic gas. It now SEARCHES for the smallest workable
+ *      gas limit rather than reporting consumption, so what is pinned here is
+ *      both the answer (unchanged for a request that succeeds at consumption)
+ *      and its COST at the seam: two engine calls, not one.
  *   4. A reverting engine result still surfaces as a real execution-reverted
  *      JSON-RPC error (code 3) carrying the return data.
  *   5. THERE IS NO SECOND EVM. `call` and `transact` are two operations on ONE
@@ -230,7 +233,13 @@ export async function runEngineSeamChecks() {
 		params: [{from: account.address, to: TARGET}],
 	})) as {tx: {gas: string}};
 	out.stubFilledGas = filled.tx.gas;
-	out.stubCallsSeen = seen.length; // the three read-path callers, once each
+	// THE THREE READ-PATH CALLERS, AND WHAT EACH COSTS AT THE SEAM. `eth_call` is
+	// one call; the two that answer with a gas LIMIT are a SEARCH (see
+	// `estimateGas` in src/node.ts), so each costs the run at the upper bound plus
+	// the probe that confirms the measured consumption is a workable limit — two
+	// apiece against a stub that always succeeds, which is the short-circuited
+	// common case. 1 + 2 + 2.
+	out.stubCallsSeen = seen.length;
 
 	// 5) reads and transactions are TWO OPERATIONS ON ONE ENGINE: mining a signed tx
 	// adds no `call`, goes to this engine's `transact`, and — because that `transact`

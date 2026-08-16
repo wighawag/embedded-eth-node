@@ -31,8 +31,10 @@ faking success.
   BOTH halves, so `node.engine` names the EVM that ran your reads and executed
   your transactions.
 - **Simple by design:** account/signing methods are NOT implemented; legacy
-  (type-0) receipts work (legacy-safe `effectiveGasPrice`); `eth_estimateGas` is a
-  real run-and-measure (no fudge), verified equal to `runTx`'s `totalGasSpent`.
+  (type-0) receipts work (legacy-safe `effectiveGasPrice`); `eth_estimateGas`
+  answers with the **smallest gas LIMIT the transaction succeeds at**, found by
+  re-executing it (geth's binary search), not with the gas it consumes — the two
+  differ by EIP-150's 63/64 rule the moment anything calls out or creates.
 
 ## Install
 
@@ -146,7 +148,7 @@ method-not-found (`-32601`) — it never fakes a result.
 | `eth_blockNumber` | latest mined block number |
 | `eth_getBlockByNumber`, `eth_getBlockByHash` | header + (optional) full txs; roots are zero in `'none'` mode. `miner`, `mixHash` and `logsBloom` are **real**: the first two are the block's [`blockEnv`](#genesis-pre-state--block-env) coinbase/prevRandao (the same values `COINBASE`/`PREVRANDAO` return to a contract), the third is the OR of the block's receipt blooms, so the standard pre-filter finds the logs that are there. `sha3Uncles`/`transactionsRoot`/`receiptsRoot`/`difficulty`/`totalDifficulty`/`size`/`nonce` are placeholders, and the header's `gasUsed` is **always `0x0`** (read the receipts' `gasUsed`) |
 | `eth_call` | **runs on the [engine](#engine-ethereumjsevm-default-vs-revm-wasm-opt-in)**; pure (never mutates); reverts throw `RpcError(3, 'execution reverted')` |
-| `eth_estimateGas` | **runs on the [engine](#engine-ethereumjsevm-default-vs-revm-wasm-opt-in)**; honest run-and-measure (`executionGasUsed` + intrinsic incl. EIP-3860, **+ the request's EIP-2930 `accessList`**: 2,400/address + 1,900/key, as geth charges it); verified == `runTx` `totalGasSpent` |
+| `eth_estimateGas` | **runs on the [engine](#engine-ethereumjsevm-default-vs-revm-wasm-opt-in)**; the **smallest gas LIMIT at which the request succeeds**, found by re-executing it, with intrinsic gas (incl. EIP-3860) **+ the request's EIP-2930 `accessList`** (2,400/address + 1,900/key, as geth charges it) as the floor. A request that succeeds at what it consumes — a transfer, a plain deployment — gets exactly that, in one extra execution. A request that reverts at any limit gets `RpcError(3, 'execution reverted')` naming the decoded reason and carrying the callee's bytes; one that is simply too big for the allowance gets `-32000 gas required exceeds allowance` (geth's vocabulary) — never a number. `gas` on the request is the **cap on the search**, capped in turn by the block gas limit |
 | `eth_getBalance`, `eth_getCode`, `eth_getStorageAt`, `eth_getTransactionCount` | state reads at a block tag |
 | `eth_gasPrice`, `eth_maxPriorityFeePerGas` | **constant** (faked fee market — local chain) |
 | `eth_feeHistory` | correct response **shape**, but **constant/faked values** — not for real fee prediction |
@@ -180,9 +182,26 @@ method-not-found (`-32601`) — it never fakes a result.
 - **`eth_call` / `eth_estimateGas` never mutate state** — they run on a state
   checkpoint that is reverted, and reset the EVM journal's warm/access tracking +
   the EIP-2200 original-storage cache per call (so a repeated warm-SSTORE estimate
-  doesn't under-report and cause out-of-gas reverts). estimateGas returns the
-  **real** number (executionGasUsed + intrinsic incl. EIP-3860 initcode word cost),
-  verified equal to `runTx`'s `totalGasSpent`.
+  doesn't under-report and cause out-of-gas reverts).
+- **`eth_estimateGas` returns a gas LIMIT, not the gas consumed.** It used to
+  report `executionGasUsed` + intrinsic gas, which is exact and is the wrong
+  question: under EIP-150's 63/64 rule a `CALL`/`CREATE` is forwarded at most
+  63/64 of the gas left, so a transaction whose limit equals its own consumption
+  starves its sub-call. Deploying through the standard CREATE2 factory with such a
+  limit returns `status: 0x0` and no contract — and a caller that then points a
+  proxy at the address that was never deployed gets `0x` back instead of a
+  failure. So the method now searches for the smallest limit that SUCCEEDS, as
+  geth does: one run at the upper bound (the request's `gas`, capped at the block
+  gas limit), one probe at the measured consumption — which answers a transfer or
+  a plain deployment exactly, and terminates there — and otherwise a bounded
+  bisection above it. Gas CONSUMED is still verified equal to `runTx`'s
+  `totalGasSpent`; you read it off a receipt's `gasUsed`. The estimate is exact to
+  the gas (one less and the transaction fails) except in two cases where it is
+  deliberately a little high, both erring in the direction that costs you nothing:
+  a request naming an **access list** (the list is charged while the probe under it
+  still prices those entries cold — see the bullet below), and a contract that
+  **reads `GAS` and spends what it finds**, whose search may stop at the smallest
+  limit it has proven to work rather than at the true minimum.
 - **A request's EIP-2930 access list is CHARGED by `eth_estimateGas`** (2,400 per
   address, 1,900 per storage key), because the node's own intrinsic-gas refusal
   sends you to `eth_estimateGas` for the number a transaction needs, and that

@@ -218,10 +218,17 @@ function makeBackend(
 			})) as `0x${string}`;
 		},
 
-		// Node surface: eth_estimateGas is (execution + intrinsic), so subtract the
-		// intrinsic back out to get the same EXECUTION gas the raw-EVM backends
-		// report. Stays on the RPC surface (no reaching into internals), so this is
-		// exactly the number a consumer could compute.
+		// Node surface: eth_estimateGas answers with the smallest gas LIMIT the
+		// request succeeds at, which for a call that makes no sub-call and no create
+		// IS (execution + intrinsic) — the search proves consumption workable and
+		// stops there. Every gas probe in this scenario is exactly that shape (see
+		// `intrinsicGasForCall` in ./scenario.ts, which is create-free for the same
+		// reason), so subtracting the intrinsic back out recovers the same EXECUTION
+		// gas the raw-EVM backends report and the gate compares like with like. A
+		// scenario that called out would need the receipt's `gasUsed` instead, since
+		// the estimate would then carry the 63/64 headroom on top.
+		// Stays on the RPC surface (no reaching into internals), so this is exactly
+		// the number a consumer could compute.
 		async staticCallGas(to, data) {
 			const est = (await node.request({
 				method: 'eth_estimateGas',

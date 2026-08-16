@@ -17,6 +17,11 @@
  *   - 'rpc-block'          : the RPC block and the EVM describe the SAME block
  *                            (miner / mixHash / logsBloom), on both sides of a
  *                            dumpState/loadState round trip, plus an old dump
+ *   - 'estimate-gas'       : `eth_estimateGas` answers with the smallest gas LIMIT
+ *                            at which the request succeeds (a deployment through
+ *                            the CREATE2 factory mines at it, and fails one gas
+ *                            below), the common cases stay un-inflated, and what
+ *                            cannot succeed at any limit is an ERROR
  *
  * `embedded-eth-node/revm` has its OWN cut (./cut-revm.ts), because its bundle
  * carries the revm `.wasm` asset and no other spec should pay for it.
@@ -57,6 +62,7 @@ import {slimNodeHonestyChecks} from './slim-node-checks.js';
 import {runStorageOverlayChecks} from './storage-overlay.js';
 import {runEngineSeamChecks} from './engine-seam.js';
 import {runRpcBlockChecks} from './rpc-block.js';
+import {runEstimateGasChecks} from './estimate-gas.js';
 import {runTrustedSenderChecks} from './trusted-sender.js';
 import {workerRoundtrip} from './worker-roundtrip.js';
 import {driveMisusedEngineWorker, reportEarlySignal} from './engine-misuse.js';
@@ -118,6 +124,19 @@ const cut: CodeUnderTest = {
 		if (ctx.params.mode === 'rpc-block') {
 			try {
 				results.rpcBlock = await runRpcBlockChecks();
+			} catch (e) {
+				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
+			}
+			return {results, timings, errors, env: captureEnv()};
+		}
+
+		// estimate-gas: the number `eth_estimateGas` returns is a gas LIMIT that
+		// works, found by re-executing the request, rather than the gas the request
+		// CONSUMES — which EIP-150's 63/64 rule makes unusable for anything with a
+		// sub-call or an inner create.
+		if (ctx.params.mode === 'estimate-gas') {
+			try {
+				results.estimateGas = await runEstimateGasChecks();
 			} catch (e) {
 				errors.push(String((e as Error)?.stack ?? (e as Error)?.message ?? e));
 			}

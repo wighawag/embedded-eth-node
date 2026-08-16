@@ -138,8 +138,12 @@ test('differential conformance with the revm engine installed (stateMode:none)',
 	);
 	// ...and the READ half.
 	expect(labels).toContain('1559-call(increment) view number()');
-	expect(labels).toContain('estimateGas exactness (increment)');
-	expect(labels).toContain('estimateGas CREATE incl. EIP-3860 initcode');
+	expect(labels).toContain(
+		'gas consumed == the reference; estimateGas is a usable limit',
+	);
+	expect(labels).toContain(
+		'CREATE incl. EIP-3860 initcode: consumed == the reference',
+	);
 	// ...including the BLOCK-ENVIRONMENT step, the one bar that can see an engine
 	// lying about the block it runs in (BASEFEE / PREVRANDAO / COINBASE / NUMBER /
 	// TIMESTAMP are gas-independent, so neither the gas gate nor the receipt diff

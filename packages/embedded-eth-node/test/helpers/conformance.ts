@@ -1117,8 +1117,19 @@ async function runBattery(
 		ctx.nonce++;
 	}
 
-	// 12) eth_estimateGas exactness: estimate a fresh increment() and compare to the
-	//     reference runTx totalGasSpent for the SAME call mined in the reference.
+	// 12) GAS CONSUMED vs the reference, and the LIMIT `eth_estimateGas` recommends
+	//     for the same call. TWO PROPERTIES, AND THEY ARE NOT THE SAME ONE.
+	//
+	//     This step used to assert `eth_estimateGas == the reference's
+	//     totalGasSpent`, which pointed the strongest oracle in the repo at the
+	//     wrong question: consumption is what a transaction PAYS, while an estimate
+	//     is the LIMIT a client signs with, and EIP-150's 63/64 rule separates them
+	//     for anything that calls out or creates. So the reference now oracles what
+	//     it is an oracle for — the gas the node's own receipt reports — and the
+	//     estimate is held to being a USABLE limit: never below consumption, and for
+	//     this shape (no sub-call, so consumption IS workable) exactly equal to it,
+	//     which is what keeps the arithmetic covered here. The estimate as a limit
+	//     that MINES is asserted where it belongs, in ./estimate-gas.ts.
 	{
 		const data = encodeFunctionData({
 			abi: counterAbi,
@@ -1138,15 +1149,30 @@ async function runBattery(
 		})) as string;
 		const refRcpts = await ref.mineBlock([raw]);
 		const m: string[] = [];
-		cmp(m, 'estimateGas==refTotalGasSpent', BigInt(est), refRcpts[0].gasUsed);
 		// now mine the SAME tx in the node so its nonce advances identically
-		await node.request({method: 'eth_sendRawTransactionSync', params: [raw]});
-		steps.push({label: 'estimateGas exactness (increment)', mismatches: m});
+		const nr = (await node.request({
+			method: 'eth_sendRawTransactionSync',
+			params: [raw],
+		})) as any;
+		cmp(
+			m,
+			'gasUsed==refTotalGasSpent',
+			BigInt(nr.gasUsed),
+			refRcpts[0].gasUsed,
+		);
+		cmp(m, 'estimateGas==gasUsed', BigInt(est), BigInt(nr.gasUsed));
+		steps.push({
+			label: 'gas consumed == the reference; estimateGas is a usable limit',
+			mismatches: m,
+		});
 		ctx.nonce++;
 	}
 
-	// 13) Intrinsic-floor + EIP-3860 initcode: deploy with estimateGas exactness on
-	//     a CREATE (initcode word cost must be counted). Estimate vs reference runTx.
+	// 13) Intrinsic-floor + EIP-3860 initcode on a CREATE (the initcode word cost
+	//     must be counted), held the same two ways as step 12: the node's own
+	//     consumption against the reference, and the estimate against that
+	//     consumption. A deployment makes no inner create either, so the estimate is
+	//     still exact here and the EIP-3860 term stays fully covered.
 	{
 		const data = encodeDeployData({
 			abi: probeAbi,
@@ -1159,15 +1185,19 @@ async function runBattery(
 		})) as string;
 		const refRcpts = await ref.mineBlock([raw]);
 		const m: string[] = [];
+		const nr = (await node.request({
+			method: 'eth_sendRawTransactionSync',
+			params: [raw],
+		})) as any;
 		cmp(
 			m,
-			'estimateGas(CREATE)==refTotalGasSpent',
-			BigInt(est),
+			'gasUsed(CREATE)==refTotalGasSpent',
+			BigInt(nr.gasUsed),
 			refRcpts[0].gasUsed,
 		);
-		await node.request({method: 'eth_sendRawTransactionSync', params: [raw]});
+		cmp(m, 'estimateGas(CREATE)==gasUsed', BigInt(est), BigInt(nr.gasUsed));
 		steps.push({
-			label: 'estimateGas CREATE incl. EIP-3860 initcode',
+			label: 'CREATE incl. EIP-3860 initcode: consumed == the reference',
 			mismatches: m,
 		});
 		ctx.nonce++;
