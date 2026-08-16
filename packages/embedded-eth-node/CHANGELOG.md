@@ -1,5 +1,87 @@
 # embedded-eth-node
 
+## 0.4.0
+
+### Minor Changes
+
+- fe793e0: **`eth_estimateGas` now returns the smallest gas LIMIT at which a transaction succeeds, found by re-executing it, instead of the gas it CONSUMES.** The old answer (`executionGasUsed` + intrinsic gas + the request's access list) was exact and was the wrong question: a client turns this number into the transaction's gas limit, and under EIP-150's 63/64 rule a `CALL` or `CREATE` is forwarded at most 63/64 of the gas remaining at that point, so a limit equal to total consumption starves the sub-call by the 1/64 the outer frame keeps.
+
+  **The failure it fixes, as reported.** Deploying through the standard Arachnid CREATE2 factory (`0x4e59b448...`) with a limit taken from this node's own `eth_estimateGas`: the funding transfer mined, the factory itself deployed (140 bytes of code), and the deployment THROUGH the factory came back `status: 0x0` with no contract created. The caller then pointed a proxy at the address that was never deployed, and every call to it returned `0x` rather than failing — so the receipt that named the problem was three transactions upstream of the symptom. The node's own suite had already recorded the same shape from the other side, in the comment on `test/helpers/post-state.ts` explaining why every transaction there carries an explicit gas limit.
+
+  **What the method does now**, which is what geth has always done:
+  - one run at the UPPER BOUND — the request's `gas` if it named one, capped at the block gas limit, since a limit above that is refused at submit and the node must never recommend a number it will not accept. If the request fails there it fails everywhere, and the method throws;
+  - one probe at the MEASURED CONSUMPTION. A request that makes no sub-call and no create succeeds at exactly what it consumes, so a value transfer is still 21000, a plain deployment is still intrinsic + execution, and the common case costs ONE extra execution and stops;
+  - otherwise a bounded search above it, bracketing from below at the scale of the 63/64 rule before bisecting, so a window that starts 30,000,000 gas wide is never walked down from the top. The answer is the MINIMUM: one gas less fails.
+
+  **Where "the minimum" is exact, and the two places it is an over-estimate instead.** For a request carrying no access list the search is exact to the gas, which is what the battery asserts by mining at `estimate - 1` and requiring `status: 0x0`. Two cases sit deliberately above the true minimum, both erring in the safe direction (unused gas is not charged; an under-estimate is a transaction that runs out of gas): a request that names an EIP-2930 **access list**, because the charge is added while the probe underneath still prices those entries cold — the pre-existing skew documented on `accessListGas`, unchanged by this work — and a **gas-sensitive contract** that reads `GAS` and spends what it finds, which can exhaust the probe budget and get the smallest limit the search has proven to work.
+
+  **The cost, measured at the seam.** A request that succeeds at what it consumes costs exactly TWO engine calls; a realistic single-level 63/64 shortfall (the 3,099 gas the CREATE2 case measures) costs 15. Both are pinned as assertions against stub engines rather than described, the second by reproducing the shortfall with arithmetic so the number is deterministic.
+
+  **A request that cannot succeed at any limit gets an error, never a plausible-looking number — and the error says WHICH problem it is.** A REVERT keeps the leading clause `execution reverted` with the callee's bytes on `data` (that pair is what viem decodes), and the message now adds what only this method knows: that no gas limit would have helped, the revert reason decoded from `Error(string)` when there is one, and the engine's own words. A request that is simply too big for the allowance is `-32000` "gas required exceeds allowance" instead, geth's vocabulary and the same code this node already answers a transaction whose gas limit it refuses: nothing reverted, so a client reading a revert there would hunt for return data that does not exist, and a user would be told their contract failed when their gas allowance did. Both shapes of it are covered — an allowance below the intrinsic floor, where nothing executes, and one that starts the transaction and cannot finish it. The two are told apart STRUCTURALLY (did the request spend everything it was given and return nothing?), never by matching on an engine's words for running out of gas, which are not the same words on the two engines.
+
+  **Identical on both engines**, asserted directly: same estimates (21000 / 266748 / 270826 for the three shapes above), same receipt, same `-32000` for an out-of-gas at the allowance and the same code-3-with-data for a revert, on `@ethereumjs/evm` and revm alike.
+
+  **`eth_fillTransaction` fills its `gas` from the same search**, for the same reason: what it fills is a limit. It still deliberately does not charge the request's access list, because the transaction it returns carries none.
+
+  **What did NOT change:** the intrinsic-gas arithmetic (base, calldata, the EIP-3860 initcode term) and the EIP-2930 access-list charge, which are now the FLOOR of the search rather than the answer; every estimate is still at least that, so the intrinsic-gas refusal still points callers here safely. Gas CONSUMED is still verified equal to the reference `runTx`'s `totalGasSpent` — the conformance battery's two estimate steps now assert that against the node's own receipt `gasUsed`, which is the value that has that property, and hold the estimate to being a usable limit.
+
+  The default entry point's bundle baseline is re-pinned 422.5 -> 424.0 KB raw / 127.6 -> 128.2 KB gzip. The 1.5 KB is the search itself, the `Error(string)` revert-reason decoder that puts the reason into the failure, and the prose of the two refusals this method can now throw. It is paid by every consumer including the JS-only one, and it is the feature: an estimate a transaction does not survive is what this change exists to remove.
+
+  Covered by a new battery (`test/estimate-gas.spec.ts`) built on the real CREATE2 factory, deployed by its own keyless presigned transaction: the deployment through it mines at the estimate and fails one gas below, a transfer is 21000 and a deployment equals its own `gasUsed`, a revert produces an error carrying `Error("boom")`, and one estimate against a stub engine costs exactly two engine calls. The engine-seam battery's call count moves from 3 to 5 for the same reason.
+
+- eb1d5e0: New subpath `embedded-eth-node/worker-host`: host a node in a Worker that builds its OWN engine, without hand-copying the `SlimNode` proxy. Additive: `embedded-eth-node/worker-entry` still exposes the node at import time, still exports `workerApi`, and nothing on the main thread changes.
+
+  ```ts
+  // my-worker.ts: the whole module
+  import {exposeNode} from 'embedded-eth-node/worker-host';
+  import {createRevmEngine} from 'embedded-eth-node/revm';
+  import wasm from 'revm-wasm/revm.wasm';
+
+  exposeNode({createEngine: () => createRevmEngine({wasm})});
+  ```
+
+  Why it exists: an engine cannot cross a thread boundary (`createWorkerNode({engine})` is refused, since the options are structured-cloned and an `Engine` is a function-bearing object holding thread-bound live state), and `worker-entry` deliberately builds no engine for you, because that would mean the core naming engines by string and importing them, which [ADR 0006](https://github.com/wighawag/embedded-eth-node/blob/main/docs/adr/0006-the-engine-is-an-injected-object-not-a-named-string.md) refuses (a JS-only consumer would pay for revm). So a consumer had to write their own worker module, and `worker-entry` calls comlink's `expose()` at MODULE SCOPE, so it could not be imported to reuse the proxy: importing it would have exposed the wrong api on that thread. Everybody copied the proxy block instead. `worker-host` is `worker-entry` without the side effect, and `worker-entry` is now that module plus its one line.
+
+  `createEngine` is a FACTORY, called once per `createNode()`, because building an engine is async and because one engine instance serves one node (`connect()` binds it, so an engine value would work for the first node and throw for the second). Passing a built engine there is refused with a message naming both forms. The main thread's options (`chainId`, `miningConfig`, and the rest) still travel through `createWorkerNode()` unchanged; only the engine is the worker's.
+
+  The proxy now exists in exactly ONE place, and staying complete is the compiler's job rather than anyone's memory: it is a literal typed `SlimNode`, so a field added to `SlimNode` later fails the build there, and `worker-client`'s `as any` casts (which are what hid `senderMode` when it was silently dropped from that block for a month) are gone. The Worker test additionally compares a Worker-backed node against a main-thread one field by field, naming no field, so the same class of gap is caught at runtime for any future one too.
+
+  The README's revm-in-a-Worker recipe is now shown INLINE (it is four lines), and its pointer at this repository's executed example says plainly that those are repository files rather than something in your `node_modules`. The published `files` list is unchanged.
+
+  `src/index.ts` is untouched, so the default entry point's bundle is unmoved and the benchmark baseline is not re-pinned. Decisions taken while building this, including the naming and the two rejected alternatives: `docs/spikes/make-the-worker-node-proxy-reusable-instead-of-hand-copied/decisions.md`.
+
+### Patch Changes
+
+- ce91700: A misused `exposeNode({createEngine})` now REJECTS the main thread's `createWorkerNode()` instead of hanging it forever.
+
+  The refusal added with `embedded-eth-node/worker-host` (passing an engine, or the promise of one, where the factory belongs) threw while the worker module was still EVALUATING. That is before comlink's `expose()` runs, so the worker registered no message listener, answered nothing, and an awaited `createWorkerNode()` on the main thread never settled: the consumer saw a hang and the explanation reached only the worker's console, which in a bundled app is easy to miss entirely. An infinite pending promise is a worse failure than the `DataCloneError` the sibling refusal exists to prevent, because it produces no error at all.
+
+  The refusal is now a recorded VALUE rather than control flow. `exposeNode()` always calls `expose()`, so the worker can always answer; the message is still logged on the worker thread at the moment the mistake is made (the early signal a developer with the console open sees), and `createNode()` rejects with the same text, so it crosses the boundary to the caller. Neither thread is left guessing.
+
+  The message also names the PROMISE case as itself: `createEngine: createRevmEngine({wasm})` (no arrow) is told that the factory was called rather than passed, and shown both forms, instead of being told that a value one arrow from correct "is not a function".
+
+  Two documented hazards go with it, on the `exposeNode` doc comment and in the README's Worker section: do not `await` at the top level of a worker module before `exposeNode()` (the main thread's first message can be lost while your module is still evaluating, which hangs `createWorkerNode()` for a reason this package cannot fix), and `createEngine` is a function precisely so the await belongs to `createNode()`.
+
+  Behaviour change for anyone already misusing the option: `createNodeWorkerApi()` / `exposeNode()` no longer throw synchronously, they return normally and the failure surfaces at `createNode()`. Asserted from the main thread in a browser on both engines (`test/worker.spec.ts`, `test/revm-worker.spec.ts`) so a regression back to the hang is caught as a `NEVER_SETTLED` outcome rather than an undiagnosed timeout. Reference gas is unchanged. Decisions: `docs/spikes/a-bad-createengine-hangs-the-main-thread-instead-of-rejecting/decisions.md`.
+
+- d0bd3df: **Two RPC responses now have the SHAPE a caller reads, not merely the right values.** Both came out of a downstream debugging session where the symptom was the same unhelpful sentence, `Cannot mix BigInt and other types`, thrown far from the node that caused it. Neither changes a number; both change what a consumer's ordinary idiom does with the answer.
+
+  **`eth_feeHistory` returns one `reward` entry per REQUESTED percentile, per block.** It ignored `rewardPercentiles` and always answered a single entry per block, so a caller asking for several and INDEXING them read `undefined` at every index but the first: rocketh requests `[10, 50, 80]` and reads indices 1 and 2. This node has a flat fee model, so every percentile carries the same value — but the shape has to match the request, and a response that is well-formed enough to parse while being wrong for anybody who indexes it is the hardest kind to trace back.
+
+  **`eth_getTransactionByHash` OMITS `maxFeePerGas` / `maxPriorityFeePerGas` on a legacy transaction** instead of reporting them as `null`, which is what geth does. The difference is not cosmetic: `'maxFeePerGas' in tx` is the standard way to tell a 1559 transaction from a legacy one, so a key that EXISTS and is `null` routes the caller down the 1559 branch, which then dies on `BigInt(null)`. A key that exists only when it means something keeps that idiom honest. A type-2 transaction still carries both.
+
+  Both are now asserted rather than described, and each assertion is the one a value check would miss. The fee-history widths are held for a 3-percentile request AND a 1-percentile one (`viem-surface`), so a hardcoded 3 fails as loudly as a hardcoded 1, and the values are deliberately not asserted because a flat fee model makes them all equal. The fee fields are read by PRESENCE with `in`, off the raw JSON-RPC object rather than through viem (which normalises the shape away), on BOTH transaction types from the same node (`slim-node-checks`), because omitting them always would satisfy the legacy half while breaking every 1559 consumer. Each assertion was confirmed RED against the previous behaviour.
+
+- 5161f19: Documentation and a runnable example: the revm-in-a-Worker recipe the README recommends is now EXECUTED on every test run, on Chromium and WebKit. No library code changed, so `patch` is the honest level and nothing about the node's behaviour moved.
+
+  `createWorkerNode({engine})` is refused (the options are structured-cloned and an `Engine` is a function-bearing object holding thread-bound live state), so the README told consumers to build the engine inside their own worker module and comlink-expose the node. Nothing in this repo did that, so the one combination a consumer most likely wants (revm AND off the main thread) was the only one recommended without evidence.
+
+  There is now a copyable worker module, `packages/embedded-eth-node/test/helpers/revm-worker.ts`, which builds the revm engine INSIDE the Worker and imports `embedded-eth-node` / `embedded-eth-node/revm` by package name (so the published export map is exercised the way a consumer resolves it), and a spec that drives it through the ORDINARY `createWorkerNode()` client with unchanged main-thread code: the engine identity crossing the boundary reads `revm-wasm`, the reference execution gas measured THROUGH the Worker is exact (`number()` 2446, `sumTo(2000)` 498689, `keccakLoop(2000)` 1107052 and its result hash), a deploy plus 20 committing transactions land and their post-state reads back through the node's own surface, the `stateMode:'trie'` refusal fires inside the Worker with its full text reaching the caller, and the main thread stays responsive throughout (a load-invariant ratio, never a millisecond bound).
+
+  The integration risk that made this worth proving, whether the revm `.wasm` configuration reaches the WORKER bundle and not only the page, resolved positively: the harness builds both entry points in one esbuild pass, so one `binary` loader covers both. The generalisation for a consumer is that their bundler's asset rule has to apply to the worker entry too, which the README bullet now says, along with what each delivery shape costs inside a worker chunk. Findings, measurements and the decisions taken while building this: `docs/spikes/prove-the-revm-in-a-worker-recipe-the-readme-recommends/measurements.md`.
+
+  `src/` is untouched, so the default entry point's bundle is unmoved and the benchmark baseline is not re-pinned.
+
 ## 0.3.0
 
 ### Minor Changes
