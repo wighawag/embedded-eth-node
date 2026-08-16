@@ -92,13 +92,13 @@ const collected: Record<string, unknown>[] = [];
  *
  * RE-PINNED FOURTEEN TIMES SINCE. Most recent first:
  *
- * 422.5 -> 424.0 KB raw / 127.6 -> 128.2 KB gzip, by
+ * 422.5 -> 424.7 KB raw / 127.6 -> 128.4 KB gzip, by
  * `estimategas-returns-a-gas-limit-not-the-gas-consumed`: `eth_estimateGas` no
  * longer reports what a request CONSUMES, it SEARCHES for the smallest gas limit
  * the request succeeds at, because EIP-150's 63/64 rule makes consumption an
  * unusable limit for anything that calls out or creates (a deployment through the
  * standard CREATE2 factory mined `status: 0x0` at an estimate-sized limit). The
- * 1.5 KB is the search itself in `src/node.ts` (an upper-bound run, a
+ * 2.2 KB is the search itself in `src/node.ts` (an upper-bound run, a
  * short-circuit probe at consumption, then a bracket-and-bisect loop), the
  * `Error(string)` revert-reason decoder that puts WHY into the failure, and the
  * prose of the two refusals it can now throw. It is in the CORE graph because
@@ -106,6 +106,12 @@ const collected: Record<string, unknown>[] = [];
  * JS-only included, gets a number their transaction survives, and a request that
  * cannot succeed at any limit gets an error instead of one that cannot. Still
  * zero bytes of `revm-wasm`.
+ *
+ * (Pinned at 424.0 in that change and corrected to 424.7 immediately after, when
+ * CI failed on it: the pin had been measured against a `dist/` predating the same
+ * change's review round — the -32000 "gas required exceeds allowance" branch and
+ * the revert-decoder's ABI head check, 0.7 KB of the 2.2. See the note on the
+ * constant itself, which now says how to avoid repeating it.)
  *
  * 422.0 -> 422.5 KB raw / 127.4 -> 127.6 KB gzip, by
  * `the-rpc-block-and-the-evm-disagree-about-coinbase-and-prevrandao`: the RPC
@@ -287,8 +293,18 @@ const collected: Record<string, unknown>[] = [];
  * Raw bytes are esbuild-deterministic, so that bound is exact. The gzip bound
  * carries 1% of slack because the zlib shipped with different Node builds does
  * not compress byte-identically, which is noise rather than growth.
+ *
+ * MEASURE IT AGAINST A FRESH BUILD, and this is a trap that has already been
+ * sprung once. The entry below is `import {createNode} from 'embedded-eth-node'`,
+ * which resolves through the package's `exports` map to **`dist/`** — not `src/`.
+ * So a `src` change that has not been rebuilt is INVISIBLE here, and re-pinning
+ * against a stale `dist` pins a number CI will not reproduce (it builds first).
+ * That is exactly what happened to the 424.0 pin below: it was measured after
+ * the estimate-gas search landed but before that change's review round, and CI
+ * read 424.7. Run `pnpm build` before trusting this test, which is why the repo's
+ * `verify` is `format:check && build && test`, in that order.
  */
-const DEFAULT_ENTRY_BASELINE = {rawKB: 424.0, gzipKB: 128.2};
+const DEFAULT_ENTRY_BASELINE = {rawKB: 424.7, gzipKB: 128.4};
 const GZIP_SLACK = 1.01;
 
 // Build + serve once for the whole file (the cut contains all backends).
