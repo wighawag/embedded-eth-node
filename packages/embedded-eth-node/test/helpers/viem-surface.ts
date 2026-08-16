@@ -54,6 +54,12 @@ export interface SurfaceReport {
 	watchBlocksFired: boolean;
 	callCounts: Record<string, number>;
 	rawTxNonces: number[];
+	/**
+	 * `eth_feeHistory`'s `reward` widths, per block, for a 3-percentile request and
+	 * a 1-percentile one: the shape a caller INDEXES, which is what a flat fee
+	 * model makes it easy to get wrong (see the call site).
+	 */
+	feeHistoryRewardWidths: {threePercentiles: number[]; onePercentile: number[]};
 }
 
 export async function viemSurfaceProbe(): Promise<SurfaceReport> {
@@ -107,9 +113,30 @@ export async function viemSurfaceProbe(): Promise<SurfaceReport> {
 	await safe(() => pub.estimateFeesPerGas());
 	// Explicitly exercise eth_feeHistory too (viem's default fee estimator may not
 	// call it, but consumers do — make sure it's covered + answered).
-	await safe(() =>
+	//
+	// AND CHECK THE SHAPE, not just that it answered: `reward` carries ONE entry
+	// per REQUESTED PERCENTILE, per block. A response with a single entry however
+	// many were asked for is well-formed enough to parse and wrong for anybody who
+	// INDEXES it — rocketh asks for three and reads indices 1 and 2, which came back
+	// `undefined` and failed as "Cannot mix BigInt and other types" far from here.
+	// This node has a flat fee model, so the VALUES are all the same and asserting
+	// them would measure nothing; the WIDTHS are the property, and they are read
+	// for two different request lengths so that a hardcoded 3 fails too.
+	const feeHistory = await safe(() =>
 		pub.getFeeHistory({blockCount: 4, rewardPercentiles: [25, 50, 75]}),
 	);
+	const rewardWidths = (fh: unknown): number[] =>
+		((fh as {reward?: unknown[][]} | undefined)?.reward ?? []).map(
+			(r) => r.length,
+		);
+	const feeHistoryRewardWidths = {
+		threePercentiles: rewardWidths(feeHistory),
+		onePercentile: rewardWidths(
+			await safe(() =>
+				pub.getFeeHistory({blockCount: 2, rewardPercentiles: [50]}),
+			),
+		),
+	};
 
 	// --- deploy via walletClient (signed) + RECEIPT POLLING (waitFor...) ---
 	const deployHash = await wallet.deployContract({
@@ -218,6 +245,7 @@ export async function viemSurfaceProbe(): Promise<SurfaceReport> {
 		watchBlocksFired,
 		callCounts,
 		rawTxNonces,
+		feeHistoryRewardWidths,
 	};
 }
 

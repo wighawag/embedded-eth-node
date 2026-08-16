@@ -2,7 +2,10 @@
  * slim-node-checks.ts — in-browser correctness + honesty assertions for the node,
  * covering the common in-browser-node pitfalls and proving it does NOT have them:
  *   1. LEGACY (type-0) tx receipt does NOT crash (the effectiveGasPrice pitfall).
- *   2. EIP-1559 receipt has effectiveGasPrice too.
+ *   2. EIP-1559 receipt has effectiveGasPrice too, and the RPC TRANSACTION object
+ *      carries the 1559 fee fields only where they mean something: present on a
+ *      type-2 transaction, ABSENT (not `null`) on a legacy one, as geth reports
+ *      them.
  *   3. Account/signing methods fail LOUDLY (method-not-found), never fake success.
  *   4. dump/load persistence round-trips (state survives into a fresh node).
  *   6. The ENGINE seam's honest edges: an engine that cannot start, or cannot
@@ -95,6 +98,34 @@ export async function slimNodeHonestyChecks() {
 			type: r.type,
 			effectiveGasPrice: r.effectiveGasPrice.toString(),
 		};
+
+		// 2) ...AND THE RPC TRANSACTION'S FEE FIELDS, READ BY PRESENCE, which is how
+		// a consumer reads them. `'maxFeePerGas' in tx` is the standard way to tell a
+		// 1559 transaction from a legacy one, so a field that EXISTS and is `null` on
+		// a legacy transaction sends the caller down the 1559 branch, where it dies on
+		// `BigInt(null)` ("Cannot mix BigInt and other types") nowhere near the cause.
+		// geth omits the key entirely; so does this node. The check is deliberately
+		// `in` and not a value comparison: a `null` VALUE passes any equality test a
+		// caller is likely to write, and is exactly the bug.
+		//
+		// Asserted on BOTH transaction types from the SAME node, because "omit them
+		// always" would satisfy the legacy half alone while breaking every 1559
+		// consumer, and read off the raw JSON-RPC object rather than through viem,
+		// which normalises the shape away.
+		const feeFieldsOf = async (hash: string) => {
+			const tx = (await node.request({
+				method: 'eth_getTransactionByHash',
+				params: [hash],
+			})) as Record<string, unknown>;
+			return {
+				type: String(tx.type),
+				hasMaxFeePerGas: 'maxFeePerGas' in tx,
+				hasMaxPriorityFeePerGas: 'maxPriorityFeePerGas' in tx,
+				hasGasPrice: 'gasPrice' in tx,
+			};
+		};
+		out.legacyTxFeeFields = await feeFieldsOf(legacyHash);
+		out.eip1559TxFeeFields = await feeFieldsOf(deployHash);
 	} catch (e) {
 		out.legacyReceipt = {ok: false, error: String((e as Error)?.message ?? e)};
 	}

@@ -68,6 +68,17 @@ test('slim-node EIP-1193 surface under a typical viem/wagmi lifecycle', async ({
 	// No NON--32601 errors: any method we DO answer must answer cleanly.
 	expect(s.errored).toEqual([]);
 
+	// `eth_feeHistory` ANSWERS THE REQUEST IT WAS GIVEN: one `reward` entry per
+	// REQUESTED PERCENTILE, per block. A single entry regardless is well-formed
+	// enough to parse and wrong for anybody who INDEXES it — rocketh asks for three
+	// and reads indices 1 and 2, which came back `undefined` and blew up as "Cannot
+	// mix BigInt and other types" far from this node. The node's fee model is flat,
+	// so every percentile carries the SAME value and asserting the values would
+	// measure nothing; the widths are the property, held for two different request
+	// lengths so a hardcoded 3 fails as loudly as a hardcoded 1.
+	expect(s.feeHistoryRewardWidths.threePercentiles).toEqual([3, 3, 3, 3]);
+	expect(s.feeHistoryRewardWidths.onePercentile).toEqual([1, 1]);
+
 	// Methods viem RELIABLY emits in this lifecycle must be both emitted AND
 	// answered (not -32601). NOTE: now that eth_fillTransaction is implemented,
 	// viem fills gas/fees through it and no longer emits eth_estimateGas/

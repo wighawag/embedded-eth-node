@@ -2,7 +2,9 @@
  * slim-node-checks.spec.ts — in-browser correctness + honesty assertions for the
  * node, run in real Chromium:
  *   - LEGACY (type-0) tx receipt does NOT crash; `effectiveGasPrice` present.
- *   - EIP-1559 receipt has `effectiveGasPrice` too.
+ *   - EIP-1559 receipt has `effectiveGasPrice` too, and the RPC transaction object
+ *     carries the 1559 fee fields only where they mean something: present on a
+ *     type-2 transaction, ABSENT (not `null`) on a legacy one.
  *   - Account/signing + unknown methods throw a real -32601 (never fake success).
  *   - dump/load persistence round-trips into a fresh node.
  *   - State-root mode: `'none'` throws / zero block root; `'trie'` produces a REAL
@@ -38,6 +40,26 @@ test('node honesty + correctness (receipts, gaps, persistence, state-root mode)'
 	expect(r.errors).toEqual([]);
 	expect(c.legacyReceipt.ok).toBe(true); // legacy receipt does NOT crash
 	expect(c.eip1559ReceiptHasEffGasPrice).toBe(true);
+
+	// THE RPC TRANSACTION CARRIES A FEE FIELD ONLY WHERE IT MEANS SOMETHING. A
+	// consumer tells the two transaction types apart with `'maxFeePerGas' in tx`,
+	// so a key that EXISTS and is `null` on a legacy transaction is not cosmetic:
+	// it routes the caller down the 1559 branch, which then dies on `BigInt(null)`
+	// nowhere near the cause. geth omits it; so does this node. Asserted on both
+	// types from the same node, because omitting it always would pass the legacy
+	// half and break every 1559 consumer.
+	expect(c.legacyTxFeeFields).toEqual({
+		type: '0x0',
+		hasMaxFeePerGas: false,
+		hasMaxPriorityFeePerGas: false,
+		hasGasPrice: true,
+	});
+	expect(c.eip1559TxFeeFields).toEqual({
+		type: '0x2',
+		hasMaxFeePerGas: true,
+		hasMaxPriorityFeePerGas: true,
+		hasGasPrice: true,
+	});
 	// account/signing methods + unknown methods throw -32601
 	expect(c.gap_eth_sendTransaction).toBe('threw:-32601');
 	expect(c.gap_eth_accounts).toBe('threw:-32601');

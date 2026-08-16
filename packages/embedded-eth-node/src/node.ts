@@ -998,6 +998,11 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 	}
 
 	function txToRpc(t: SerializedTx) {
+		// The 1559 fee fields are OMITTED for a legacy transaction rather than emitted as
+		// `null`, which is what geth does. The difference is not cosmetic: consumers branch with
+		// `'maxFeePerGas' in tx`, so a present-but-null field sends them down the 1559 path and
+		// they then blow up on `BigInt(null)`. A key that exists only when it means something
+		// keeps that idiom honest.
 		return {
 			hash: t.hash,
 			nonce: numHex(t.nonce),
@@ -1009,8 +1014,10 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 			value: t.value,
 			gas: t.gas,
 			gasPrice: t.gasPrice,
-			maxFeePerGas: t.maxFeePerGas,
-			maxPriorityFeePerGas: t.maxPriorityFeePerGas,
+			...(t.maxFeePerGas == null ? {} : {maxFeePerGas: t.maxFeePerGas}),
+			...(t.maxPriorityFeePerGas == null
+				? {}
+				: {maxPriorityFeePerGas: t.maxPriorityFeePerGas}),
 			input: t.input,
 			type: numHex(t.type),
 			chainId: numHex(chainId),
@@ -1332,15 +1339,23 @@ export async function createNode(options: NodeOptions = {}): Promise<SlimNode> {
 				return numHex(maxPriorityFeePerGas);
 			case 'eth_feeHistory': {
 				const count = Number(BigInt(params[0] ?? '0x1'));
+				// `reward` must carry ONE entry per requested percentile, per block. Returning a
+				// single entry regardless of `rewardPercentiles` breaks any caller that asks for
+				// several and indexes them: rocketh requests [10, 50, 80] and reads index 1 and 2,
+				// which came back `undefined` and blew up as "Cannot mix BigInt and other types"
+				// far from here. This node has a flat fee model, so every percentile is the same
+				// value - but the SHAPE has to match the request.
+				const percentiles = Array.isArray(params[2]) ? params[2] : [];
+				const rewardPerBlock = (
+					percentiles.length > 0 ? percentiles : [50]
+				).map(() => numHex(maxPriorityFeePerGas));
 				return {
 					oldestBlock: numHex(Math.max(0, latestNumber - count + 1)),
 					baseFeePerGas: Array.from({length: count + 1}, () =>
 						numHex(baseFeePerGas),
 					),
 					gasUsedRatio: Array.from({length: count}, () => 0.5),
-					reward: Array.from({length: count}, () => [
-						numHex(maxPriorityFeePerGas),
-					]),
+					reward: Array.from({length: count}, () => rewardPerBlock),
 				};
 			}
 
