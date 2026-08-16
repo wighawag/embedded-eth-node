@@ -31,16 +31,16 @@ const BACKENDS = [
 	'ethereumjs-tuned',
 	'ethereumjs-default',
 	'tevm',
-	'embedded-eth-node',
-	'embedded-eth-node-trusted',
-	'embedded-eth-node-fabricated',
-	// The node WITH the optional `embedded-eth-node/revm` engine installed, on BOTH
+	'webevm',
+	'webevm-trusted',
+	'webevm-fabricated',
+	// The node WITH the optional `webevm/revm` engine installed, on BOTH
 	// halves of the seam: the configuration a consumer actually ships when they opt
 	// into revm, and therefore the one the README's frame number has to come from.
-	// Distinct from both neighbours: `embedded-eth-node` is the same node on
+	// Distinct from both neighbours: `webevm` is the same node on
 	// `@ethereumjs/evm` (so the delta between them IS the engine swap), and `revm`
 	// below is RAW revm owning its own state with no node in the path at all.
-	'embedded-eth-node-revm-engine',
+	'webevm-revm-engine',
 	'revm',
 ] as const;
 
@@ -74,7 +74,7 @@ const collected: Record<string, unknown>[] = [];
  *
  * Story 3 of `work/specs/tasked/revm-engine-behind-eth-call.md` is "I pay
  * nothing for a feature I do not use": a consumer who imports
- * `embedded-eth-node` and never `embedded-eth-node/revm` must ship no revm. That
+ * `webevm` and never `webevm/revm` must ship no revm. That
  * promise is only worth what enforces it, so these numbers are an ASSERTION and
  * not a printed row — measured with the esbuild config below, by
  * `revm-engine-subpath`, the change that added the subpath.
@@ -163,7 +163,7 @@ const collected: Record<string, unknown>[] = [];
  * 420.0 -> 421.1 KB raw / 126.7 -> 127.1 KB gzip, by
  * `sender-recovery-uses-the-engines-ecrecover`: in `senderMode:'recover'`, the
  * node now derives the sender with the ENGINE's `ecrecover` when the installed
- * engine offers one (`embedded-eth-node/revm` does — the `0x01` precompile's own
+ * engine offers one (`webevm/revm` does — the `0x01` precompile's own
  * secp256k1, already in the wasm module), and with `tx.getSenderAddress()` when it
  * does not. The 1.1 KB is `src/sender-recovery.ts`: the message hash, EIP-2's
  * low-`s` rule, the wire `v` -> 0/1 recovery id conversion, and the refusals for
@@ -295,7 +295,7 @@ const collected: Record<string, unknown>[] = [];
  * not compress byte-identically, which is noise rather than growth.
  *
  * MEASURE IT AGAINST A FRESH BUILD, and this is a trap that has already been
- * sprung once. The entry below is `import {createNode} from 'embedded-eth-node'`,
+ * sprung once. The entry below is `import {createNode} from 'webevm'`,
  * which resolves through the package's `exports` map to **`dist/`** — not `src/`.
  * So a `src` change that has not been rebuilt is INVISIBLE here, and re-pinning
  * against a stale `dist` pins a number CI will not reproduce (it builds first).
@@ -378,7 +378,7 @@ for (const backend of BACKENDS) {
 				).toBe(`${key}=${gasReference[key]}`);
 		}
 
-		// NOTE: embedded-eth-node's own honesty/correctness/conformance assertions
+		// NOTE: webevm's own honesty/correctness/conformance assertions
 		// live in the library package's test suite (slim-node-checks, conformance,
 		// statetest, viem-surface, persistence-reload). This benchmark only measures
 		// the cross-backend perf + asserts keccak-chain equality above.
@@ -419,10 +419,8 @@ test('every backend contributed to the gate', () => {
 	// interpreter is exactly the change this gate exists to catch, and the row it
 	// runs in must not be able to drop out quietly. Its gas is compared against
 	// the JS node and raw revm alike — they all sit in `gasReference`.
-	const onRevm = collected.find(
-		(c) => c.backend === 'embedded-eth-node-revm-engine',
-	);
-	const jsNode = collected.find((c) => c.backend === 'embedded-eth-node');
+	const onRevm = collected.find((c) => c.backend === 'webevm-revm-engine');
+	const jsNode = collected.find((c) => c.backend === 'webevm');
 	expect(onRevm?.computeGas).toBe(gasReference.computeGas);
 	expect(onRevm?.keccakGas).toBe(gasReference.keccakGas);
 	expect(onRevm?.keccakResult).toBe(keccakReference);
@@ -443,12 +441,12 @@ test('bundle size per backend (raw + gzip)', async () => {
 	let defaultEntryInputs: string[] = [];
 	for (const backend of BACKENDS) {
 		// the trusted/fabricated rows are the SAME entry point as
-		// 'embedded-eth-node' (only a node option and the send path differ), so they
+		// 'webevm' (only a node option and the send path differ), so they
 		// add no bytes and need no separate size entry. The revm-engine row DOES
-		// import a second entry point (`embedded-eth-node/revm`), but what it costs
+		// import a second entry point (`webevm/revm`), but what it costs
 		// is the `.wasm` — already weighed in its own row below, and fetched at
 		// runtime, which esbuild cannot weigh anyway.
-		if (backend.startsWith('embedded-eth-node-')) continue;
+		if (backend.startsWith('webevm-')) continue;
 		// revm's cost is the .wasm itself, reported separately below; esbuild cannot
 		// weigh a module that is fetched at runtime.
 		if (backend === 'revm') continue;
@@ -457,8 +455,8 @@ test('bundle size per backend (raw + gzip)', async () => {
 				? `import {makeTevmBackend} from '${resolve(here, './helpers/backend-tevm.ts')}'; console.log(makeTevmBackend);`
 				: backend === 'ethereumjs-default'
 					? `import {makeEthereumjsDefaultBackend} from '${resolve(here, './helpers/backend-ethereumjs.ts')}'; console.log(makeEthereumjsDefaultBackend);`
-					: backend === 'embedded-eth-node'
-						? `import {createNode} from 'embedded-eth-node'; console.log(createNode);`
+					: backend === 'webevm'
+						? `import {createNode} from 'webevm'; console.log(createNode);`
 						: `import {makeEthereumjsTunedBackend} from '${resolve(here, './helpers/backend-ethereumjs.ts')}'; console.log(makeEthereumjsTunedBackend);`;
 		const out = await esbuild.build({
 			stdin: {contents: entry, resolveDir: here, loader: 'ts'},
@@ -489,7 +487,7 @@ test('bundle size per backend (raw + gzip)', async () => {
 			define: {global: 'globalThis'},
 			metafile: true,
 		});
-		if (backend === 'embedded-eth-node')
+		if (backend === 'webevm')
 			defaultEntryInputs = Object.keys(out.metafile.inputs);
 		const raw = out.outputFiles[0].contents;
 		const gz = gzipSync(raw);
@@ -507,16 +505,16 @@ test('bundle size per backend (raw + gzip)', async () => {
 
 	console.log('\n=== bundle sizes ===\n', JSON.stringify(sizes, null, 2));
 
-	// THE DEFAULT ENTRY HAS NOT GROWN. `embedded-eth-node/revm` is a separate
+	// THE DEFAULT ENTRY HAS NOT GROWN. `webevm/revm` is a separate
 	// entry point and the core references only the `Engine` TYPE (erased at
 	// build time), so a consumer who does not opt in ships exactly what they
 	// shipped before revm existed.
 	expect(
-		sizes['embedded-eth-node'].rawKB,
-		`the default entry point grew to ${sizes['embedded-eth-node'].rawKB} KB raw (baseline ${DEFAULT_ENTRY_BASELINE.rawKB} KB) — ` +
+		sizes['webevm'].rawKB,
+		`the default entry point grew to ${sizes['webevm'].rawKB} KB raw (baseline ${DEFAULT_ENTRY_BASELINE.rawKB} KB) — ` +
 			'either something was imported into the core graph, or the growth is intended and this baseline must be re-pinned in the same change',
 	).toBeLessThanOrEqual(DEFAULT_ENTRY_BASELINE.rawKB);
-	expect(sizes['embedded-eth-node'].gzipKB).toBeLessThanOrEqual(
+	expect(sizes['webevm'].gzipKB).toBeLessThanOrEqual(
 		DEFAULT_ENTRY_BASELINE.gzipKB * GZIP_SLACK,
 	);
 	// ...and revm is not in its dependency graph AT ALL. The size bound alone
@@ -524,7 +522,7 @@ test('bundle size per backend (raw + gzip)', async () => {
 	const revmInputs = defaultEntryInputs.filter((p) => p.includes('revm-wasm'));
 	expect(
 		revmInputs,
-		"`revm-wasm` reached the default entry point's module graph; it belongs to the `embedded-eth-node/revm` subpath only",
+		"`revm-wasm` reached the default entry point's module graph; it belongs to the `webevm/revm` subpath only",
 	).toEqual([]);
 	expect(defaultEntryInputs.length).toBeGreaterThan(0);
 	console.log(
@@ -572,11 +570,7 @@ test('bundle size per backend (raw + gzip)', async () => {
 	console.log(
 		'\n=== frame budget: the number to cite (REPORTED, not asserted) ===',
 	);
-	for (const key of [
-		'embedded-eth-node',
-		'embedded-eth-node-revm-engine',
-		'revm',
-	] as const) {
+	for (const key of ['webevm', 'webevm-revm-engine', 'revm'] as const) {
 		const c = collected.find((x) => x.backend === key);
 		const ms = typeof c?.frame === 'number' ? c.frame : undefined;
 		console.log(

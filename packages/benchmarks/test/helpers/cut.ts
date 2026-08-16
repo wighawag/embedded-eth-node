@@ -4,9 +4,9 @@
  * shared scenario (deploy + N state txs + read + compute), and returns structured
  * `{results, timings, errors, env}`.
  *
- * This is the BENCHMARK package's cut: it compares embedded-eth-node against raw
+ * This is the BENCHMARK package's cut: it compares webevm against raw
  * @ethereumjs/* backends and tevm. The library's own correctness/conformance
- * tests live in the embedded-eth-node package, not here.
+ * tests live in the webevm package, not here.
  */
 import type {
 	CodeUnderTest,
@@ -32,19 +32,19 @@ const BACKENDS: Record<string, () => EvmBackend> = {
 	tevm: makeTevmBackend,
 	'ethereumjs-default': makeEthereumjsDefaultBackend,
 	'ethereumjs-tuned': makeEthereumjsTunedBackend,
-	'embedded-eth-node': makeSlimNodeBackend,
+	webevm: makeSlimNodeBackend,
 	// same node, ecrecover skipped — isolates the fixed signature-recovery cost
 	// (~1.2ms/tx here, on the default engine) from everything else.
-	'embedded-eth-node-trusted': makeSlimNodeTrustedBackend,
+	'webevm-trusted': makeSlimNodeTrustedBackend,
 	// same again but the client doesn't sign either (dummy signature) — shows the
 	// ceiling of the trusted primitive: NO secp256k1 anywhere in the round trip.
-	'embedded-eth-node-fabricated': makeSlimNodeFabricatedBackend,
-	// the DEFAULT node with the optional `embedded-eth-node/revm` engine installed
+	'webevm-fabricated': makeSlimNodeFabricatedBackend,
+	// the DEFAULT node with the optional `webevm/revm` engine installed
 	// — the configuration a consumer ships when they opt into revm, and the one the
 	// README's frame number should come from. BOTH halves run on revm (reads and
 	// transactions), against the NODE's own state; the raw `revm` row below is the
 	// one that owns its state and drives everything with no node in the path.
-	'embedded-eth-node-revm-engine': makeSlimNodeRevmEngineBackend,
+	'webevm-revm-engine': makeSlimNodeRevmEngineBackend,
 	// revm (Rust) compiled to wasm, from the `revm-wasm` package. It drives
 	// EVERYTHING — deploy, the state-changing txs and the reads — with no
 	// @ethereumjs/* involved, so every row is comparable and the write path is
@@ -53,7 +53,7 @@ const BACKENDS: Record<string, () => EvmBackend> = {
 };
 
 const cut: CodeUnderTest = {
-	name: 'embedded-eth-node-benchmark',
+	name: 'webevm-benchmark',
 
 	async run(ctx): Promise<RunResult> {
 		const errors: string[] = [];

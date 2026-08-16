@@ -8,7 +8,7 @@ covers: []
 
 ## What to build
 
-`embedded-eth-node/revm` admits `shanghai` and `cancun` and refuses everything else by name at construction (`REVM_REFUSED_HARDFORKS`, `docs/adr/0008-the-revm-engine-admits-only-hardforks-it-can-cost.md` and its amendment). Both refusals were the honest call, and the ADR says the door is not meant to stay shut: "nothing in this ADR argues Prague should stay unsupported forever", and it names `work/tasks/backlog/` as where the costing work belongs. This task is that placeholder, cut so a deliberate deferral does not quietly become permanent by neglect (raised by the Gate-2 reviews of `prague-intrinsic-gas-floor-or-refuse` and `intrinsic-gas-charges-eip-3860-on-forks-that-predate-it`).
+`webevm/revm` admits `shanghai` and `cancun` and refuses everything else by name at construction (`REVM_REFUSED_HARDFORKS`, `docs/adr/0008-the-revm-engine-admits-only-hardforks-it-can-cost.md` and its amendment). Both refusals were the honest call, and the ADR says the door is not meant to stay shut: "nothing in this ADR argues Prague should stay unsupported forever", and it names `work/tasks/backlog/` as where the costing work belongs. This task is that placeholder, cut so a deliberate deferral does not quietly become permanent by neglect (raised by the Gate-2 reviews of `prague-intrinsic-gas-floor-or-refuse` and `intrinsic-gas-charges-eip-3860-on-forks-that-predate-it`).
 
 **This task is NOT ready to build as written.** It is a marker with its entry conditions written down. It originally covered TWO families of refusal with different triggers; **family 2 was delivered on 2026-08-02, so only family 1 (`prague`, `osaka`) remains open.** Family 2 is retained below as history because it documents the inversion that makes ADR 0008's body misleading if read alone.
 
@@ -42,7 +42,7 @@ Entry condition: **met.** `wighawag/revm-wasm#4` is fixed in `revm-wasm@0.3.1`, 
 
 #### What family 2 now requires
 
-1. Upgrade `revm-wasm` to `^0.3.1` in `packages/embedded-eth-node` and `packages/benchmarks`, and update the lockfile. This is safe for the currently-admitted set on its own: `shanghai` and `cancun` are unaffected in every measured column.
+1. Upgrade `revm-wasm` to `^0.3.1` in `packages/webevm` and `packages/benchmarks`, and update the lockfile. This is safe for the currently-admitted set on its own: `shanghai` and `cancun` are unaffected in every measured column.
 2. **Gate the EIP-3860 initcode word cost by fork in `src/intrinsic-gas.ts`**, so it is charged from Shanghai onward and not before. This is the design question the task carries, and it is not free: `intrinsicGas(data, isCreate)` takes no fork today, and its whole value is that its two callers (`node.ts` adds it, `src/revm.ts` subtracts it) share ONE answer. Thread the fork through deliberately, keep the function SHARED and unforked, and record the seam decision.
 3. Move `berlin`, `london`, `paris` from `REVM_REFUSED_HARDFORKS` to `REVM_SPEC_BY_HARDFORK`, and drop the now-obsolete `PRE_EIP_3860` reason string.
 4. Assert the restored agreement against the engine, and keep a still-refused fork as the counter-example so the assertions stay load-bearing.

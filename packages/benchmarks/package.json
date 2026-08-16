@@ -1,11 +1,11 @@
 {
-	"name": "embedded-eth-node-benchmarks",
+	"name": "webevm-benchmarks",
 	"version": "0.0.0",
 	"private": true,
-	"description": "Real-Chromium performance + bundle-size benchmarks comparing embedded-eth-node against raw @ethereumjs/* backends and tevm. Not published.",
+	"description": "Real-Chromium performance + bundle-size benchmarks comparing webevm against raw @ethereumjs/* backends and tevm. Not published.",
 	"type": "module",
 	"dependencies": {
-		"embedded-eth-node": "workspace:*"
+		"webevm": "workspace:*"
 	},
 	"devDependencies": {
 		"@ethereumjs/block": "^10.1.2",

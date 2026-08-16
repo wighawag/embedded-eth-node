@@ -42,7 +42,7 @@ Fix them together, since both are the same paragraph.
 
 > Goal: the prose stops undercounting which conformance steps are judged against the trie reference and which are not, and the README says it at the size a README should.
 >
-> FIRST, check this task against current reality: it was written on 2026-08-10 and may have DRIFTED. Count the oracle-is comment blocks in `packages/embedded-eth-node/test/helpers/conformance.ts` yourself rather than trusting the number three here; more steps may have landed since.
+> FIRST, check this task against current reality: it was written on 2026-08-10 and may have DRIFTED. Count the oracle-is comment blocks in `packages/webevm/test/helpers/conformance.ts` yourself rather than trusting the number three here; more steps may have landed since.
 >
 > Consider whether naming a COUNT in prose is the right shape at all, given it has now been wrong twice as steps were added. A formulation that describes the RULE (which classes of bug the reference is structurally blind to, and why) ages better than one that enumerates.
 >

@@ -1,7 +1,7 @@
-# embedded-eth-node-benchmarks
+# webevm-benchmarks
 
 **Private, never-published** benchmark package. It compares
-[`embedded-eth-node`](../embedded-eth-node) against raw `@ethereumjs/*` backends
+[`webevm`](../webevm) against raw `@ethereumjs/*` backends
 and [`tevm`](https://github.com/evmts/tevm) on the SAME scenario (deploy a Counter,
 N `increment()` state txs, a `number()` read, and ADD-loop / keccak256-loop
 compute), in real Chromium via
@@ -15,7 +15,7 @@ tree**. The library package only depends on `@ethereumjs/*` + `@noble/hashes`.
 
 ```sh
 pnpm install          # at the monorepo root
-pnpm --filter embedded-eth-node-benchmarks test
+pnpm --filter webevm-benchmarks test
 ```
 
 ## The `revm` row
@@ -51,21 +51,21 @@ mutating state.
 One caveat when reading the write rows: revm's `transact()` takes the sender
 directly and **never recovers a sender**, so `deploy` and `callAvg` involve no
 secp256k1 at all. The honest comparison for them is the
-`embedded-eth-node-fabricated` row, which also skips both signing and recovery —
+`webevm-fabricated` row, which also skips both signing and recovery —
 not the default row, which pays ~0.3ms to sign plus ~1.2ms to recover (Chromium,
 read off the gaps between these three rows).
 
-## The `embedded-eth-node-revm-engine` row
+## The `webevm-revm-engine` row
 
 The row above is revm's CEILING: raw revm, owning its own state, with no node in
-the path. `embedded-eth-node-revm-engine` is the configuration a consumer
+the path. `webevm-revm-engine` is the configuration a consumer
 actually ships when they opt in —
 
 ```ts
 const node = await createNode({engine: await createRevmEngine({wasm})});
 ```
 
-— the same node as the `embedded-eth-node` row, differing by exactly one
+— the same node as the `webevm` row, differing by exactly one
 `createNode` option, with the node's own dispatch, state adapter and RPC layer on
 top of the interpreter. That delta between the two node rows **is** the engine
 swap; the delta to the raw `revm` row is what the node itself costs.
@@ -124,7 +124,7 @@ included. This package only measures it and gates its gas.
 
 The library's own correctness/conformance/honesty tests (differential conformance,
 GeneralStateTests, viem-surface, persistence-reload, the `evm_set*` cheats, the
-state-root modes) live in the `embedded-eth-node` package, not here.
+state-root modes) live in the `webevm` package, not here.
 
 ## Note on `viem`
 

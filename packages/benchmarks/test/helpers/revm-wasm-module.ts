@@ -3,7 +3,7 @@
  *
  * Two backends need the module: `backend-revm.ts` (raw revm, driving everything)
  * and `backend-slim-node.ts`'s revm-engine row (the node with
- * `embedded-eth-node/revm` installed). Compilation is the expensive half and the
+ * `webevm/revm` installed). Compilation is the expensive half and the
  * scenario runs a backend several times over, so re-fetching and re-compiling per
  * run would show up in the `coldStart` row as an artefact of the harness rather
  * than of the engine under test. Each run still gets its own INSTANCE, its own

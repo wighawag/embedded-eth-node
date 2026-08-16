@@ -25,7 +25,7 @@ The node's own receipt type carries no blob fields on EITHER path, so this is no
 
 ## Acceptance criteria
 
-- [ ] `revm-wasm` is `^0.4.0` in `packages/embedded-eth-node` and `packages/benchmarks`, with the lockfile updated, and nothing else changes behaviour (the upgrade is additive; if anything moves, that is the finding).
+- [ ] `revm-wasm` is `^0.4.0` in `packages/webevm` and `packages/benchmarks`, with the lockfile updated, and nothing else changes behaviour (the upgrade is additive; if anything moves, that is the finding).
 - [ ] A type-3 transaction on a revm-backed node EXECUTES as a type-3 one: the versioned hashes are passed, `BLOBHASH` answers them, and blob gas is charged, matching `@ethereumjs/vm`.
 - [ ] A type-3 receipt carries `blobGasUsed` and `blobGasPrice`, taken from the engine rather than computed in JavaScript, on both engine paths.
 - [ ] A non-blob transaction is unaffected: the two fields are absent from its receipt (or zero, matching what the default engine reports), and its outcome decoding is unchanged.

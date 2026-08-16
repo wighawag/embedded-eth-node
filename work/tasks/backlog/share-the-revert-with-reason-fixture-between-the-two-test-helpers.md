@@ -8,7 +8,7 @@ covers: []
 
 ## What to build
 
-`stop-forwarding-revms-validation-error-text-as-eth-call-return-data` needed a callee that reverts WITH a reason in a second place, and copied the fixture rather than sharing it. `REVERT_WITH_REASON_ADDR` and `REVERT_WITH_REASON_CODE` now exist verbatim in both `packages/embedded-eth-node/test/helpers/conformance.ts` and `packages/embedded-eth-node/test/helpers/revm-engine.ts`.
+`stop-forwarding-revms-validation-error-text-as-eth-call-return-data` needed a callee that reverts WITH a reason in a second place, and copied the fixture rather than sharing it. `REVERT_WITH_REASON_ADDR` and `REVERT_WITH_REASON_CODE` now exist verbatim in both `packages/webevm/test/helpers/conformance.ts` and `packages/webevm/test/helpers/revm-engine.ts`.
 
 The trap is silent rather than loud. Both helpers assert on the payload the fixture produces (a single `0xff` byte). If one copy's bytecode is ever edited, the other helper keeps asserting the same expected payload against a fixture that no longer produces it, and the two stop describing the same thing without anything going red at the point of the edit. This repo already shares the affordability classification vocabulary through `test/helpers/affordability.ts`, so a shared home for test fixtures is an established pattern here rather than a new one.
 

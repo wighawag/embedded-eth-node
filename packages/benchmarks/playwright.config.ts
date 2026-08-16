@@ -15,7 +15,7 @@ import {defineConfig, devices} from '@playwright/test';
 // a game is the frame budget (100 small view reads against 16.6ms for 60fps):
 //
 //                        Chromium        WebKit
-//   embedded-eth-node    12.4ms (75%)    15.0ms (90%)   <- on the edge
+//   webevm    12.4ms (75%)    15.0ms (90%)   <- on the edge
 //   revm-wasm             3.8ms (23%)     5.0ms (30%)
 //
 // The JS node FITS on a quiet machine and falls out of budget under load; revm
@@ -23,7 +23,7 @@ import {defineConfig, devices} from '@playwright/test';
 // drop.
 //
 // BOTH ROWS ABOVE ARE RAW backends, which is not what a consumer ships. The
-// `embedded-eth-node-revm-engine` row measures the node WITH the revm engine
+// `webevm-revm-engine` row measures the node WITH the revm engine
 // installed, and that is the number to cite for the recommended configuration:
 // it keeps essentially all of raw revm's frame win (the node's own dispatch is
 // what remains, and at this call shape it is small). Measured figures, with their

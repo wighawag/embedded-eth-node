@@ -8,7 +8,7 @@ covers: []
 
 ## What to build
 
-Three comments in `packages/embedded-eth-node/src` describe a blob (type-3) transaction as something the node ADMITS and an engine then refuses. It cannot happen: the node cannot PARSE a type-3 transaction at all. `parseTx` hands raw bytes to `@ethereumjs/tx`, whose 4844 constructor throws unless `common.customCrypto.kzg` is set, and the node's `Common` sets only `keccak256`. The throw is above the engine seam, so it is identical on both engines and nothing downstream is reached. This is verified and recorded in `work/notes/observations/the-node-cannot-parse-a-type-3-transaction-at-all.md`.
+Three comments in `packages/webevm/src` describe a blob (type-3) transaction as something the node ADMITS and an engine then refuses. It cannot happen: the node cannot PARSE a type-3 transaction at all. `parseTx` hands raw bytes to `@ethereumjs/tx`, whose 4844 constructor throws unless `common.customCrypto.kzg` is set, and the node's `Common` sets only `keccak256`. The throw is above the engine seam, so it is identical on both engines and nothing downstream is reached. This is verified and recorded in `work/notes/observations/the-node-cannot-parse-a-type-3-transaction-at-all.md`.
 
 The three sites:
 
@@ -22,7 +22,7 @@ This is worth its own task because it is drifting in the wrong direction: the fi
 
 ## Acceptance criteria
 
-- [ ] No comment in `packages/embedded-eth-node/src` describes a type-3 transaction reaching an engine, a receipt, or a validation backstop.
+- [ ] No comment in `packages/webevm/src` describes a type-3 transaction reaching an engine, a receipt, or a validation backstop.
 - [ ] Each of the three sites instead states what is actually true: a type-3 transaction is rejected during parsing, above the engine seam, identically on both engines, and the rejection is an internal `@ethereumjs/tx` error rather than one of the node's own.
 - [ ] The absent `blobGasUsed` / `blobGasPrice` fields are still recorded as a real gap where that is useful, without implying a consumer can observe them missing.
 - [ ] No behaviour change and no changeset: comments only. If you find yourself editing executable code, the scope is wrong.

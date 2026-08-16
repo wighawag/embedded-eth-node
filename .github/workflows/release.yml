@@ -11,9 +11,13 @@ name: release
 # repo + workflow (release.yml) via the trusted publisher registered on the
 # package's npmjs.com settings. The OIDC handshake needs `id-token: write`,
 # Node >= 22, and a recent pnpm; publishes are stamped with provenance.
-# `embedded-eth-node` is already on npm (0.0.1, 0.0.2) with the trusted publisher
-# tied, so every release from the 0.1.0 bump onward goes through this tokenless
-# OIDC flow.
+# RENAMED 2026-08-16: this package was published as `embedded-eth-node` up to
+# 0.4.0 and is `webevm` from 0.5.0 on (`docs/adr/0011-the-package-is-named-webevm.md`).
+# The trusted publisher is per-PACKAGE and is bound to the repo NAME in the OIDC
+# subject claim, so `webevm` needs its own trusted-publisher entry pointing at
+# whatever this repo is called now plus this workflow filename. A repo rename
+# that is not mirrored into that entry breaks publishing with an auth error,
+# even though GitHub still redirects the old repo URL.
 #
 # WHY THIS WORKFLOW DOES NOT RUN THE TEST SUITE, deliberately: `release:ci` runs
 # `format:check` + `build` only. The full matrix (Playwright on Chromium AND

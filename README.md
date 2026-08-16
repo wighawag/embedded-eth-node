@@ -1,4 +1,4 @@
-# embedded-eth-node
+# webevm
 
 A **slim, execution-only** in-browser EIP-1193 Ethereum node on
 [`@ethereumjs/vm`](https://github.com/ethereumjs/ethereumjs-monorepo).
@@ -20,13 +20,13 @@ faking success.
   (Worker) are interchangeable one-liners — the consumer never hand-rolls comlink.
   A Worker that must build something first (an [engine](#engine-ethereumjsevm-default-vs-revm-wasm-opt-in),
   which cannot cross the boundary) calls `exposeNode()` from
-  `embedded-eth-node/worker-host` instead: same api, same client, one line.
+  `webevm/worker-host` instead: same api, same client, one line.
 - **IndexedDB persistence** (`createIndexedDBPersistence()`), verified to survive a
   real page reload (state + balances + `eth_getLogs`).
 - **Swappable ENGINE:** reads (`eth_call`/`eth_estimateGas`) and transactions both
   run on an injected engine — `@ethereumjs/evm` by default, or
   [revm-wasm](#engine-ethereumjsevm-default-vs-revm-wasm-opt-in) via the
-  optional `embedded-eth-node/revm` subpath (measured **2.7× on Chromium /
+  optional `webevm/revm` subpath (measured **2.7× on Chromium /
   3.3× on WebKit** for a 100-read frame, byte-identical gas). One engine answers
   BOTH halves, so `node.engine` names the EVM that ran your reads and executed
   your transactions.
@@ -39,7 +39,7 @@ faking success.
 ## Install
 
 ```sh
-npm install embedded-eth-node
+npm install webevm
 # optional, only if you use the Worker helpers:
 npm install comlink
 ```
@@ -51,7 +51,7 @@ entry/client.)
 ## Usage (main thread)
 
 ```ts
-import {createNode, createIndexedDBPersistence} from 'embedded-eth-node';
+import {createNode, createIndexedDBPersistence} from 'webevm';
 import {createPublicClient, createWalletClient, custom} from 'viem';
 import {privateKeyToAccount} from 'viem/accounts';
 
@@ -81,10 +81,10 @@ win). With `miningConfig: {type:'auto'}` this is the default behaviour.
 
 ```ts
 // worker.ts
-import 'embedded-eth-node/worker-entry'; // calls comlink expose()
+import 'webevm/worker-entry'; // calls comlink expose()
 
 // main thread
-import {createWorkerNode} from 'embedded-eth-node/worker-client';
+import {createWorkerNode} from 'webevm/worker-client';
 const worker = new Worker(new URL('./worker.ts', import.meta.url), {type: 'module'});
 const node = await createWorkerNode({worker, chainId: 31337, miningConfig: {type: 'auto'}});
 // node is the SAME { request, mine, dumpState, loadState, ... } shape — drive it
@@ -101,8 +101,8 @@ and call `exposeNode()`:
 
 ```ts
 // my-worker.ts
-import {exposeNode} from 'embedded-eth-node/worker-host';
-import {createRevmEngine} from 'embedded-eth-node/revm';
+import {exposeNode} from 'webevm/worker-host';
+import {createRevmEngine} from 'webevm/revm';
 import wasm from 'revm-wasm/revm.wasm'; // your bundler's asset rule
 
 exposeNode({createEngine: () => createRevmEngine({wasm})});
@@ -285,7 +285,7 @@ waste.
 
 **The gap depends on the engine, and it has narrowed.** `'recover'` derives the
 sender with the **installed engine's** `ecrecover` when it has one —
-[`embedded-eth-node/revm`](#engine-ethereumjsevm-default-vs-revm-wasm-opt-in)
+[`webevm/revm`](#engine-ethereumjsevm-default-vs-revm-wasm-opt-in)
 does, at zero additional bytes, since the `0x01` precompile's secp256k1 is already
 in that wasm module. That makes the recovery ~4.3× cheaper (2.02ms → 0.65ms per
 isolated tx), so on a revm-backed node the `'recover'` vs `'trusted'` ratio is
@@ -342,8 +342,8 @@ are unaffected: real signatures already differ per signer and validate anywhere.
 ## Engine: `@ethereumjs/evm` (default) vs revm-wasm (opt-in)
 
 ```ts
-import {createNode} from 'embedded-eth-node';
-import {createRevmEngine} from 'embedded-eth-node/revm';
+import {createNode} from 'webevm';
+import {createRevmEngine} from 'webevm/revm';
 import {wasmUrl} from 'revm-wasm/wasm-url';
 
 const js = await createNode({}); // default — everything on @ethereumjs/evm
@@ -366,7 +366,7 @@ on and would otherwise run two.
   as it has always behaved — including the pure-read checkpoint/revert and the
   EIP-2929 warm/access reset for a read, and full validation for a transaction.
   Costs nothing: no option, no extra bytes, no wasm.
-- **revm-wasm** (opt-in, `embedded-eth-node/revm`): the same reads AND the same
+- **revm-wasm** (opt-in, `webevm/revm`): the same reads AND the same
   transactions on [revm](https://github.com/bluealloy/revm) compiled to
   WebAssembly, charging **byte-identical gas**
   ([ADR 0003](docs/adr/0003-revm-wasm-is-the-engine-direction.md)). It reads and
@@ -504,8 +504,8 @@ Caveats, all of them real:
 
   ```ts
   // my-worker.ts
-  import {exposeNode} from 'embedded-eth-node/worker-host';
-  import {createRevmEngine} from 'embedded-eth-node/revm';
+  import {exposeNode} from 'webevm/worker-host';
+  import {createRevmEngine} from 'webevm/revm';
   import wasm from 'revm-wasm/revm.wasm';
 
   exposeNode({createEngine: () => createRevmEngine({wasm})});
@@ -513,9 +513,9 @@ Caveats, all of them real:
 
   **That recipe is executed, not described.** This repository runs exactly those
   lines on Chromium and WebKit on every test run. The module is
-  `packages/embedded-eth-node/test/helpers/revm-worker.ts` and the spec driving
-  it is `packages/embedded-eth-node/test/revm-worker.spec.ts`, both on
-  [GitHub](https://github.com/wighawag/embedded-eth-node/tree/main/packages/embedded-eth-node/test)
+  `packages/webevm/test/helpers/revm-worker.ts` and the spec driving
+  it is `packages/webevm/test/revm-worker.spec.ts`, both on
+  [GitHub](https://github.com/wighawag/webevm/tree/main/packages/webevm/test)
   (they are test files in the repository, not files inside your `node_modules`;
   the snippet above is what you copy). What that run proves: the engine identity
   crossing the boundary reads `revm-wasm`, the reference execution gas measured
@@ -539,7 +539,7 @@ Caveats, all of them real:
   the benchmark suite asserts both that bound and that `revm-wasm` is absent from
   the default entry's module graph. Opting in adds the `.wasm` itself: 1.17 MB
   raw, 413 KB gzipped, fetched or bundled only by
-  `import 'embedded-eth-node/revm'`.
+  `import 'webevm/revm'`.
 
 **An engine that cannot come up takes the node down with it.** There is no
 fallback path anywhere: if an engine fails to initialise, or refuses this node's
@@ -663,11 +663,11 @@ vendored fixtures in `test/fixtures/`). They are dev-only and not published (`fi
 ships `dist` + `src`). The library's devDependencies are deliberately minimal
 (viem + the Playwright harness toolchain) — they do **not** include `tevm`.
 
-The cross-backend **performance/bundle-size benchmark** (embedded-eth-node vs raw
+The cross-backend **performance/bundle-size benchmark** (webevm vs raw
 `@ethereumjs/*` and `tevm`) lives in a separate, private, never-published package
-(`packages/embedded-eth-node-benchmarks`) so that `tevm` and the benchmark
+(`packages/benchmarks`) so that `tevm` and the benchmark
 toolchain stay out of this library's dependency tree. Run it with
-`pnpm --filter embedded-eth-node-benchmarks test`.
+`pnpm --filter webevm-benchmarks test`.
 
 ## License
 

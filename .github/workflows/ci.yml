@@ -48,14 +48,14 @@ jobs:
       - run: pnpm build
 
       - name: install browser
-        run: pnpm --filter embedded-eth-node exec playwright install --with-deps ${{ matrix.browser }}
+        run: pnpm --filter webevm exec playwright install --with-deps ${{ matrix.browser }}
 
       # Correctness + honesty suite: differential conformance vs a trie-backed
       # @ethereumjs/vm reference, GeneralStateTests, the viem surface, persistence
       # across a real reload, the Worker wrapper, and senderMode:'trusted'
       # equivalence.
       - name: library tests
-        run: pnpm --filter embedded-eth-node exec playwright test --project=${{ matrix.browser }}
+        run: pnpm --filter webevm exec playwright test --project=${{ matrix.browser }}
 
       # The cross-backend GATE. What is asserted here is load-INVARIANT --
       # execution-gas equality and keccak-chain equality across every backend --
@@ -68,4 +68,4 @@ jobs:
       # no build step and no artifact to fetch. The suite fails if any backend
       # drops out, because a gate that silently loses a backend is not a gate.
       - name: cross-backend gate
-        run: pnpm --filter embedded-eth-node-benchmarks test --project=${{ matrix.browser }}
+        run: pnpm --filter webevm-benchmarks test --project=${{ matrix.browser }}

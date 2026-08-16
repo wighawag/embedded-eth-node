@@ -1,5 +1,5 @@
 {
-  "name": "embedded-eth-node-monorepo",
+  "name": "webevm-monorepo",
   "private": true,
   "type": "module",
   "devDependencies": {

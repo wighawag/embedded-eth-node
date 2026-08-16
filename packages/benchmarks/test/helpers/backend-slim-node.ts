@@ -1,5 +1,5 @@
 /**
- * backend-slim-node.ts — the 4th benchmark backend: embedded-eth-node, driven the
+ * backend-slim-node.ts — the 4th benchmark backend: webevm, driven the
  * way a real dapp drives a node: a viem walletClient with a LOCAL account signs
  * txs, hitting `eth_sendRawTransaction` over the node's EIP-1193 `request()`.
  * Reads via `eth_call`. No account methods on the node.
@@ -14,8 +14,8 @@
  * BOTH halves of the seam, so the row measures reads AND transactions on revm,
  * against the node's own state. See {@link EngineChoice} below.
  */
-import {createNode, type Engine, type SlimNode} from 'embedded-eth-node';
-import {createRevmEngine} from 'embedded-eth-node/revm';
+import {createNode, type Engine, type SlimNode} from 'webevm';
+import {createRevmEngine} from 'webevm/revm';
 import {
 	createWalletClient,
 	createPublicClient,
@@ -70,7 +70,7 @@ type SendMode = 'recover' | 'trusted' | 'fabricated';
  * and its transactions.
  *
  *   'default'  the node's own `@ethereumjs/evm`, i.e. `createNode()` untouched.
- *   'revm'     `createRevmEngine()` from the optional `embedded-eth-node/revm`
+ *   'revm'     `createRevmEngine()` from the optional `webevm/revm`
  *              subpath — the configuration a consumer opts into.
  *
  * BOTH HALVES MOVE, AND SO DOES THE RECOVERY. The engine executes this row's
@@ -164,14 +164,12 @@ function makeBackend(
 	return {
 		name:
 			engineChoice === 'revm'
-				? 'embedded-eth-node + revm engine (signed eth_sendRawTransactionSync, auto-mine)'
+				? 'webevm + revm engine (signed eth_sendRawTransactionSync, auto-mine)'
 				: {
-						recover:
-							'embedded-eth-node (signed eth_sendRawTransactionSync, auto-mine)',
-						trusted:
-							"embedded-eth-node senderMode:'trusted' (signed, no ecrecover)",
+						recover: 'webevm (signed eth_sendRawTransactionSync, auto-mine)',
+						trusted: "webevm senderMode:'trusted' (signed, no ecrecover)",
 						fabricated:
-							"embedded-eth-node senderMode:'trusted' (fabricated sig — no secp256k1 at all)",
+							"webevm senderMode:'trusted' (fabricated sig — no secp256k1 at all)",
 					}[mode],
 
 		async setup() {

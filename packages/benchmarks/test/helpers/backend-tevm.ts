@@ -111,7 +111,7 @@ export function makeTevmBackend(): EvmBackend {
  * unconditionally reading `tx.maxFeePerGas` — `undefined` on a *legacy* (type-0,
  * gasPrice) tx — so the receipt handler threw. We send a *signed legacy* tx and
  * try to read its receipt, returning a structured outcome (never throwing) so the
- * benchmark can record exactly how it behaves on this version. (embedded-eth-node
+ * benchmark can record exactly how it behaves on this version. (webevm
  * itself handles this correctly — see slim-node-checks.ts.)
  */
 export async function reproduceLegacyTxReceiptBite(): Promise<{

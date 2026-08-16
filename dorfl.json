@@ -1,6 +1,6 @@
 {
 	"dorflCmd": "node_modules/.bin/dorfl",
-	"prepare": "pnpm install && pnpm --filter embedded-eth-node exec playwright install chromium webkit",
+	"prepare": "pnpm install && pnpm --filter webevm exec playwright install chromium webkit",
 	"verify": "pnpm format:check && pnpm build && pnpm test",
 	"harness": "pi",
 	"autoBuild": false,
