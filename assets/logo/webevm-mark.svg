@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="webevm">
+	<title>webevm</title>
+	<desc>The Ethereum octahedron cut into horizontal slices: the EVM, executing in steps, inside the page.</desc>
+	<g stroke-width="1.5" stroke-linejoin="round" stroke="none">
+		<path fill="#A3B5FA" d="M128 26 128 41.6 118.13 41.6 128 26Z" />
+		<path fill="#5B75E8" d="M128 26 137.87 41.6 128 41.6Z" />
+		<path fill="#9FB1F9" d="M128 46.6 128 62.2 105.1 62.2 114.97 46.6Z" />
+		<path fill="#5771E4" d="M128 46.6 141.03 46.6 150.9 62.2 128 62.2Z" />
+		<path fill="#9AAEF8" d="M128 67.2 128 82.8 92.07 82.8 101.93 67.2Z" />
+		<path fill="#546DE1" d="M128 67.2 154.07 67.2 163.93 82.8 128 82.8Z" />
+		<path fill="#96AAF8" d="M128 87.8 128 103.4 79.03 103.4 88.9 87.8Z" />
+		<path fill="#5069DD" d="M128 87.8 167.1 87.8 176.97 103.4 128 103.4Z" />
+		<path fill="#92A6F7" d="M128 108.4 128 124 66 124 75.87 108.4Z" />
+		<path fill="#4D65DA" d="M128 108.4 180.13 108.4 190 124 128 124Z" />
+		<path fill="#8DA3F6" d="M128 137 128 151.6 82.14 151.6 73.6 137Z" />
+		<path fill="#4961D6" d="M128 137 182.4 137 173.86 151.6 128 151.6Z" />
+		<path fill="#899FF5" d="M128 156.6 128 171.2 93.61 171.2 85.07 156.6Z" />
+		<path fill="#465DD3" d="M128 156.6 170.93 156.6 162.39 171.2 128 171.2Z" />
+		<path fill="#859BF5" d="M128 176.2 128 190.8 105.07 190.8 96.53 176.2Z" />
+		<path fill="#4259CF" d="M128 176.2 159.47 176.2 150.93 190.8 128 190.8Z" />
+		<path fill="#8098F4" d="M128 195.8 128 210.4 116.54 210.4 108 195.8Z" />
+		<path fill="#3F55CC" d="M128 195.8 148 195.8 139.46 210.4 128 210.4Z" />
+		<path fill="#7C94F3" d="M128 215.4 128 230 119.46 215.4Z" />
+		<path fill="#3B51C8" d="M128 215.4 136.54 215.4 128 230Z" />
+	</g>
+</svg>

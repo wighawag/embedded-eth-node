@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="webevm">
+	<title>webevm</title>
+	<desc>Single-colour mark: the sliced Ethereum octahedron. Inherits currentColor.</desc>
+	<g fill="currentColor">
+		<path d="M128 26 137.87 41.6 118.13 41.6Z" />
+		<path d="M114.97 46.6 141.03 46.6 150.9 62.2 105.1 62.2Z" />
+		<path d="M101.93 67.2 154.07 67.2 163.93 82.8 92.07 82.8Z" />
+		<path d="M88.9 87.8 167.1 87.8 176.97 103.4 79.03 103.4Z" />
+		<path d="M75.87 108.4 180.13 108.4 190 124 66 124Z" />
+		<path d="M73.6 137 182.4 137 173.86 151.6 82.14 151.6Z" />
+		<path d="M85.07 156.6 170.93 156.6 162.39 171.2 93.61 171.2Z" />
+		<path d="M96.53 176.2 159.47 176.2 150.93 190.8 105.07 190.8Z" />
+		<path d="M108 195.8 148 195.8 139.46 210.4 116.54 210.4Z" />
+		<path d="M119.46 215.4 136.54 215.4 128 230Z" />
+	</g>
+</svg>

@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-6 10 434 128" width="434" height="128" role="img" aria-label="webevm">
+	<title>webevm</title>
+	<desc>webevm horizontal lockup: sliced-octahedron mark plus outlined geometric wordmark.</desc>
+	<g transform="translate(-37.53 1.22) scale(0.57)">
+		<path fill="#A3B5FA" d="M128 26 128 41.6 118.13 41.6 128 26Z" />
+		<path fill="#5B75E8" d="M128 26 137.87 41.6 128 41.6Z" />
+		<path fill="#9FB1F9" d="M128 46.6 128 62.2 105.1 62.2 114.97 46.6Z" />
+		<path fill="#5771E4" d="M128 46.6 141.03 46.6 150.9 62.2 128 62.2Z" />
+		<path fill="#9AAEF8" d="M128 67.2 128 82.8 92.07 82.8 101.93 67.2Z" />
+		<path fill="#546DE1" d="M128 67.2 154.07 67.2 163.93 82.8 128 82.8Z" />
+		<path fill="#96AAF8" d="M128 87.8 128 103.4 79.03 103.4 88.9 87.8Z" />
+		<path fill="#5069DD" d="M128 87.8 167.1 87.8 176.97 103.4 128 103.4Z" />
+		<path fill="#92A6F7" d="M128 108.4 128 124 66 124 75.87 108.4Z" />
+		<path fill="#4D65DA" d="M128 108.4 180.13 108.4 190 124 128 124Z" />
+		<path fill="#8DA3F6" d="M128 137 128 151.6 82.14 151.6 73.6 137Z" />
+		<path fill="#4961D6" d="M128 137 182.4 137 173.86 151.6 128 151.6Z" />
+		<path fill="#899FF5" d="M128 156.6 128 171.2 93.61 171.2 85.07 156.6Z" />
+		<path fill="#465DD3" d="M128 156.6 170.93 156.6 162.39 171.2 128 171.2Z" />
+		<path fill="#859BF5" d="M128 176.2 128 190.8 105.07 190.8 96.53 176.2Z" />
+		<path fill="#4259CF" d="M128 176.2 159.47 176.2 150.93 190.8 128 190.8Z" />
+		<path fill="#8098F4" d="M128 195.8 128 210.4 116.54 210.4 108 195.8Z" />
+		<path fill="#3F55CC" d="M128 195.8 148 195.8 139.46 210.4 128 210.4Z" />
+		<path fill="#7C94F3" d="M128 215.4 128 230 119.46 215.4Z" />
+		<path fill="#3B51C8" d="M128 215.4 136.54 215.4 128 230Z" />
+	</g>
+	<g transform="translate(102.5 0)" fill="none" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+		<g transform="translate(0 0)" stroke="#1E2333"><path d="M0 60 11 100 22 68 33 100 44 60" /></g>
+		<g transform="translate(58 0)" stroke="#1E2333"><path d="M40 80H0" /><path d="M40 80A20 20 0 1 0 35.3 92.9" /></g>
+		<g transform="translate(114 0)" stroke="#1E2333"><path d="M0 100V48" /><circle cx="20" cy="80" r="20" /></g>
+		<g transform="translate(170 0)" stroke="#4E68DC"><path d="M40 80H0" /><path d="M40 80A20 20 0 1 0 35.3 92.9" /></g>
+		<g transform="translate(226 0)" stroke="#4E68DC"><path d="M0 60 11 100 22 60" /></g>
+		<g transform="translate(262 0)" stroke="#4E68DC"><path d="M0 100V60" /><path d="M0 73A13 13 0 0 1 26 73V100" /><path d="M26 73A13 13 0 0 1 52 73V100" /></g>
+	</g>
+</svg>

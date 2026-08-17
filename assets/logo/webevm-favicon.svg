@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="webevm">
+	<title>webevm</title>
+	<desc>Small-size cut of the mark: six thick slices, tuned for 16-32px.</desc>
+	<g fill="#4E68DC" transform="translate(-2.82 -2.82) scale(0.15)">
+		<path d="M128 26 144.87 52.67 111.13 52.67Z" />
+		<path d="M105.44 61.67 150.56 61.67 167.44 88.33 88.56 88.33Z" />
+		<path d="M82.87 97.33 173.13 97.33 190 124 66 124Z" />
+		<path d="M73.6 137 182.4 137 167.77 162 88.23 162Z" />
+		<path d="M93.49 171 162.51 171 147.89 196 108.11 196Z" />
+		<path d="M113.38 205 142.62 205 128 230Z" />
+	</g>
+</svg>
