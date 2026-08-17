@@ -16,6 +16,7 @@ Everything is drawn from paths and primitives, so each file is self-contained: n
 | `webevm-wordmark-dark.svg` | Horizontal lockup on dark backgrounds. |
 | `webevm-wordmark-mono.svg` | Horizontal lockup in one colour, inherits `currentColor`. |
 | `webevm-favicon.svg` | Small-size cut: six thick slices instead of ten thin ones. Use below 48px, where the fine cuts smear shut. |
+| `preview.svg` / `preview.png` | 1280x640 social card (GitHub repo preview, OG image). The PNG is generated from the SVG. |
 
 The wordmark letters are outlined geometry, not text, so nothing depends on an installed font and the file rasterises identically everywhere.
 
@@ -48,6 +49,12 @@ Favicon:
 
 ```sh
 inkscape webevm-mark.svg -o webevm-mark-512.png -w 512
+```
+
+The social card is the one file that has to ship as a raster, since GitHub and the OG scrapers will not take an SVG. Regenerate it from its source after any change to the lockup:
+
+```sh
+inkscape preview.svg -o preview.png -w 1280 -h 640
 ```
 
 ## Room to move
